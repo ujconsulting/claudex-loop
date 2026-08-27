@@ -1,0 +1,44 @@
+# Which model does which step. Copy to .claudex.yaml and edit.
+# Repo config wins over ~/.claude/claudex.yaml, which wins over built-in defaults.
+# Check with:  python scripts/claudex_roles.py --explain
+# Full reference and the reasoning: ROLES.md
+
+roles:
+  plan:        claude    # Claude is in the conversation and holds project context
+  plan-review: codex     # graded cold by a foreign context
+  build:       claude
+  code-review: codex
+  docs:        claude
+  docs-review: codex
+
+actors:
+  codex:
+    model: gpt-5.6-terra   # NOT sol - it runs into the 10-minute ceiling on real plans
+    effort: high
+    sandbox: read-only     # adversary roles may never be anything else
+  claude:
+    fresh_subagent: true   # as a reviewer, never the orchestrator that built it
+  fallback: [lmstudio]     # when the assigned actor is out of quota - user decides, never automatic
+
+rules:
+  producer_never_reviews: true      # refuses to resolve when maker == grader
+  write_access: [plan, build, docs] # only these may open a sandbox
+  adversary_read_only: true
+
+# --- Delegation: hand the build to Codex, and the reviewer flips with it -------
+# Use when Claude's context is the bottleneck (mechanical migrations, wide
+# refactors, a bug with a known repro). This is the only arrangement that opens
+# a sandbox.
+#
+# roles:
+#   build:       codex
+#   code-review: claude
+
+# --- Dual draft: both models plan the same task blind, then grade each other ---
+# Costs two plans. Worth it where a wrong problem framing is expensive - data
+# models, tenant isolation, migrations - because a reviewer reading the
+# producer's document inherits its framing.
+#
+# roles:
+#   plan:        [claude, codex]
+#   plan-review: cross

@@ -1,9 +1,9 @@
 ---
-name: codex-code-review
-description: A parameterizable SECOND review gate that runs AFTER the build and after the primary review (the post-build cross-inspection, or whatever review your flow ran first). A fresh read-only Codex session judges the finished work on up to five acceptance dimensions — dod (everything implemented, Definition of Done met), quality (readability, clean-code rules, documentation), security, docs (documentation completeness and docstring coverage of the diff), tests (are the changed paths actually covered, and do the tests fail when the code is broken) — each with its own verdict line, findings arbitrated by Claude, one bounded recheck after fixes. Use when the user says "/codex-code-review", "second review", "acceptance review", "DoD check", "verify the build against the plan", "code quality review of what we just built", "security review of the change", or at the end of a claudex-loop/codex-build run when an extra acceptance gate is wanted. Scope is selectable: `scope=dod,quality,security,docs,tests` (default: `dod,quality,security`; add `docs,tests` whenever the diff changes behaviour). NOT a plan review (that is codex-plan-review) and NOT the primary correctness inspection (that is claudex-loop's built-in post-build cross-inspection) — this is the acceptance layer on top.
+name: code-review
+description: A parameterizable SECOND review gate that runs AFTER the build and after the primary review (the post-build cross-inspection, or whatever review your flow ran first). A fresh read-only Codex session judges the finished work on up to five acceptance dimensions — dod (everything implemented, Definition of Done met), quality (readability, clean-code rules, documentation), security, docs (documentation completeness and docstring coverage of the diff), tests (are the changed paths actually covered, and do the tests fail when the code is broken) — each with its own verdict line, findings arbitrated by Claude, one bounded recheck after fixes. Use when the user says "/code-review", "second review", "acceptance review", "DoD check", "verify the build against the plan", "code quality review of what we just built", "security review of the change", or at the end of a claudex-loop/build run when an extra acceptance gate is wanted. Scope is selectable: `scope=dod,quality,security,docs,tests` (default: `dod,quality,security`; add `docs,tests` whenever the diff changes behaviour). NOT a plan review (that is plan-review) and NOT the primary correctness inspection (that is claudex-loop's built-in post-build cross-inspection) — this is the acceptance layer on top.
 ---
 
-# codex-code-review — Post-Build Acceptance Review (second gate)
+# code-review — Post-Build Acceptance Review (second gate)
 
 The built-in post-build cross-inspection answers *"does the diff implement the
 plan correctly?"*. This skill is the **acceptance layer on top** — a second,
@@ -21,6 +21,20 @@ Doctrine unchanged: *whoever made the thing never checks the thing.* The
 verifier is a **fresh** Codex session — not the plan-review thread, not the
 build thread — so it sees the result cold.
 
+## Actor (resolved, never assumed)
+
+This skill does not decide which model runs it. Before anything else, resolve
+`code-review` and check the gates:
+
+```bash
+python scripts/claudex_roles.py --explain
+```
+
+Use the actor it prints — the diff being graded was written by `roles.build`. **A non-zero exit means stop:** the role
+assignment violates a gate (a maker set to grade its own work, or an adversary
+role with an open sandbox), and no run may start on it. Where this document says
+"Codex" or "Claude" below, read it as the resolved actor for that role.
+Reference: `ROLES.md`.
 ## Tunables (read from skill args, else default)
 
 | Var | Default | Meaning |
@@ -105,10 +119,10 @@ Echo the resolved values (and the active Codex model, read from
 Write the assembled prompt to a temp file and feed it via **stdin** — never as
 a command-line argument: with the diff inlined the prompt easily exceeds the
 OS argument-size limit ("Argument list too long", found the first time this
-skill reviewed its own diff). Otherwise codex-plan-review mechanics apply:
+skill reviewed its own diff). Otherwise plan-review mechanics apply:
 
 ```bash
-codex exec -s read-only --json -o /tmp/codex-code-review.txt - \
+codex exec -s read-only --json -o /tmp/code-review.txt - \
   < /tmp/verify-prompt.txt 2>/tmp/codex-stderr.txt | grep '"type":"thread.started"'
 ```
 
@@ -122,7 +136,7 @@ via stdin the same way.
 ### Step 3 — Arbitrate and fix (Claude has final say)
 
 1. Append to `LOG_FILE` **the moment the reply arrives**:
-   `## Second review (codex-code-review) — <scopes> — <model>` + the full report
+   `## Second review (code-review) — <scopes> — <model>` + the full report
    verbatim. This happens BEFORE arbitration and regardless of the outcome —
    an invalid reply is logged too, as `## Second review — INVALID ATTEMPT
    (<reason>), does not count` (a fallback run does this itself via
@@ -206,7 +220,7 @@ to the user to decide. Never average a red scope away — `SECURITY: FAIL` with
      python scripts/fallback_review.py --chain --plan /tmp/verify-input.md \
        --system-file /tmp/verify-prompt.txt \
        --require-verdicts "DOD:COMPLETE|INCOMPLETE,QUALITY:ACCEPTABLE|REVISE,SECURITY:PASS|FAIL,DOCS:COMPLETE|INCOMPLETE,TESTS:ADEQUATE|INSUFFICIENT" \
-       --out /tmp/codex-code-review.txt
+       --out /tmp/code-review.txt
      ```
 
      `--system-file` carries the Step-2 verify prompt (trimmed to the selected

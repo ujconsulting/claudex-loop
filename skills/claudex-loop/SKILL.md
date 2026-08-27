@@ -1,6 +1,6 @@
 ---
 name: claudex-loop
-description: Four-phase plan hardening (renamed from /crucible 2026-08-16; old triggers still work) — supersedes /grill-me-codex and /grill-with-docs-codex. PHASE 0 RECON — Claude scouts first (codebase + docs on brownfield; prior art, stack, and pitfalls research on greenfield) and drafts an assumptions ledger. PHASE 1 INTERROGATE — confirm the ledger in one batch, then question only the load-bearing decisions one at a time (each with why-it-matters, a recommendation, and what-breaks-if-we-guess-wrong), cosmetic ones batched, with a visible decision map and an accept-all-recommendations escape hatch. PHASE 2 REVIEW — the locked plan goes to PLAN.md and OpenAI Codex adversarially reviews it in a read-only sandbox (VERDICT: APPROVED/REVISE); Claude revises and re-submits to the SAME Codex session until APPROVED or MAX_ROUNDS, then you sign off before any code. PHASE 3 BUILD (optional) — you pick the builder and the models swap jobs: Codex builds via codex-build and Claude reads the full diff + runs the proof itself; Claude builds and a fresh read-only Codex session cross-inspects the diff (on by default, logged opt-out only); either way you approve the final diff. Use when the user says "/claudex-loop", "claudex this", "run the claudex loop", "/crucible" (legacy), "put this through the crucible", "crucible this plan", "grill me then have codex review", "stress-test this plan before we build", or is about to build something high-stakes (auth, schema, concurrency, migrations, payments, greenfield architecture) and wants alignment AND a cross-model sanity check first. Locked plan needing only the Codex loop → /codex-plan-review. Reviewing already-written code → /codex:review. NOT for trivial changes.
+description: Four-phase plan hardening (renamed from /crucible 2026-08-16; old triggers still work) — supersedes /grill-me-codex and /grill-with-docs-codex. PHASE 0 RECON — Claude scouts first (codebase + docs on brownfield; prior art, stack, and pitfalls research on greenfield) and drafts an assumptions ledger. PHASE 1 INTERROGATE — confirm the ledger in one batch, then question only the load-bearing decisions one at a time (each with why-it-matters, a recommendation, and what-breaks-if-we-guess-wrong), cosmetic ones batched, with a visible decision map and an accept-all-recommendations escape hatch. PHASE 2 REVIEW — the locked plan goes to PLAN.md and OpenAI Codex adversarially reviews it in a read-only sandbox (VERDICT: APPROVED/REVISE); Claude revises and re-submits to the SAME Codex session until APPROVED or MAX_ROUNDS, then you sign off before any code. PHASE 3 BUILD (optional) — you pick the builder and the models swap jobs: Codex builds via build and Claude reads the full diff + runs the proof itself; Claude builds and a fresh read-only Codex session cross-inspects the diff (on by default, logged opt-out only); either way you approve the final diff. Use when the user says "/claudex-loop", "claudex this", "run the claudex loop", "/crucible" (legacy), "put this through the crucible", "crucible this plan", "grill me then have codex review", "stress-test this plan before we build", or is about to build something high-stakes (auth, schema, concurrency, migrations, payments, greenfield architecture) and wants alignment AND a cross-model sanity check first. Locked plan needing only the Codex loop → /plan-review. Reviewing already-written code → /codex:review. NOT for trivial changes.
 ---
 
 # Claudex-Loop — Recon, Interrogate, Review, Build
@@ -18,6 +18,20 @@ You enter at four points only: confirming the assumptions ledger, answering the 
 
 ---
 
+## Actor (resolved, never assumed)
+
+This skill does not decide which model runs it. Before anything else, resolve
+`plan`, `plan-review`, `build` and `code-review` and check the gates:
+
+```bash
+python scripts/claudex_roles.py --explain
+```
+
+Use the actor it prints — it orchestrates all four steps. **A non-zero exit means stop:** the role
+assignment violates a gate (a maker set to grade its own work, or an adversary
+role with an open sandbox), and no run may start on it. Where this document says
+"Codex" or "Claude" below, read it as the resolved actor for that role.
+Reference: `ROLES.md`.
 ## PHASE 0 — RECON (Claude alone)
 
 Before asking the user a single question, determine the terrain and gather what can be gathered without them.
@@ -220,12 +234,12 @@ Full protocol: [FALLBACK.md](../../FALLBACK.md). The short form:
   3. **Skip** — Phase 2 ends without a verdict; log `## Review skipped — Codex quota exhausted (<window>, resets <time>), decided by <user>` and take the plan to sign-off marked **not cross-reviewed**. Same doctrine as `inspect=off`: skipping yes, silent skipping never.
 
 ### Resolution (you sign off — final gate)
-- **APPROVED:** present the final `PLAN_FILE`, a 3-bullet summary of what the loop improved, and the round count. **Optional cold-read before sign-off:** the APPROVED came from the thread that negotiated the plan for N rounds — right for checking prior findings, but it can anchor the closing verdict. Offer one extra pass from a FRESH read-only session (same review prompt, plan inlined, no access to the argument) as a cheap anchoring control — the same fresh-eyes mechanism Phase 3 already uses. Its verdict is advisory: a fresh REVISE doesn't reopen the loop, it goes to the user as a flagged disagreement — and it is logged like any round (`## Cold-read — fresh session` + critique verbatim + Claude's per-finding disposition), never only mentioned in the chat. Then ask: *"Interrogated + survived N rounds of Codex. Implement it now — Codex builds it (`/codex-build`), Claude builds it, or stop here?"* Code only on a yes.
+- **APPROVED:** present the final `PLAN_FILE`, a 3-bullet summary of what the loop improved, and the round count. **Optional cold-read before sign-off:** the APPROVED came from the thread that negotiated the plan for N rounds — right for checking prior findings, but it can anchor the closing verdict. Offer one extra pass from a FRESH read-only session (same review prompt, plan inlined, no access to the argument) as a cheap anchoring control — the same fresh-eyes mechanism Phase 3 already uses. Its verdict is advisory: a fresh REVISE doesn't reopen the loop, it goes to the user as a flagged disagreement — and it is logged like any round (`## Cold-read — fresh session` + critique verbatim + Claude's per-finding disposition), never only mentioned in the chat. Then ask: *"Interrogated + survived N rounds of Codex. Implement it now — Codex builds it (`/build`), Claude builds it, or stop here?"* Code only on a yes.
 - **MAX_ROUNDS hit without APPROVED (deadlock):** do NOT fake convergence. List each unresolved point + Claude's counter-position; hand it to the user to break the tie. A flagged disagreement beats a false "approved."
 
 ### PHASE 3 (optional) — BUILD (Codex ↔ Claude, roles flipped)
 
-If the user picks Codex: invoke the `codex-build` skill with `SPEC_FILE=PLAN.md` and the same `LOG_FILE` — it appends `## Act 3 — Build` to the log, so one artifact tells the whole story (reconned → interrogated → reviewed → built → verified). Roles flip: Codex writes the code with full access, Claude reviews the diff and runs the proof. If the user picks Claude, implement directly as usual — then run the **post-build cross-inspection** (below).
+If the user picks Codex: invoke the `build` skill with `SPEC_FILE=PLAN.md` and the same `LOG_FILE` — it appends `## Act 3 — Build` to the log, so one artifact tells the whole story (reconned → interrogated → reviewed → built → verified). Roles flip: Codex writes the code with full access, Claude reviews the diff and runs the proof. If the user picks Claude, implement directly as usual — then run the **post-build cross-inspection** (below).
 
 ### Post-build cross-inspection (default on every Claude-built path)
 
@@ -237,9 +251,9 @@ The doctrine is *whoever made the thing never checks the thing* — that applies
 
 Opt-out: `inspect=off` at invocation or the user declining at Resolution. Skipping silently is not allowed — the log must show either the inspection or the explicit opt-out. (Cost: one ~2-5 min Codex invocation at the end of the build; forgetting to ask for review is exactly the failure mode this default exists to prevent.)
 
-### Optional second gate — acceptance review (`codex-code-review`)
+### Optional second gate — acceptance review (`code-review`)
 
-After the cross-inspection (whichever model built), offer the **`codex-code-review`** skill as a parameterizable acceptance gate on top: a fresh read-only Codex session judges the finished work on `dod` (everything implemented, Definition of Done met), `quality` (readability, clean code, documentation) and `security` — each with its own verdict line, findings arbitrated by Claude, appended to the same `LOG_FILE`. Scope is selectable (`scope=dod,quality,security`); invoke with `SPEC_FILE=<PLAN_FILE>` and the same `LOG_FILE` so one artifact tells the whole story. Offer it, don't force it — the user opts in per run (high-stakes builds are the natural case).
+After the cross-inspection (whichever model built), offer the **`code-review`** skill as a parameterizable acceptance gate on top: a fresh read-only Codex session judges the finished work on `dod` (everything implemented, Definition of Done met), `quality` (readability, clean code, documentation) and `security` — each with its own verdict line, findings arbitrated by Claude, appended to the same `LOG_FILE`. Scope is selectable (`scope=dod,quality,security`); invoke with `SPEC_FILE=<PLAN_FILE>` and the same `LOG_FILE` so one artifact tells the whole story. Offer it, don't force it — the user opts in per run (high-stakes builds are the natural case).
 
 ---
 
@@ -250,7 +264,7 @@ After the cross-inspection (whichever model built), offer the **`codex-code-revi
 - The loop ALWAYS terminates at `MAX_ROUNDS`.
 - Claude is final arbiter on every REVISE — incorporate good critiques, reject bad ones *with a logged reason*. Don't cave to everything (defeats the cross-model check) and don't ignore it (defeats the point).
 - Code only after the user's final sign-off.
-- `LOG_FILE` is the deliverable — keep the whole argument. **Findings ledger rule:** every reviewer output — Phase 2 rounds, a fallback round (valid or an INVALID attempt, labeled as such), an optional cold-read, the post-build inspection, any recheck, and every `codex-code-review` pass — is appended to `LOG_FILE` **verbatim, at the moment it arrives**, followed by Claude's per-finding disposition (accepted → what changed / rejected → why). Nothing about a review lives only in the chat transcript; if it isn't in the log, it didn't happen. `scripts/fallback_review.py --append-log <LOG_FILE>` does this mechanically for fallback rounds.
+- `LOG_FILE` is the deliverable — keep the whole argument. **Findings ledger rule:** every reviewer output — Phase 2 rounds, a fallback round (valid or an INVALID attempt, labeled as such), an optional cold-read, the post-build inspection, any recheck, and every `code-review` pass — is appended to `LOG_FILE` **verbatim, at the moment it arrives**, followed by Claude's per-finding disposition (accepted → what changed / rejected → why). Nothing about a review lives only in the chat transcript; if it isn't in the log, it didn't happen. `scripts/fallback_review.py --append-log <LOG_FILE>` does this mechanically for fallback rounds.
 - `CONTEXT.md` stays a glossary only — never implementation details.
 
 ## What NOT to do

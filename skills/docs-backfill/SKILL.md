@@ -1,6 +1,6 @@
 ---
-name: codex-code-docs
-description: Backfills missing API documentation across a target — a module, package, directory or whole repo — decoupled from any diff or plan. Claude reads each undocumented unit, writes a docstring in the codebase's own format, and a fresh read-only Codex session grades the result: does every docstring match what the code actually does, or does it merely restate the name. Coverage is measured before and after, and the change is proven docs-only. Use when the user says "/codex-code-docs", "document this module", "write the missing docstrings", "backfill documentation", "our docs coverage is bad", or when a docs-coverage gate fails and the fix is bulk documentation rather than a per-change fix. NOT for reviewing the documentation of a change under review — that is codex-code-review's `docs` scope, which is anchored to a diff. NOT for prose documentation (README, runbooks, guides).
+name: docs-backfill
+description: Backfills missing API documentation across a target — a module, package, directory or whole repo — decoupled from any diff or plan. Claude reads each undocumented unit, writes a docstring in the codebase's own format, and a fresh read-only Codex session grades the result: does every docstring match what the code actually does, or does it merely restate the name. Coverage is measured before and after, and the change is proven docs-only. Use when the user says "/docs-backfill", "document this module", "write the missing docstrings", "backfill documentation", "our docs coverage is bad", or when a docs-coverage gate fails and the fix is bulk documentation rather than a per-change fix. NOT for reviewing the documentation of a change under review — that is code-review's `docs` scope, which is anchored to a diff. NOT for prose documentation (README, runbooks, guides).
 ---
 
 # Codex-Code-Docs — documentation backfill with an adversarial pass
@@ -21,6 +21,20 @@ reader from opening the function.
 | **Output** | a docs-only change + a coverage number measured before and after |
 | **Verdict** | `DOCS: ACCURATE` / `DOCS: INACCURATE` from the review pass |
 
+## Actor (resolved, never assumed)
+
+This skill does not decide which model runs it. Before anything else, resolve
+`docs` and `docs-review` and check the gates:
+
+```bash
+python scripts/claudex_roles.py --explain
+```
+
+Use the actor it prints — the docstrings are written by `roles.docs` and graded by `roles.docs-review`. **A non-zero exit means stop:** the role
+assignment violates a gate (a maker set to grade its own work, or an adversary
+role with an open sandbox), and no run may start on it. Where this document says
+"Codex" or "Claude" below, read it as the resolved actor for that role.
+Reference: `ROLES.md`.
 ## Tunables (read from skill args, else default)
 
 | Var | Default | Meaning |
@@ -107,7 +121,7 @@ Per batch, with the changed units inlined:
 > comment on the code itself; it is not under review here. End with exactly
 > `DOCS: ACCURATE` or `DOCS: INACCURATE`.
 
-Mechanics are `codex-code-review`'s: `-s read-only`, prompt via **stdin**, output
+Mechanics are `code-review`'s: `-s read-only`, prompt via **stdin**, output
 to a file via `cygpath -w`, stderr to a **file** (a 401/429 presents as exit 0
 with empty output), 600 s ceiling, `< /dev/null`. On Windows use
 `powershell -File tools/codex_ro.ps1`. Preflight the quota with
@@ -146,7 +160,7 @@ any behaviour oddities found while reading. If coverage did not reach
 - Don't run it on a whole repo in one batch to "get it over with" — the diff
   becomes unreviewable and one bad convention choice propagates everywhere.
 - Don't use it on a change under review. Documentation of a diff is
-  `codex-code-review scope=docs`, which judges against the plan and the change.
+  `code-review scope=docs`, which judges against the plan and the change.
 - Don't write prose documentation with it — README, runbooks, architecture
   guides need an author who knows the intent, not a unit-by-unit sweep.
 - Don't let `COVERAGE_MIN` drive the run past the point where the remaining

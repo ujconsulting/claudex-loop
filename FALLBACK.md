@@ -132,7 +132,7 @@ The adapter is not plan-review-specific: `--system-file` swaps in any gate's
 own prompt, and `--require-verdicts "NAME:PASSVAL|OTHERVAL,..."` swaps in that
 gate's verdict grammar (every named line must appear — missing means invalid,
 exit 3; the first value of each entry counts as passing for the rubber-stamp
-gate). The `codex-code-review` acceptance gate uses exactly this to run its
+gate). The `code-review` acceptance gate uses exactly this to run its
 DoD/quality/security verdicts over the fallback chain — see its SKILL.md.
 
 ## Log labeling (mandatory)

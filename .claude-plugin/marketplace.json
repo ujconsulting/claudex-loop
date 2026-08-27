@@ -8,7 +8,7 @@
     {
       "name": "claudex-loop",
       "source": "./",
-      "description": "Four-phase plan hardening: recon → interrogate → adversarial Codex review → cross-model build & inspection. Ships claudex-loop, codex-plan-review (plan gate), codex-build, codex-code-review (acceptance gate) and codex-code-docs (documentation backfill)."
+      "description": "Four-phase plan hardening: recon → interrogate → adversarial Codex review → cross-model build & inspection. Ships claudex-loop, plan-review (plan gate), build, code-review (acceptance gate) and docs-backfill (documentation backfill)."
     }
   ]
 }

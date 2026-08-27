@@ -7,8 +7,8 @@ hier steht, ist gegen `codex-cli 0.149.1` auf Windows **gemessen**, nicht vermut
 Bis 27.08.2026 lag diese Datei in `s100-scripte/_todos/plaene/README.md`. Sie gehört nicht in
 ein Fachprojekt — projektspezifisch bleiben dort nur Einsatzfälle, Tabu-Scope und Ablage.
 
-> **Namen seit 27.08.2026:** `codex-review` → **`codex-plan-review`** (prüft den Plan, vor dem
-> Code), `codex-verify` → **`codex-code-review`** (prüft den fertigen Diff gegen den Plan). Die
+> **Namen seit 27.08.2026:** `codex-review` → **`plan-review`** (prüft den Plan, vor dem
+> Code), `codex-verify` → **`code-review`** (prüft den fertigen Diff gegen den Plan). Die
 > alten Namen waren gegenüber dem Sprachgebrauch vertauscht. Ältere Protokolle und der
 > Dogfood-Log unter `docs/self-review/` führen noch die alten Namen.
 ## ⛔ Abweichungen vom Original-Skill (Windows)
@@ -248,7 +248,7 @@ CLAUDEX_REVIEWER_OPENROUTER_API_KEY_ENV=OPENROUTER_API_KEY
 
 ⛔ **Findings-Ledger-Regel (alle Skills, alle Reviewer, alle Phasen):** jede
 Reviewer-Ausgabe — Codex-Runde, Fallback-Runde (auch ein UNGÜLTIGER Versuch, so
-gekennzeichnet), Cold-Read, Post-Build-Inspection, Recheck, codex-code-review-Pass — wird
+gekennzeichnet), Cold-Read, Post-Build-Inspection, Recheck, code-review-Pass — wird
 **sofort wörtlich** in den Review-Log geschrieben, gefolgt von Claudes Disposition je
 Befund (akzeptiert → was geändert / abgelehnt → warum). Nichts lebt nur im Chat; was
 nicht im Log steht, ist nicht passiert. Für Fallback-Runden macht das der Adapter
@@ -268,7 +268,7 @@ Hash) identisch.
 `scripts/{fallback_review,codex_usage}.py`, `.env.example`, SKILL.md-stderr-Fix.
 Als [PR #9](https://github.com/chaseai-yt/claudex-loop/pull/9) upstream eröffnet (27.08.2026).
 
-### Zweites Abnahme-Gate nach dem Build: `/codex-code-review`
+### Zweites Abnahme-Gate nach dem Build: `/code-review`
 
 Prozessablauf-Erweiterung (Fork-PR [ujconsulting/claudex-loop#1](https://github.com/ujconsulting/claudex-loop/pull/1),
 lokal als User-Skill installiert): läuft NACH Build + Cross-Inspection als
@@ -279,7 +279,7 @@ Codex-Session, Diff+Spec inline, 1 Recheck nach Fixes, Ergebnis in denselben
 Review-Log. Rote Dimension = Gate gescheitert, wird nie weggemittelt.
 
 ```
-/codex-code-review scope=dod,security SPEC_FILE=_todos/plaene/<slug>/PLAN.md LOG_FILE=_todos/plaene/<slug>/PLAN-REVIEW-LOG.md
+/code-review scope=dod,security SPEC_FILE=_todos/plaene/<slug>/PLAN.md LOG_FILE=_todos/plaene/<slug>/PLAN-REVIEW-LOG.md
 ```
 
 **Es gelten dieselben Fallback-Szenarien** wie oben: Preflight `codex_usage.py`,
