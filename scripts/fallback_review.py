@@ -26,7 +26,7 @@ working directory if present). Reviewers are named profiles:
 
     CLAUDEX_REVIEWERS=lmstudio,openrouter          # chain order, first = default
     CLAUDEX_REVIEWER_LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1
-    CLAUDEX_REVIEWER_LMSTUDIO_MODEL=qwen/qwen3.6-35b-a3b
+    CLAUDEX_REVIEWER_LMSTUDIO_MODEL=qwen/qwen3.8-27b
     CLAUDEX_REVIEWER_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
     CLAUDEX_REVIEWER_OPENROUTER_MODEL=deepseek/deepseek-r1
     CLAUDEX_REVIEWER_OPENROUTER_API_KEY_ENV=OPENROUTER_API_KEY

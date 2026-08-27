@@ -51,8 +51,10 @@ Echo the resolved values (and the active Codex model, read from
 > against and the full diff are inlined below. You are read-only — read any
 > repo files you need for context, modify nothing. Judge ONLY the requested
 > dimensions, each in its own section, findings numbered and anchored to
-> file:line, each with what concretely is wrong and a one-line fix. Do not
-> re-litigate plan decisions — the plan is the contract, not the defendant.
+> file:line, each with what concretely is wrong and a one-line fix. Do NOT
+> reproduce, re-list or line-number the inlined material — cite it and move
+> on; your output budget is for findings. Do not re-litigate plan decisions —
+> the plan is the contract, not the defendant.
 > {scope contains dod:} Section DOD — walk the plan's Goal/Approach (and the
 > Definition-of-Done list if provided) item by item: implemented, partially
 > implemented, or missing? Flag silent scope cuts AND unrequested extras. End
