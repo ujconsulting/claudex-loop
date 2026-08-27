@@ -126,6 +126,15 @@ Properties, deliberately different from the Codex path:
   plan state; any later edit self-demotes it — re-review instead of keeping
   the tick.
 
+## Other gates reuse the same machinery
+
+The adapter is not plan-review-specific: `--system-file` swaps in any gate's
+own prompt, and `--require-verdicts "NAME:PASSVAL|OTHERVAL,..."` swaps in that
+gate's verdict grammar (every named line must appear — missing means invalid,
+exit 3; the first value of each entry counts as passing for the rubber-stamp
+gate). The `codex-verify` acceptance gate uses exactly this to run its
+DoD/quality/security verdicts over the fallback chain — see its SKILL.md.
+
 ## Log labeling (mandatory)
 
 Every fallback round is recorded as:

@@ -104,6 +104,7 @@ Present: 3-bullet summary of what was built, files-changed list, proof-test outp
 - Fix loop terminates at `MAX_FIX_ROUNDS` — then Claude takes over. No unbounded delegation ping-pong.
 - Commits, pushes, releases, GitHub mutations: Claude-side only, after the human gate. Codex never commits.
 - `LOG_FILE` is the deliverable — with Acts 1/2 it tells the whole story: grilled → reviewed → built → verified.
+- After the human gate, offer the optional `codex-verify` skill as a second acceptance gate (DoD / quality / security, selectable via `scope=`) — same `SPEC_FILE` and `LOG_FILE`.
 
 ## What NOT to do
 

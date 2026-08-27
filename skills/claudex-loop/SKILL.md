@@ -237,6 +237,10 @@ The doctrine is *whoever made the thing never checks the thing* — that applies
 
 Opt-out: `inspect=off` at invocation or the user declining at Resolution. Skipping silently is not allowed — the log must show either the inspection or the explicit opt-out. (Cost: one ~2-5 min Codex invocation at the end of the build; forgetting to ask for review is exactly the failure mode this default exists to prevent.)
 
+### Optional second gate — acceptance review (`codex-verify`)
+
+After the cross-inspection (whichever model built), offer the **`codex-verify`** skill as a parameterizable acceptance gate on top: a fresh read-only Codex session judges the finished work on `dod` (everything implemented, Definition of Done met), `quality` (readability, clean code, documentation) and `security` — each with its own verdict line, findings arbitrated by Claude, appended to the same `LOG_FILE`. Scope is selectable (`scope=dod,quality,security`); invoke with `SPEC_FILE=<PLAN_FILE>` and the same `LOG_FILE` so one artifact tells the whole story. Offer it, don't force it — the user opts in per run (high-stakes builds are the natural case).
+
 ---
 
 ## Hard rules
