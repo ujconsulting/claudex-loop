@@ -88,25 +88,34 @@ via stdin the same way.
 
 ### Step 3 — Arbitrate and fix (Claude has final say)
 
-1. Append to `LOG_FILE`: `## Second review (codex-verify) — <scopes>` + the
-   full report.
+1. Append to `LOG_FILE` **the moment the reply arrives**:
+   `## Second review (codex-verify) — <scopes> — <model>` + the full report
+   verbatim. This happens BEFORE arbitration and regardless of the outcome —
+   an invalid reply is logged too, as `## Second review — INVALID ATTEMPT
+   (<reason>), does not count` (a fallback run does this itself via
+   `--append-log`). Findings never live only in the chat transcript; if it
+   isn't in the log, it didn't happen.
 2. Parse the verdict line of every selected scope. A missing verdict line, or
    a report with all-pass verdicts and zero findings on a non-trivial diff, is
    an **invalid review** — do not record it as a pass; rerun or surface it.
 3. For each finding: accept (fix it, rerun the affected tests/proof) or reject
-   *with a logged reason*. Append `### Claude's dispositions` to `LOG_FILE`.
+   *with a logged reason*. Append `### Claude's dispositions` to `LOG_FILE` —
+   one line per finding, `accepted → <what changed>` or `rejected → <why>`.
 4. If anything was fixed and rechecks remain: resume the SAME session —
    "Fixes applied for findings <ids>. Re-verify the same scopes against the
    updated diff (inlined below). Same verdict rules." — and repeat once per
-   `MAX_RECHECK`.
+   `MAX_RECHECK`. Each recheck is logged the same way:
+   `## Second review — recheck <k>` + report verbatim + dispositions.
 
 ### Step 4 — Report to the human (the gate)
 
 Present a per-scope table: verdict, findings raised / fixed / rejected, and
-the one-line reason for every rejection. All selected scopes green → the gate
-passes. Any scope red after the last recheck → the gate FAILS visibly; hand
-the open findings to the user to decide. Never average a red scope away —
-`SECURITY: FAIL` with `DOD: COMPLETE` is a failed gate, not a mixed result.
+the one-line reason for every rejection — and append that same table to
+`LOG_FILE` under `## Second review — gate result` so the log, not the chat,
+carries the outcome. All selected scopes green → the gate passes. Any scope
+red after the last recheck → the gate FAILS visibly; hand the open findings
+to the user to decide. Never average a red scope away — `SECURITY: FAIL` with
+`DOD: COMPLETE` is a failed gate, not a mixed result.
 
 ## If Codex is unavailable (quota, credits, outage)
 
