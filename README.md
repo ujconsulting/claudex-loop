@@ -59,6 +59,43 @@ flowchart LR
 
 Two artifacts every run: `PLAN.md` (the *what*) and `PLAN-REVIEW-LOG.md` (the full round-by-round argument — the *why*).
 
+## Beyond the plan (this fork)
+
+The four phases end when the code exists. These three pick up there — same doctrine, different artefact.
+
+| Skill | Judges | Verdict |
+|---|---|---|
+| **`code-review`** | the finished diff against the plan, in up to five dimensions | `DOD` · `QUALITY` · `SECURITY` · `DOCS` · `TESTS` |
+| **`docs-backfill`** | standing documentation debt, decoupled from any diff | `DOCS: ACCURATE / INACCURATE` |
+| **`audit`** | a codebase nobody ever reviewed — no diff, no plan, no baseline | `AUDIT: CLEAN / CONCERNS / CRITICAL` per slice |
+
+`code-review` gained `docs` and `tests` because a gate that never asks "is this documented" and "would the tests fail if the code were wrong" leaves the two cheapest defects in place. Add them whenever the diff changes behaviour.
+
+`audit` exists because `code-review` needs a diff and a plan, and an inherited repo has neither. It slices the repo, runs the deterministic tooling **first** so the model spends its attention where linters cannot reach, and produces a **baseline** — after which every later `code-review` only judges the delta instead of re-raising the same debt.
+
+`docs-backfill` writes what the gates found missing. Claude writes, a fresh read-only session grades: a generator that emits docstrings and ships them has nobody checking whether they are *true*, and a confidently wrong docstring is worse than a missing one.
+
+### The actor is configuration, not a name
+
+Upstream bakes the model into the skill name (`codex-review` reviews, `codex-build` builds). That reads fine until you want the other arrangement — then the name lies. Here the skills are named after the **activity**, and who performs it comes from `.claudex.yaml`:
+
+```yaml
+roles:
+  plan: claude          # Delegation:  build: codex + code-review: claude
+  plan-review: codex    # Dual draft:  plan: [claude, codex] + plan-review: cross
+  build: claude
+  code-review: codex
+  docs: claude
+  docs-review: codex
+  audit: codex
+```
+
+`scripts/claudex_roles.py` resolves it and **refuses with a non-zero exit** — not a warning — when an actor would grade its own work (`producer_never_reviews`) or a reviewing role would run with an open sandbox (`write_access`). Claude is the orchestrator, so a review role assigned to `claude` is rejected unless it enters as a fresh subagent. Full reasoning in [`ROLES.md`](ROLES.md).
+
+### One lesson worth stealing
+
+**Hand the reviewer numbered lines.** The first real `audit` run produced sound findings at wrong addresses — citations landed on blank lines and unrelated statements, because the code went into the prompt unnumbered and the model had to *count*. Measured on the same 2,658-line slice: 5 of 23 citations on blank lines without numbering, 0 of 28 with it. A few percent more input tokens removes the entire class of error.
+
 ## Receipts
 
 From the first end-to-end greenfield run (a solo-creator CRM):
@@ -80,7 +117,7 @@ From the first end-to-end greenfield run (a solo-creator CRM):
 /plugin install claudex-loop@claudex-loop
 ```
 
-Skills arrive namespaced: `/claudex-loop:claudex-loop`, `/claudex-loop:plan-review`, `/claudex-loop:build`, `/claudex-loop:code-review` (an optional post-build acceptance gate: DoD / code quality / security, selectable via `scope=`). (Intent triggering works regardless — say "claudex this plan" or even the legacy "crucible this plan" and the right skill fires.) Enable auto-update for the marketplace in the `/plugin` menu and new versions pull in on their own.
+Skills arrive namespaced: `/claudex-loop:claudex-loop`, `/claudex-loop:plan-review`, `/claudex-loop:build`, `/claudex-loop:code-review` (post-build acceptance gate — DoD / quality / security / docs / tests, selectable via `scope=`), `/claudex-loop:docs-backfill` and `/claudex-loop:audit`. (Intent triggering works regardless — say "claudex this plan" or even the legacy "crucible this plan" and the right skill fires.) Enable auto-update for the marketplace in the `/plugin` menu and new versions pull in on their own.
 
 > **Installed back when this was `crucible`?** Your existing marketplace source keeps working (GitHub redirects), but the plugin name changed — re-add with the commands above to pick up the new namespace.
 
@@ -94,7 +131,11 @@ cp -r skills/* ~/.claude/skills/
 Copy-Item -Recurse skills\* $env:USERPROFILE\.claude\skills\
 ```
 
-Invoke as `/claudex-loop`, `/plan-review`, `/build`. Update by `git pull` + re-copy.
+Invoke as `/claudex-loop`, `/plan-review`, `/build`, `/code-review`, `/docs-backfill`, `/audit`. Update by `git pull` + re-copy.
+
+⚠️ The manual copy leaves `scripts/` and `.claudex.yaml.example` behind, so the role
+resolver is not on the path — the gates then fall back to their built-in defaults
+instead of refusing on a violated rule. Prefer Option A, or copy `scripts/` as well.
 
 > **Coming from grill-me-codex or crucible?** This repo *was* both — GitHub redirects the old URLs, so `git pull` in your existing clone just works. The old grill skills live on in [`legacy/`](./legacy/) (copy them only if you want them; `/claudex-loop` doesn't need them).
 
@@ -115,8 +156,21 @@ Invoke as `/claudex-loop`, `/plan-review`, `/build`. Update by `git pull` + re-c
 | `build` | `SPEC_FILE` | `PLAN.md` | The frozen spec Codex implements |
 | `build` | `MAX_FIX_ROUNDS` | `2` | Fix rounds before Claude takes over |
 | `build` | `PROOF_CMD` | from spec | Exact test command that counts as proof |
+| `code-review` | `scope` | `dod,quality,security` | Add `docs,tests` whenever the diff changes behaviour |
+| `code-review` | `BASELINE_FILE` | newest `docs/audit/*-baseline.md` | Known debt from an `audit` run — raised again only where a change makes it worse |
+| `code-review` | `DOCSTRING_MIN` | `80` | Percent of new/changed public units that must be documented |
+| `docs-backfill` | `TARGET` | *required* | What to document. Refuses to run unbounded |
+| `docs-backfill` | `BATCH` | `15` | Units per write-then-review cycle |
+| `audit` | `SLICES` | auto | Which parts to audit. The excluded remainder is reported, not hidden |
+| `audit` | `DIMENSIONS` | `security,quality,docs,tests,rules` | `rules` = conformance to the repo's own CLAUDE.md / AGENTS.md |
+| `audit` | `BASELINE_FILE` | `docs/audit/<date>-baseline.md` | The deliverable |
 
 Pass e.g. `rounds=3` when invoking to override.
+
+⛔ **The one note that outranks the rest:** the model that pinned this fork's model
+choice is `gpt-5.6-terra` with `model_reasoning_effort=high`, not `sol` — `sol` ran into
+the 10-minute ceiling on a real plan. That contradicts the "don't pin a model" line
+above, which targets the older `*-codex` slugs; a pin works fine under ChatGPT auth.
 
 ## When Codex runs dry (fallback reviewers)
 
