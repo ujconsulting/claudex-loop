@@ -1,6 +1,6 @@
 {
   "name": "claudex-loop",
-  "description": "Four-phase plan hardening for Claude Code: recon → interrogate → adversarial Codex review → cross-model build & inspection. Two AI models harden your plan before a line of code exists — then swap jobs to build it, and whoever built it never grades it. Includes claudex-loop (formerly crucible), codex-plan-review, and codex-build.",
+  "description": "Four-phase plan hardening for Claude Code: recon → interrogate → adversarial Codex review → cross-model build & inspection. Two AI models harden your plan before a line of code exists — then swap jobs to build it, and whoever built it never grades it. Includes claudex-loop (formerly crucible), codex-plan-review, codex-build, codex-code-review and codex-code-docs.",
   "author": {
     "name": "Chase AI",
     "url": "https://youtube.com/@chaseai"
