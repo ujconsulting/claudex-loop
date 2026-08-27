@@ -12,6 +12,7 @@ configuration and names the skills after the **activity** instead.
 | `build` | implement a frozen plan | `roles.build` |
 | `code-review` | grade the finished diff (dod/quality/security/docs/tests) | `roles.code-review` |
 | `docs-backfill` | fill standing documentation debt | `roles.docs` + `roles.docs-review` |
+| `audit` | first pass over a codebase nobody reviewed; produces a baseline | `roles.audit` |
 
 Skill names are activities; role names in the config are the steps those
 activities occupy. `docs-backfill` is the skill; `docs` and `docs-review` are the
@@ -53,6 +54,7 @@ roles:
   code-review: codex
   docs:        claude
   docs-review: codex
+  audit:       codex   # standalone adversary: no producer to pair with
 
 actors:
   codex:  { model: gpt-5.6-terra, effort: high, sandbox: read-only }
@@ -100,6 +102,15 @@ expensive: data models, tenant isolation, migrations. It answers something a
 single-draft review cannot: a reviewer looking at the producer's document
 inherits its framing. What appears in only one draft is either a blind spot of
 the other or ballast, and both are worth knowing.
+
+## Standalone adversary roles
+
+`audit` judges something nobody in this workflow produced — a codebase that predates
+the loop. It has no producer to be paired with, so `producer_never_reviews` has nothing
+to compare. **Every other adversary rule still applies:** read-only, never in
+`write_access`, and never the orchestrator (`claude` only with
+`fresh_subagent: true`). The resolver enforces all three and rejects `cross` here,
+because there is no second draft to cross-check against.
 
 ## The two gates
 

@@ -1,0 +1,187 @@
+---
+name: audit
+description: First-pass review of a codebase nobody ever reviewed — no diff, no plan, no baseline. Slices the repo into reviewable pieces, runs the deterministic tooling first, then has a fresh read-only session judge each slice on quality, security, docs, tests and conformance to the repo's own documented rules. Produces a prioritised baseline file so every later review only has to look at the delta instead of re-raising the same debt. Use when the user says "/audit", "initial code review", "nobody ever reviewed this", "audit this repo", "wie steht es um die Codequalitaet", "Sicherheitsluecken finden", or when onboarding an inherited codebase. NOT for reviewing a change — that is code-review, which is anchored to a diff and a plan. NOT a penetration test and NOT a substitute for a real security process on high-stakes code.
+---
+
+# Audit — the first pass over code nobody reviewed
+
+`code-review` asks *"does this change do what the plan said?"*. It needs a diff and a
+spec. A repo that grew without either has neither, so pointing `code-review` at the root
+commit does not work: the diff is the whole codebase, it blows past any context window,
+and `dod` has no plan to be complete against.
+
+This skill answers the other question: **what is actually in here, and what should worry
+me first?**
+
+Two properties matter more than thoroughness, because they are what makes an audit get
+acted on instead of filed:
+
+- **Prioritised.** A first audit on grown code yields hundreds of findings. An
+  unsorted list is noise nobody finishes reading. Severity per finding, plus a
+  short "these first" list, is the deliverable.
+- **A baseline, not a report.** The point is that the *next* review only has to
+  look at what changed. Findings that are recorded and consciously accepted stop
+  being raised again.
+
+## Actor (resolved, never assumed)
+
+`audit` is a **standalone adversary role**: it judges something nobody in this workflow
+produced, so it has no producer to be paired against. Every other adversary rule still
+holds — read-only, foreign context, never the orchestrator.
+
+```bash
+python scripts/claudex_roles.py --explain
+```
+
+Use the actor printed for `audit`. **A non-zero exit means stop.** Where this document
+says "the reviewer", read it as that resolved actor.
+
+## Tunables (read from skill args, else default)
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `SLICES` | auto | Comma-list of paths to audit. Auto = top-level services/packages/apps discovered in the repo, listed for confirmation before the first call. |
+| `DIMENSIONS` | `security,quality,docs,tests,rules` | `rules` = conformance to the repo's OWN documented rules (CLAUDE.md / AGENTS.md / CONTRIBUTING). |
+| `BASELINE_FILE` | `docs/audit/<YYYY-MM-DD>-baseline.md` | The deliverable. |
+| `LOG_FILE` | `docs/audit/<YYYY-MM-DD>-audit-log.md` | Reviewer output verbatim + dispositions. |
+| `SEVERITY_FLOOR` | `low` | Drop findings below this. Raise it on a large legacy repo to keep the first pass finishable. |
+
+Echo the resolved values and the slice list before the first call.
+
+## Flow
+
+### Step 1 — Slice the repo, and say what you are NOT auditing
+
+Discover the natural units: services, packages, apps, deployment config. Present the
+slice list **and the excluded remainder** before starting. Vendored code, generated
+files, fixtures and migrations are usually excluded — that is fine, but it is only fine
+if it is written down.
+
+⛔ **Coverage is a first-class output.** An audit that does not state its own limits
+reads as completeness it does not have. Every later claim about "the repo" is bounded by
+this list.
+
+Refuse to run on an unbounded target with no slices — the same reason `docs-backfill`
+demands a target: one oversized pass produces a report nobody can act on, and a wrong
+judgement propagates through all of it.
+
+### Step 2 — Machines first, model second
+
+Before spending any reviewer budget on judgement, run what tooling does better and
+cheaper, and put the *results* into the reviewer's prompt:
+
+- **Whatever the repo already has.** Most repos have a validation entry point (a
+  `validate` command, a Makefile target, a CI workflow). Use it instead of
+  re-inventing the toolchain — and say in the log which one you used.
+- Typical layers when nothing exists: linters (ruff/eslint/golangci-lint), dependency
+  and image scanning (pip-audit, npm audit, Grype, OSV), secret scanning (Gitleaks,
+  TruffleHog), IaC and pipeline checks (Checkov, hadolint, actionlint), docstring and
+  test coverage (`interrogate`, coverage report).
+
+This is not busywork: it takes the mechanical findings off the reviewer's plate so its
+attention goes where only a model helps — missing authorisation, silently swallowed
+errors, assumptions that stopped being true, design that fights the framework.
+
+**Tool output is evidence, not verdict.** A clean scanner run does not mean a clean
+slice, and a noisy one does not mean a bad slice. Say which tools ran and which did not
+exist.
+
+### Step 3 — Judge each slice (fresh read-only session per slice)
+
+One session per slice, the slice's code and the Step-2 tool output inlined:
+
+> You are auditing an existing codebase that has never been reviewed. There is no plan
+> and no diff — judge the code as it stands. Findings must be numbered, anchored to
+> file:line, each stating what concretely goes wrong and one line on the fix, and each
+> carrying a severity: CRITICAL (exploitable, or data loss), HIGH (breaks under
+> foreseeable conditions), MEDIUM (will hurt in maintenance), LOW (worth knowing).
+> Tool output for this slice is inlined — do not repeat what it already found; go where
+> it cannot.
+> {security:} Section SECURITY — authn/authz gaps, injection, secrets in code or
+> config, unsafe deserialisation, path traversal, SSRF, missing input validation at
+> trust boundaries, dependency risk.
+> {quality:} Section QUALITY — error handling that hides failure, duplicated logic that
+> has already drifted, dead code, functions doing too much, magic values, concurrency
+> and resource-lifetime mistakes.
+> {docs:} Section DOCS — undocumented public units, and worse: documentation and
+> comments that contradict the code. State which is wrong, the code or the text.
+> {tests:} Section TESTS — untested error paths and edge cases, assertions that cannot
+> fail, tests coupled to implementation detail, and behaviour that has no test at all.
+> {rules:} Section RULES — the repo's own documented rules are inlined below. Where does
+> the code violate them? Quote the rule verbatim with each finding.
+> End with a coverage note ("not examined: …") and then exactly one line:
+> `AUDIT: CLEAN`, `AUDIT: CONCERNS` or `AUDIT: CRITICAL`.
+
+Mechanics are `code-review`'s: read-only, prompt via **stdin**, output to a file,
+stderr to a **file**, Windows path conversion, generous timeout. Preflight the quota —
+an audit is many sessions, so check the remaining budget against the slice count
+*before* starting and tell the user if it will not fit in one window.
+
+**`AUDIT: CLEAN` on a non-trivial slice with zero findings is an invalid review**, not a
+pass. Rerun it or record it as invalid; grown code that nobody reviewed does not come
+back clean.
+
+### Step 4 — Triage (the part that decides whether this was worth doing)
+
+Append each reviewer report **verbatim** to `LOG_FILE` as it arrives, then triage every
+finding into exactly one of:
+
+- **Fix now** — real, and cheap enough that deferring it is worse.
+- **Accepted risk** — real, but consciously not fixed. **Requires a reason and a named
+  condition that would change the decision.** "Accepted" without either is just
+  forgetting with extra steps.
+- **Rejected** — not actually a problem here. Say why, at the repo, not in the abstract.
+
+Verify before accepting a finding. A reviewer reading code cold gets things wrong about
+intent and about what the framework already guarantees; check the claim in the code
+before it becomes a task.
+
+### Step 5 — The baseline
+
+Write `BASELINE_FILE`:
+
+1. **Fix these first** — at most five, chosen by severity times likelihood, each with
+   what breaks if it is not fixed.
+2. **Full findings** by slice and severity, with the triage decision on each.
+3. **Accepted risks** with reasons and revisit conditions.
+4. **Coverage** — slices audited, slices excluded, dimensions run, tools that ran and
+   tools that were missing.
+5. **Tool versions and date.** A baseline without them cannot be compared to the next one.
+
+Then tell the user the numbers plainly: findings by severity, how many were rejected and
+why, and what was not looked at.
+
+### Step 6 — Hand off to `code-review`
+
+From here the repo has a reference point. Later runs of `code-review` take
+`BASELINE_FILE` and treat everything in it as **pre-existing**: not the change's fault,
+raised again only when the change makes it worse or touches that code. That is what
+stops every future review from re-litigating the same debt — and it only works if the
+baseline is committed.
+
+## Hard rules
+
+- **Coverage is stated, always.** Slices audited and slices skipped, in the baseline and
+  in the summary. Silence about scope is a false claim of completeness.
+- **Severity on every finding**, or it cannot be prioritised and will not be acted on.
+- **Accepted risk needs a reason and a revisit condition.**
+- **Findings are verified against the code before they become tasks** — a cold reader
+  mistakes intent regularly.
+- **The audit does not fix anything.** It produces a baseline; fixes are their own work
+  with their own review. The one exception is a CRITICAL finding that is actively
+  exploitable — surface that to the user immediately, do not wait for the report.
+- Fresh session per slice; read-only every call.
+- Every reviewer output lands in `LOG_FILE` verbatim, including invalid ones, marked as
+  such.
+
+## What NOT to do
+
+- Don't run it on a change — that is `code-review`, which knows the plan and the diff.
+- Don't audit the whole repo in one session to save time. The context truncates
+  silently, and you get a confident judgement of the first fraction.
+- Don't let a clean scanner run stand in for the review; the tools and the reviewer
+  answer different questions.
+- Don't present this as a security assessment. It is one adversarial pass over code,
+  useful and cheap — not a pentest, not a compliance audit.
+- Don't let the baseline rot. It is a snapshot with a date on it; a year later it
+  describes a repo that no longer exists.

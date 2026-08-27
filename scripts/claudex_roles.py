@@ -41,7 +41,16 @@ PAIRS = {
     "docs": "docs-review",
 }
 PRODUCER_ROLES = tuple(PAIRS.keys())
-ADVERSARY_ROLES = tuple(PAIRS.values())
+PAIRED_ADVERSARY_ROLES = tuple(PAIRS.values())
+
+# Standalone adversary roles judge something nobody in this workflow produced --
+# a codebase that predates the loop. There is no producer to pair them with, so
+# producer_never_reviews has nothing to compare; every OTHER adversary rule still
+# applies, and that is the point of listing them here rather than special-casing
+# them at each check.
+STANDALONE_ADVERSARY_ROLES = ("audit",)
+
+ADVERSARY_ROLES = PAIRED_ADVERSARY_ROLES + STANDALONE_ADVERSARY_ROLES
 ALL_ROLES = PRODUCER_ROLES + ADVERSARY_ROLES
 KNOWN_ACTORS = ("claude", "codex")
 
@@ -53,6 +62,7 @@ DEFAULTS = {
         "code-review": "codex",
         "docs": "claude",
         "docs-review": "codex",
+        "audit": "codex",
     },
     "actors": {
         "codex": {"model": "gpt-5.6-terra", "effort": "high", "sandbox": "read-only"},
@@ -177,9 +187,15 @@ def _validate_shape(cfg: dict) -> None:
     for role in ALL_ROLES:
         if role not in roles:
             raise ConfigError(f"role '{role}' is unset and has no default")
-        actors = roles[role] if isinstance(roles[role], list) else [roles[role]]
-        if role in ADVERSARY_ROLES and roles[role] == "cross":
+        if roles[role] == "cross":
+            if role not in PAIRED_ADVERSARY_ROLES:
+                raise ConfigError(
+                    f"role '{role}': 'cross' only means something for a paired "
+                    f"adversary role {list(PAIRED_ADVERSARY_ROLES)} -- there is no "
+                    f"second draft here to cross-check against"
+                )
             continue
+        actors = roles[role] if isinstance(roles[role], list) else [roles[role]]
         for a in actors:
             if a not in KNOWN_ACTORS:
                 raise ConfigError(
@@ -298,6 +314,9 @@ def main(argv: list[str] | None = None) -> int:
         graded = ", ".join(_actors_for(cfg["roles"], reviewer))
         note = "  (cross-check)" if cfg["roles"][reviewer] == "cross" else ""
         print(f"  {producer:<6} {made_s:<16} -> {reviewer:<12} {graded}{note}")
+    for role in STANDALONE_ADVERSARY_ROLES:
+        graded = ", ".join(_actors_for(cfg["roles"], role))
+        print(f"  {'(bestand)':<6} {'-':<16} -> {role:<12} {graded}")
     print()
     if args.explain:
         rules = cfg.get("rules", {})

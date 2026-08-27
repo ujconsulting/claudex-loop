@@ -46,6 +46,7 @@ Reference: `ROLES.md`.
 | `BASE_REF` | merge-base with `main`/`master` | Git ref the change is diffed against. Pass explicitly when the branch layout is unusual. |
 | `LOG_FILE` | `PLAN-REVIEW-LOG.md` | The run's transcript — this skill appends to the same artifact the loop used. |
 | `MAX_RECHECK` | `1` | Rechecks after accepted fixes (initial pass + N rechecks; the gate ALWAYS terminates). |
+| `BASELINE_FILE` | newest `docs/audit/*-baseline.md`, else none | Known pre-existing debt from an `audit` run. Everything listed there is NOT this change's fault: raise it again only where the change makes it worse or touches that code. Without this, every review of a legacy repo re-litigates the same findings and the real ones drown. |
 
 Echo the resolved values (and the active Codex model, read from
 `~/.codex/config.toml`) before the first call.
@@ -79,7 +80,11 @@ Echo the resolved values (and the active Codex model, read from
 > dimensions, each in its own section, findings numbered and anchored to
 > file:line, each with what concretely is wrong and a one-line fix. Do NOT
 > reproduce, re-list or line-number the inlined material — cite it and move
-> on; your output budget is for findings. Do not re-litigate plan decisions —
+> on; your output budget is for findings.
+> {BASELINE_FILE given:} Known pre-existing findings from an earlier audit are inlined
+> as well. They are NOT this change's fault — do not raise them again unless this change
+> makes one measurably worse or touches the code they sit in.
+> Do not re-litigate plan decisions —
 > the plan is the contract, not the defendant.
 > {scope contains dod:} Section DOD — walk the plan's Goal/Approach (and the
 > Definition-of-Done list if provided) item by item: implemented, partially

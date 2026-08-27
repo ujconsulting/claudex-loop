@@ -10,6 +10,7 @@ roles:
   code-review: codex
   docs:        claude
   docs-review: codex
+  audit:       codex     # standalone adversary - judges code nobody here produced
 
 actors:
   codex:
