@@ -67,13 +67,22 @@ Echo the resolved values (and the active Codex model, read from
 > and supply-chain risks introduced by this change. End with exactly
 > `SECURITY: PASS` or `SECURITY: FAIL`.
 
-Invocation follows the codex-review mechanics — `codex exec -s read-only
---json -o /tmp/codex-verify.txt "$PROMPT" < /dev/null 2>/tmp/codex-stderr.txt`,
-capture `thread_id` from the `thread.started` line, 10-minute ceiling
+Write the assembled prompt to a temp file and feed it via **stdin** — never as
+a command-line argument: with the diff inlined the prompt easily exceeds the
+OS argument-size limit ("Argument list too long", found the first time this
+skill reviewed its own diff). Otherwise codex-review mechanics apply:
+
+```bash
+codex exec -s read-only --json -o /tmp/codex-verify.txt - \
+  < /tmp/verify-prompt.txt 2>/tmp/codex-stderr.txt | grep '"type":"thread.started"'
+```
+
+Capture `thread_id` from the `thread.started` line; 10-minute ceiling
 (`timeout: 600000` via Claude Code's Bash tool). stderr goes to a **file**: a
 quota/auth failure can present as exit 0 + empty output file, and the real
 error (429/401) only appears there. On resume, force `-c
-sandbox_mode="read-only"` (resume rejects `-s`).
+sandbox_mode="read-only"` (resume rejects `-s`) and feed the recheck prompt
+via stdin the same way.
 
 ### Step 3 — Arbitrate and fix (Claude has final say)
 
