@@ -88,13 +88,27 @@ exist.
 
 ### Step 3 — Judge each slice (fresh read-only session per slice)
 
-One session per slice, the slice's code and the Step-2 tool output inlined:
+One session per slice, the slice's code and the Step-2 tool output inlined.
+
+**Number every inlined source line** — prefix each with its own number in the form
+`  1234| <code>`. Without them the reviewer has to *count* lines in order to cite one,
+and no model counts reliably across thousands of lines. In the first real run of this
+skill the citations in two slices were off by dozens of lines throughout, landing on
+blank lines and unrelated statements. The findings themselves were sound; only the
+addresses were wrong — which made every one of them cost a manual search to place, and
+turned "verify before it becomes a ticket" from a quick check into an investigation.
+Numbering the input costs a few percent more tokens and removes the entire class of
+error.
 
 > You are auditing an existing codebase that has never been reviewed. There is no plan
 > and no diff — judge the code as it stands. Findings must be numbered, anchored to
 > file:line, each stating what concretely goes wrong and one line on the fix, and each
 > carrying a severity: CRITICAL (exploitable, or data loss), HIGH (breaks under
 > foreseeable conditions), MEDIUM (will hurt in maintenance), LOW (worth knowing).
+> Every inlined source line carries its own number in the form `  1234| code`. **Cite
+> those numbers verbatim — never count or estimate one yourself.** A citation that does
+> not match the numbered line it names is worse than none: it sends the reader to the
+> wrong place and costs more time than it saves.
 > Tool output for this slice is inlined — do not repeat what it already found; go where
 > it cannot.
 > {security:} Section SECURITY — authn/authz gaps, injection, secrets in code or

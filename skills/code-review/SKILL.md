@@ -67,7 +67,14 @@ Echo the resolved values (and the active Codex model, read from
    project's own equivalent. If none exists, say so in the prompt — "no
    coverage data available, judge from the diff" — rather than inventing a
    number. Missing tooling is a `tests` finding, not a reason to skip.
-4. Build the verify prompt with the spec and the **diff inlined** — do not rely
+4. **Anything the reviewer must cite by line, hand it over WITH line numbers.** A
+   unified diff carries hunk headers, so the reviewer has to do arithmetic to name a
+   line — and models miscount. Where you inline whole files rather than a diff, prefix
+   every line with its number (`  1234| code`). The `audit` skill learned this the
+   expensive way: its first run produced sound findings at wrong addresses, and each
+   one cost a manual search to place. Note this is the opposite of the output rule
+   below — number the material going IN, forbid re-listing it coming OUT.
+5. Build the verify prompt with the spec and the **diff inlined** — do not rely
    on Codex opening files by path: its shell calls can be policy-blocked and
    fresh files may be untracked, and then it reviews the repo but not the
    change. Repo files stay readable for context (it is read-only, not blind).
