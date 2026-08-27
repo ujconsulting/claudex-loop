@@ -220,7 +220,7 @@ Full protocol: [FALLBACK.md](../../FALLBACK.md). The short form:
   3. **Skip** — Phase 2 ends without a verdict; log `## Review skipped — Codex quota exhausted (<window>, resets <time>), decided by <user>` and take the plan to sign-off marked **not cross-reviewed**. Same doctrine as `inspect=off`: skipping yes, silent skipping never.
 
 ### Resolution (you sign off — final gate)
-- **APPROVED:** present the final `PLAN_FILE`, a 3-bullet summary of what the loop improved, and the round count. Ask: *"Interrogated + survived N rounds of Codex. Implement it now — Codex builds it (`/codex-build`), Claude builds it, or stop here?"* Code only on a yes.
+- **APPROVED:** present the final `PLAN_FILE`, a 3-bullet summary of what the loop improved, and the round count. **Optional cold-read before sign-off:** the APPROVED came from the thread that negotiated the plan for N rounds — right for checking prior findings, but it can anchor the closing verdict. Offer one extra pass from a FRESH read-only session (same review prompt, plan inlined, no access to the argument) as a cheap anchoring control — the same fresh-eyes mechanism Phase 3 already uses. Its verdict is advisory: a fresh REVISE doesn't reopen the loop, it goes to the user as a flagged disagreement. Then ask: *"Interrogated + survived N rounds of Codex. Implement it now — Codex builds it (`/codex-build`), Claude builds it, or stop here?"* Code only on a yes.
 - **MAX_ROUNDS hit without APPROVED (deadlock):** do NOT fake convergence. List each unresolved point + Claude's counter-position; hand it to the user to break the tie. A flagged disagreement beats a false "approved."
 
 ### PHASE 3 (optional) — BUILD (Codex ↔ Claude, roles flipped)
@@ -233,7 +233,7 @@ The doctrine is *whoever made the thing never checks the thing* — that applies
 
 1. Launch a **fresh read-only Codex session** (`codex exec -s read-only`, NEW thread — not the Phase 2 thread; the reviewer should see the code cold, not through its own plan critiques). Give it: `PLAN.md`, the base commit, and the code diff. Ask for PR-style findings — correctness, spec fidelity, edge cases, nothing outside scope — no verdict line needed; this is advisory review, not a gate loop.
 2. Claude arbitrates each finding: accept (fix it, rerun affected tests) or reject *with a logged reason*. Cap at `MAX_INSPECTION_ROUNDS=2` (initial review + one reinspection after accepted fixes).
-3. Append to `LOG_FILE` under `## Post-build inspection`: findings verbatim, Claude's dispositions, rounds used. Present the summary alongside the final diff at the human gate.
+3. Append to `LOG_FILE` under `## Post-build inspection`: findings verbatim, Claude's dispositions, rounds used. Present the summary alongside the final diff at the human gate — and the summary's content is a contract, not a vibe: **every REJECTED finding from any inspection round appears as its own line item at the gate, with Claude's one-line rationale.** The findings the human most needs to audit are exactly the ones Claude overruled; an aggregate ("23 findings, 19 fixed") hides them at the one moment a human is looking. Accepted-and-fixed findings may be summarized in aggregate.
 
 Opt-out: `inspect=off` at invocation or the user declining at Resolution. Skipping silently is not allowed — the log must show either the inspection or the explicit opt-out. (Cost: one ~2-5 min Codex invocation at the end of the build; forgetting to ask for review is exactly the failure mode this default exists to prevent.)
 
