@@ -1,15 +1,15 @@
 ---
 name: codex-build
-description: Hand a frozen spec (PLAN.md or any locked plan) to OpenAI Codex to IMPLEMENT with full write access, while Claude stays the spec-writer and reviewer — the exact role-flip of /codex-review. Codex builds from the spec in a --yolo sandbox, Claude reads the full diff like a contributor PR, runs the proof test, and iterates fixes via the SAME Codex session up to MAX_FIX_ROUNDS before taking over. Human approves the diff before any commit. Use when the user says "/codex-build", "have codex build this", "codex implement the plan", "hand the plan to codex", "delegate the build to codex", or right after a plan survives /grill-me-codex, /grill-with-docs-codex, or /codex-review and they choose Codex for implementation (Act 3). Also for standalone delegation: refactors, mechanical migrations, bug fixes with a known repro, test/coverage writing — anything that reads as a work order. NOT for tiny edits (~<20 lines — delegation overhead loses), NOT for design work (if writing the spec forces decisions, that's /grill-me-codex first), NOT for reviewing existing code (/codex:review), and NOT for anything needing Claude-session tools (MCP, secrets, browser).
+description: Hand a frozen spec (PLAN.md or any locked plan) to OpenAI Codex to IMPLEMENT with full write access, while Claude stays the spec-writer and reviewer — the exact role-flip of /codex-plan-review. Codex builds from the spec in a --yolo sandbox, Claude reads the full diff like a contributor PR, runs the proof test, and iterates fixes via the SAME Codex session up to MAX_FIX_ROUNDS before taking over. Human approves the diff before any commit. Use when the user says "/codex-build", "have codex build this", "codex implement the plan", "hand the plan to codex", "delegate the build to codex", or right after a plan survives /grill-me-codex, /grill-with-docs-codex, or /codex-plan-review and they choose Codex for implementation (Act 3). Also for standalone delegation: refactors, mechanical migrations, bug fixes with a known repro, test/coverage writing — anything that reads as a work order. NOT for tiny edits (~<20 lines — delegation overhead loses), NOT for design work (if writing the spec forces decisions, that's /grill-me-codex first), NOT for reviewing existing code (/codex:review), and NOT for anything needing Claude-session tools (MCP, secrets, browser).
 ---
 
 # Codex-Build — Codex Types, Claude Verifies
 
-The role-flip of `/codex-review`: there, Claude builds the plan and Codex critiques read-only. Here, **Codex is the builder with write access; Claude is the spec-writer and reviewer.** Codex implements a frozen spec end-to-end; Claude judges the diff like a contributor PR, demands proof, and iterates fixes in the same Codex session. The human enters at exactly two points: kickoff and diff sign-off.
+The role-flip of `/codex-plan-review`: there, Claude builds the plan and Codex critiques read-only. Here, **Codex is the builder with write access; Claude is the spec-writer and reviewer.** Codex implements a frozen spec end-to-end; Claude judges the diff like a contributor PR, demands proof, and iterates fixes in the same Codex session. The human enters at exactly two points: kickoff and diff sign-off.
 
 Adapted from Peter Steinberger's `codex-first` pattern (agent-scripts), rebuilt on this house's verified Codex mechanics.
 
-**Spec quality decides success.** Codex starts with zero session context — everything it needs must be in the prompt. A plan that survived `/grill-me-codex` or `/codex-review` already is a frozen spec; that's the ideal input.
+**Spec quality decides success.** Codex starts with zero session context — everything it needs must be in the prompt. A plan that survived `/grill-me-codex` or `/codex-plan-review` already is a frozen spec; that's the ideal input.
 
 ## Prerequisites (verify once, fast)
 
@@ -33,7 +33,7 @@ Echo resolved values before starting.
 
 ## Step 0 — Gates (before any Codex launch)
 
-1. **Spec gate.** `SPEC_FILE` must exist and read as a work order (goal, concrete steps, bounds). No spec → offer `/grill-me-codex` (interview first) or `/codex-review` (have a plan, want it stress-tested) instead. If the user insists on building from a rough idea, write the spec WITH them first — that's design, and design stays with Claude.
+1. **Spec gate.** `SPEC_FILE` must exist and read as a work order (goal, concrete steps, bounds). No spec → offer `/grill-me-codex` (interview first) or `/codex-plan-review` (have a plan, want it stress-tested) instead. If the user insists on building from a rough idea, write the spec WITH them first — that's design, and design stays with Claude.
 2. **Clean-tree gate.** `git status -sb`. Dirty working tree → STOP and ask the user to commit or stash first. Non-negotiable: Codex writes with full access, and a dirty tree means its diff can't be isolated or cleanly reverted.
 3. Confirm scope in one line, then go. No round-by-round approvals; the human gate is at the end.
 
@@ -104,11 +104,11 @@ Present: 3-bullet summary of what was built, files-changed list, proof-test outp
 - Fix loop terminates at `MAX_FIX_ROUNDS` — then Claude takes over. No unbounded delegation ping-pong.
 - Commits, pushes, releases, GitHub mutations: Claude-side only, after the human gate. Codex never commits.
 - `LOG_FILE` is the deliverable — with Acts 1/2 it tells the whole story: grilled → reviewed → built → verified.
-- After the human gate, offer the optional `codex-verify` skill as a second acceptance gate (DoD / quality / security, selectable via `scope=`) — same `SPEC_FILE` and `LOG_FILE`.
+- After the human gate, offer the optional `codex-code-review` skill as a second acceptance gate (DoD / quality / security, selectable via `scope=`) — same `SPEC_FILE` and `LOG_FILE`.
 
 ## What NOT to do
 
-- Don't build without a spec — that's designing by delegation, and it fails. Route to `/grill-me-codex` or `/codex-review` first.
+- Don't build without a spec — that's designing by delegation, and it fails. Route to `/grill-me-codex` or `/codex-plan-review` first.
 - Don't use for ~<20-line single-obvious-change edits — just make the edit.
 - Don't pin `-codex` model variants on ChatGPT-account auth — 400s.
 - Don't resume with `--last` — capture and use the explicit `THREAD_ID` (parallel sessions make `--last` grab the wrong thread). And ECHO the id into the command visibly before running: `resume` with a missing/garbage id can silently fall back to the most recent session instead of erroring (observed 2026-07-08) — a wrong-target resume looks exactly like a successful one.

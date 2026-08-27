@@ -8,7 +8,7 @@
     {
       "name": "claudex-loop",
       "source": "./",
-      "description": "Four-phase plan hardening: recon → interrogate → adversarial Codex review → cross-model build & inspection. Ships /claudex-loop:claudex-loop, /claudex-loop:codex-review, /claudex-loop:codex-build."
+      "description": "Four-phase plan hardening: recon → interrogate → adversarial Codex review → cross-model build & inspection. Ships /claudex-loop:claudex-loop, /claudex-loop:codex-plan-review, /claudex-loop:codex-build."
     }
   ]
 }

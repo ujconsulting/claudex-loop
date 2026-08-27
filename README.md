@@ -80,7 +80,7 @@ From the first end-to-end greenfield run (a solo-creator CRM):
 /plugin install claudex-loop@claudex-loop
 ```
 
-Skills arrive namespaced: `/claudex-loop:claudex-loop`, `/claudex-loop:codex-review`, `/claudex-loop:codex-build`, `/claudex-loop:codex-verify` (an optional post-build acceptance gate: DoD / code quality / security, selectable via `scope=`). (Intent triggering works regardless — say "claudex this plan" or even the legacy "crucible this plan" and the right skill fires.) Enable auto-update for the marketplace in the `/plugin` menu and new versions pull in on their own.
+Skills arrive namespaced: `/claudex-loop:claudex-loop`, `/claudex-loop:codex-plan-review`, `/claudex-loop:codex-build`, `/claudex-loop:codex-code-review` (an optional post-build acceptance gate: DoD / code quality / security, selectable via `scope=`). (Intent triggering works regardless — say "claudex this plan" or even the legacy "crucible this plan" and the right skill fires.) Enable auto-update for the marketplace in the `/plugin` menu and new versions pull in on their own.
 
 > **Installed back when this was `crucible`?** Your existing marketplace source keeps working (GitHub redirects), but the plugin name changed — re-add with the commands above to pick up the new namespace.
 
@@ -94,7 +94,7 @@ cp -r skills/* ~/.claude/skills/
 Copy-Item -Recurse skills\* $env:USERPROFILE\.claude\skills\
 ```
 
-Invoke as `/claudex-loop`, `/codex-review`, `/codex-build`. Update by `git pull` + re-copy.
+Invoke as `/claudex-loop`, `/codex-plan-review`, `/codex-build`. Update by `git pull` + re-copy.
 
 > **Coming from grill-me-codex or crucible?** This repo *was* both — GitHub redirects the old URLs, so `git pull` in your existing clone just works. The old grill skills live on in [`legacy/`](./legacy/) (copy them only if you want them; `/claudex-loop` doesn't need them).
 
