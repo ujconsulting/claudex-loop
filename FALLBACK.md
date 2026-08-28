@@ -27,8 +27,8 @@ With `2>/dev/null` exhaustion is indistinguishable from a model that said
 nothing.
 
 ```bash
-codex exec -s read-only --json -o /tmp/codex-verdict.txt "$PROMPT" \
-  < /dev/null 2>/tmp/codex-stderr.txt | grep '"type":"thread.started"'
+codex exec -s read-only --json -o "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" "$PROMPT" \
+  < /dev/null 2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" | grep '"type":"thread.started"'
 ```
 
 Terminal-failure signals, any one of which triggers the protocol:
@@ -77,10 +77,10 @@ environment or a git-ignored `.env` (see [.env.example](./.env.example)):
 ```bash
 python scripts/fallback_review.py --list                    # what is configured
 python scripts/fallback_review.py --check                   # preflight all of it
-python scripts/fallback_review.py --plan PLAN.md --out /tmp/verdict.txt
+python scripts/fallback_review.py --plan PLAN.md --out "$SCRATCH_DIR/fallback-verdict-r$ROUND.txt"
 python scripts/fallback_review.py --plan PLAN.md --log PLAN-REVIEW-LOG.md \
-    --round 3 --out /tmp/verdict.txt                        # later rounds
-python scripts/fallback_review.py --chain --plan PLAN.md --out /tmp/verdict.txt
+    --round 3 --out "$SCRATCH_DIR/fallback-verdict-r$ROUND.txt"                        # later rounds
+python scripts/fallback_review.py --chain --plan PLAN.md --out "$SCRATCH_DIR/fallback-verdict-r$ROUND.txt"
 ```
 
 With no profiles configured the script refuses with a clear message — the

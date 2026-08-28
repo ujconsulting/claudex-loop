@@ -35,6 +35,21 @@ Any OpenAI-compatible endpoint works: LM Studio, Ollama, OpenRouter, OpenAI,
 Google Gemini (…/v1beta/openai) and Anthropic (api.anthropic.com/v1) included.
 See .env.example for ready-made profiles.
 
+Egress, in three tiers — plain http reaches loopback only in all of them. The
+plan and the whole review log travel in that request, so the old rule ("no
+cleartext *if a key is set*") had it backwards and left keyless endpoints
+unprotected.
+
+1. Nothing configured: the scheme rule alone. Stdlib-only, the default.
+2. CLAUDEX_EGRESS_ALLOW=host,host — an exact-match host list. No wildcards and
+   no suffixes: `api.openai.com.attacker.test` ends in an allowed name.
+3. A file allowlist — CLAUDEX_EGRESS_ALLOWLIST=<path>, or `config/allowed_egress.yaml`
+   at the repo root, whose mere presence is the opt-in. Per-host schemes and a
+   place to write down WHY a host is listed. **Fail-closed:** if the file is
+   named but missing, unparseable, or PyYAML is not installed, nothing is sent.
+   Not installing the parser does not lift the restriction. This is the only
+   tier that needs a dependency, and only for whoever chooses it.
+
 Preflight (`--check`, and automatically per provider in `--chain`): local
 endpoints (127.0.0.1/localhost) only need to be reachable; remote providers
 get an auth-validity probe (GET /models), and OpenRouter — the only listed
@@ -55,10 +70,11 @@ invalid review (no verdict line, or rubber-stamp suspicion). Never treat exit
 """
 import argparse
 import hashlib
-import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -86,9 +102,9 @@ def load_dotenv(path=".env"):
     if not os.path.exists(path):
         return
     try:
-        with io.open(path, encoding="utf-8-sig") as fh:
-            for line in fh:
-                line = line.strip()
+        with open(path, encoding="utf-8-sig") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, _, value = line.partition("=")
@@ -126,9 +142,12 @@ def profile(name):
     api_key = get("API_KEY")
     key_env = get("API_KEY_ENV")
     if api_key:
-        print(f"WARNING: {prefix}API_KEY holds the key inline — prefer "
-              f"{prefix}API_KEY_ENV pointing at a variable your secret manager "
-              "injects, so the key never sits in a file.")
+        # Was a warning until 2026-08-28. A warning nobody reads is not
+        # enforcement, and the key sits in a file the whole time it is ignored.
+        raise SystemExit(
+            f"Reviewer '{name}': {prefix}API_KEY holds the key inline. Use "
+            f"{prefix}API_KEY_ENV=<VARNAME> instead and let your secret manager "
+            "inject that variable, so the key never sits in a file.")
     if not api_key and key_env:
         api_key = os.environ.get(key_env)
         if not api_key:
@@ -136,12 +155,10 @@ def profile(name):
                 f"Reviewer '{name}': {prefix}API_KEY_ENV points at '{key_env}' "
                 "but that variable is empty. Refusing to call without the key.")
     base_url = base_url.rstrip("/")
-    parts = urlsplit(base_url)
-    if (api_key and parts.scheme == "http"
-            and parts.hostname not in ("127.0.0.1", "localhost", "::1")):
-        raise SystemExit(
-            f"Reviewer '{name}': refusing to send a bearer key over plain http "
-            f"to non-local host {parts.hostname}. Use https.")
+    try:
+        check_egress(base_url)
+    except (EgressDenied, AllowlistUnreadable) as exc:
+        raise SystemExit(f"Reviewer '{name}': {exc}") from exc
 
     def num(suffix, default, cast):
         raw = get(suffix, default)
@@ -149,7 +166,7 @@ def profile(name):
             return cast(raw)
         except (TypeError, ValueError):
             raise SystemExit(
-                f"Reviewer '{name}': {prefix}{suffix}='{raw}' is not a number.")
+                f"Reviewer '{name}': {prefix}{suffix}='{raw}' is not a number.") from None
 
     return {
         "name": name,
@@ -159,6 +176,9 @@ def profile(name):
         "temperature": num("TEMPERATURE", "0.7", float),
         "max_tokens": num("MAX_TOKENS", "8192", int),
         "timeout": num("TIMEOUT", "1800", int),
+        # Opt-in, local endpoints only: ask the runtime to load the model first.
+        "autoload": (get("AUTOLOAD", "") or "").strip().lower() in ("1", "true", "yes", "on"),
+        "context": num("CONTEXT", "32768", int),
     }
 
 
@@ -174,15 +194,227 @@ def auth_headers(p):
     return headers
 
 
+# Hosts where plain http is harmless because the traffic never leaves the
+# machine. `host.docker.internal` belongs here: Docker Desktop maps it to the
+# host of the same box.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "host.docker.internal"})
+
+EGRESS_ALLOW_ENV = "CLAUDEX_EGRESS_ALLOW"
+EGRESS_FILE_ENV = "CLAUDEX_EGRESS_ALLOWLIST"
+
+# Looked for from the repo root when no file is named explicitly. Its mere
+# presence is the opt-in: a repo that ships this file means the rule.
+DEFAULT_ALLOWLIST_RELATIVE = os.path.join("config", "allowed_egress.yaml")
+
+
+class EgressDenied(Exception):
+    """The destination is not allowed to receive the plan."""
+
+
+class AllowlistUnreadable(Exception):
+    """The allowlist was asked for but cannot be read.
+
+    Deliberately distinct from EgressDenied and deliberately fatal: "I cannot
+    tell whether this is allowed" must not degrade into "go ahead". A missing
+    file, broken YAML or a missing parser all land here.
+    """
+
+
+def _repo_root(start=None):
+    here = os.path.abspath(start or os.getcwd())
+    while True:
+        if os.path.exists(os.path.join(here, ".git")):
+            return here
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+
+
+def _allowlist_source():
+    """Where the host allowlist comes from: (path, explicit) or (None, False).
+
+    Resolved at call time, not as a default argument — a module-level default
+    binds at import and cannot be redirected in a test.
+    """
+    named = os.environ.get(EGRESS_FILE_ENV, "").strip()
+    if named:
+        return named, True
+    root = _repo_root()
+    if root:
+        candidate = os.path.join(root, DEFAULT_ALLOWLIST_RELATIVE)
+        if os.path.exists(candidate):
+            return candidate, False
+    return None, False
+
+
+def _yaml_module():
+    """Imported here, not at module scope: the parser is only needed by whoever
+    actually keeps a file allowlist. Everyone else stays stdlib-only."""
+    try:
+        import yaml
+    except ImportError as exc:
+        raise AllowlistUnreadable(
+            "a file allowlist is configured but PyYAML is not installed. Install "
+            "it, or drop the file and use " + EGRESS_ALLOW_ENV + " instead. Not "
+            "installing it does NOT lift the restriction.") from exc
+    return yaml
+
+
+def load_allowlist(path):
+    """Read the allowlist file and return {host: {allowed schemes}}.
+
+    Format (the one already in the wild):
+
+        version: 1
+        hosts:
+          - host: 127.0.0.1
+            schemes: [http, https]
+            why: LM Studio, loopback only
+    """
+    yaml = _yaml_module()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise AllowlistUnreadable(f"{path} cannot be read: {exc}") from exc
+    try:
+        doc = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise AllowlistUnreadable(f"{path} is not valid YAML: {exc}") from exc
+    if not isinstance(doc, dict) or not isinstance(doc.get("hosts"), list):
+        raise AllowlistUnreadable(f"{path}: expected a mapping with a 'hosts' list")
+
+    allowed = {}
+    for entry in doc["hosts"]:
+        if not isinstance(entry, dict) or not entry.get("host"):
+            raise AllowlistUnreadable(f"{path}: entry without 'host': {entry!r}")
+        schemes = entry.get("schemes") or ["https"]
+        if isinstance(schemes, str):
+            schemes = [schemes]
+        allowed[str(entry["host"]).lower()] = frozenset(s.lower() for s in schemes)
+    if not allowed:
+        raise AllowlistUnreadable(f"{path}: no hosts listed")
+    return allowed
+
+
+def check_egress(url):
+    """Refuse a destination before anything is sent to it.
+
+    Two rules, and the first one is the reason this exists:
+
+    1. **Plain http only to loopback.** The check this replaced fired only when
+       an API key was set — so a keyless endpoint received the plan and the whole
+       review log in the clear, to any host. The protected content is the plan,
+       not the key. (Found by the audit in a sister repo, 2026-08-28.)
+    2. **Exact host match** against CLAUDEX_EGRESS_ALLOW when that is set — a
+       comma-separated list of hostnames. No wildcards and no suffix matching:
+       `api.openai.com.attacker.test` ends in an allowed name and would otherwise
+       slip through. Unset means no host restriction; the scheme rule still holds.
+
+    Raises EgressDenied. Never logs and continues — an allowlist you can ignore
+    is not one.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    scheme = (parts.scheme or "").lower()
+    if not host or not scheme:
+        raise EgressDenied(f"destination has no host or scheme: {url!r}")
+
+    if scheme not in ("http", "https"):
+        raise EgressDenied(f"scheme '{scheme}' is not allowed for review traffic.")
+
+    path, explicit = _allowlist_source()
+    if path:
+        if explicit and not os.path.exists(path):
+            raise AllowlistUnreadable(
+                f"{EGRESS_FILE_ENV} points at '{path}', which does not exist. "
+                "Refusing to send anything rather than treating a missing "
+                "allowlist as permission.")
+        allowed = load_allowlist(path)
+        schemes = allowed.get(host)
+        if schemes is None:
+            raise EgressDenied(
+                f"host '{host}' is not in the egress allowlist {path}. Add it "
+                "deliberately, with a reason — that is the question the review "
+                "will ask anyway.")
+        if scheme not in schemes:
+            raise EgressDenied(
+                f"scheme '{scheme}' is not allowed for host '{host}' in {path} "
+                f"(allowed: {', '.join(sorted(schemes))}).")
+    else:
+        raw_allow = os.environ.get(EGRESS_ALLOW_ENV, "").strip()
+        if raw_allow:
+            names = {h.strip().lower() for h in raw_allow.split(",") if h.strip()}
+            if host not in names:
+                raise EgressDenied(
+                    f"host '{host}' is not in {EGRESS_ALLOW_ENV} "
+                    f"({', '.join(sorted(names))}). Add it deliberately, or unset "
+                    "the variable to drop the host restriction.")
+
+    # The floor, checked last so a more specific message wins: cleartext never
+    # leaves the machine, no matter what any allowlist says.
+    if scheme == "http" and host not in LOOPBACK_HOSTS:
+        raise EgressDenied(
+            f"refusing plain http to the non-loopback host '{host}'. The plan and "
+            f"the review log would travel in the clear, whether or not a key goes "
+            f"with them. Use https.")
+
+
 def is_local(p):
     host = urlsplit(p["base_url"]).hostname or ""
-    return host in ("127.0.0.1", "localhost", "::1")
+    return host in LOOPBACK_HOSTS
 
 
 def http_get_json(url, headers, timeout=15):
+    check_egress(url)  # every request, not just the one the profile declared
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
+
+
+def ensure_model_loaded(p):
+    """Have the local runtime load this profile's model, if the profile asked.
+
+    Returns (ok, detail). A no-op — (True, "") — unless ALL of these hold: the
+    profile sets AUTOLOAD, the endpoint is local, and `lms` is on PATH. The
+    adapter is generic and must not assume LM Studio is what is listening.
+
+    Why it exists at all: preflight probes GET /models, and LM Studio lists the
+    models it has DOWNLOADED, not the one it has LOADED. So the check goes green
+    and the run fails afterwards. This was the one thing the LM-Studio-specific
+    predecessor did better than the generic adapter; here it is, as an option.
+    """
+    if not p.get("autoload") or not is_local(p):
+        return True, ""
+    if not shutil.which("lms"):
+        return False, ("AUTOLOAD is set but the `lms` CLI is not on PATH — cannot "
+                       "load the model. Load it in LM Studio, or unset AUTOLOAD.")
+
+    model, context = p["model"], p["context"]
+    root = p["base_url"].rsplit("/v1", 1)[0]
+    try:
+        data = http_get_json(root + "/api/v0/models", {})
+        for entry in data.get("data", []):
+            if entry.get("id") != model or entry.get("state") != "loaded":
+                continue
+            if (entry.get("loaded_context_length") or 0) >= context:
+                return True, f"{model} already loaded"
+            # Loaded, but too small a window for a plan plus the log so far.
+            subprocess.run(["lms", "unload", model], capture_output=True)
+            break
+    except (EgressDenied, AllowlistUnreadable):
+        raise
+    except (urllib.error.URLError, OSError, ValueError):
+        pass  # no /api/v0 here; let the load attempt below be the verdict
+
+    result = subprocess.run(
+        ["lms", "load", model, "--context-length", str(context), "--yes"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[:300]
+        return False, f"`lms load {model}` failed: {detail}"
+    return True, f"{model} loaded (context {context})"
 
 
 def preflight(p):
@@ -195,8 +427,17 @@ def preflight(p):
     """
     headers = auth_headers(p)
     host = urlsplit(p["base_url"]).hostname or ""
+
+    loaded, detail = ensure_model_loaded(p)
+    if not loaded:
+        return False, detail
+
     try:
         http_get_json(p["base_url"] + "/models", headers)
+    except (EgressDenied, AllowlistUnreadable) as exc:
+        # Should not fire — profile() already vetted base_url — but a probe URL
+        # that the allowlist rejects is a refusal, not an outage. Say which.
+        return False, f"egress refused ({exc})"
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             return False, f"auth rejected (HTTP {exc.code})"
@@ -232,12 +473,12 @@ def sha256_file(path):
 
 
 def read_text(path):
-    with io.open(path, encoding="utf-8-sig", errors="replace") as fh:
+    with open(path, encoding="utf-8-sig", errors="replace") as fh:
         return fh.read()
 
 
 def strip_thinking(text):
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 def count_findings(text):
@@ -275,8 +516,9 @@ def run_review(p, args, plan_hash, user_content):
         "stream": False,
     }).encode("utf-8")
 
-    req = urllib.request.Request(p["base_url"] + "/chat/completions",
-                                 data=payload, headers=auth_headers(p))
+    chat_url = p["base_url"] + "/chat/completions"
+    check_egress(chat_url)  # the request that actually carries the plan
+    req = urllib.request.Request(chat_url, data=payload, headers=auth_headers(p))
     try:
         with urllib.request.urlopen(req, timeout=p["timeout"]) as resp:
             body = json.load(resp)
@@ -285,15 +527,16 @@ def run_review(p, args, plan_hash, user_content):
         # Quota/auth errors are terminal for this provider; 5xx may be transient.
         terminal = exc.code in (401, 402, 403, 404, 429)
         raise ProviderError(f"HTTP {exc.code} from {p['base_url']} — {detail}",
-                            terminal=terminal)
+                            terminal=terminal) from exc
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise ProviderError(f"endpoint unreachable or bad reply ({exc})", terminal=False)
+        raise ProviderError(f"endpoint unreachable or bad reply ({exc})",
+                            terminal=False) from exc
 
     try:
         msg = body["choices"][0]["message"]
     except (KeyError, IndexError):
         raise ProviderError(f"unexpected response shape: {json.dumps(body)[:300]}",
-                            terminal=True)
+                            terminal=True) from None
     critique = strip_thinking(msg.get("content") or "")
     if not critique and msg.get("reasoning_content"):
         critique = strip_thinking(msg["reasoning_content"])
@@ -315,7 +558,7 @@ def run_review(p, args, plan_hash, user_content):
               f"# Status: {status}\n\n")
     output = header + critique + "\n"
     if args.out:
-        with io.open(args.out, "w", encoding="utf-8", newline="\n") as fh:
+        with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(output)
         print(f"Review written: {args.out}")
     else:
@@ -326,7 +569,7 @@ def run_review(p, args, plan_hash, user_content):
         label = "fallback" if code == 0 else "fallback — INVALID ATTEMPT, does not count as a round"
         entry = (f"\n## Round {args.round_no} — {p['model']} (via {p['name']}, {label})\n\n"
                  f"_Status: {status} · plan SHA256 {plan_hash}_\n\n{critique}\n")
-        with io.open(args.append_log, "a", encoding="utf-8", newline="\n") as fh:
+        with open(args.append_log, "a", encoding="utf-8", newline="\n") as fh:
             fh.write(entry)
         print(f"Round appended to {args.append_log}")
     return code
@@ -344,7 +587,7 @@ def validate(critique, args, p):
 
     def last_verdict(name, values):
         rx = rf"^{DECOR}{re.escape(name)}:\s*({'|'.join(map(re.escape, values))})[\s*_`.!]*$"
-        found = re.findall(rx, critique, flags=re.M | re.I)
+        found = re.findall(rx, critique, flags=re.MULTILINE | re.IGNORECASE)
         return found[-1].upper() if found else None
 
     findings = count_findings(critique)

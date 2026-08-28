@@ -22,7 +22,6 @@ Exit:   0 = quota available, 1 = a window is at/over the threshold,
 import argparse
 import datetime
 import glob
-import io
 import json
 import os
 import sys
@@ -35,7 +34,7 @@ def find_latest_snapshot():
     for path in files[:10]:
         snap = None
         try:
-            with io.open(path, encoding="utf-8", errors="replace") as fh:
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     if '"rate_limits"' not in line:
                         continue
@@ -63,8 +62,14 @@ def fmt_window(win, label):
     minutes = win.get("window_minutes")
     reset_txt = ""
     if resets:
-        dt = datetime.datetime.fromtimestamp(resets)
-        delta = dt - datetime.datetime.now()
+        # `resets_at` is an absolute epoch value: read it timezone-aware and
+        # then turn it into the LOCAL zone, because a human compares this line
+        # against their own clock ("is Codex back before I leave?"). The delta
+        # is computed between two aware values and is therefore independent of
+        # the display zone.
+        utc = datetime.timezone.utc
+        dt = datetime.datetime.fromtimestamp(resets, tz=utc).astimezone()
+        delta = dt - datetime.datetime.now(tz=utc)
         hours = max(0, int(delta.total_seconds() // 3600))
         reset_txt = f", resets {dt:%Y-%m-%d %H:%M} (~{hours} h)"
     return f"{label} ({minutes} min window): {used:.0f} % used{reset_txt}"
@@ -88,9 +93,10 @@ def main():
         print(f"Source: {path}")
         print(fmt_window(snap.get("primary"), "5-hour"))
         print(fmt_window(snap.get("secondary"), "weekly"))
-        credits = snap.get("credits") or {}
-        if credits:
-            print(f"Credits: balance={credits.get('balance')}, unlimited={credits.get('unlimited')}")
+        credit_info = snap.get("credits") or {}
+        if credit_info:
+            print(f"Credits: balance={credit_info.get('balance')}, "
+                  f"unlimited={credit_info.get('unlimited')}")
 
     worst = max(
         ((w.get("used_percent") or 0.0)
