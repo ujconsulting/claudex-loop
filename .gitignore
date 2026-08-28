@@ -1,3 +1,11 @@
 # Reviewer credentials/config — never commit (see .env.example for the template)
 .env
 __pycache__/
+
+# Lokale Marketplace-/Berechtigungs-Overrides: maschinenspezifische absolute Pfade.
+.claude/settings.local.json
+
+# Interne Review-Ledger: protokollieren ja, veroeffentlichen nein.
+# Die Doktrin verlangt den Log, nicht seine Publikation - Ausnahme ist die
+# audit-Baseline, gegen die spaetere Reviews diffen (die gehoert committet).
+docs/self-review/

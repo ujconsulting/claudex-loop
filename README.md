@@ -68,12 +68,15 @@ The four phases end when the code exists. These three pick up there — same doc
 | **`code-review`** | the finished diff against the plan, in up to five dimensions | `DOD` · `QUALITY` · `SECURITY` · `DOCS` · `TESTS` |
 | **`docs-backfill`** | standing documentation debt, decoupled from any diff | `DOCS: ACCURATE / INACCURATE` |
 | **`audit`** | a codebase nobody ever reviewed — no diff, no plan, no baseline | `AUDIT: CLEAN / CONCERNS / CRITICAL` per slice |
+| **`setup`** | nothing — it *wires a repo up*: wrapper, reviewer role, check catalogue, taboo scope, trust | a live read-only Codex call that must answer |
 
 `code-review` gained `docs` and `tests` because a gate that never asks "is this documented" and "would the tests fail if the code were wrong" leaves the two cheapest defects in place. Add them whenever the diff changes behaviour.
 
 `audit` exists because `code-review` needs a diff and a plan, and an inherited repo has neither. It slices the repo, runs the deterministic tooling **first** so the model spends its attention where linters cannot reach, and produces a **baseline** — after which every later `code-review` only judges the delta instead of re-raising the same debt.
 
 `docs-backfill` writes what the gates found missing. Claude writes, a fresh read-only session grades: a generator that emits docstrings and ships them has nobody checking whether they are *true*, and a confidently wrong docstring is worse than a missing one.
+
+`setup` is the odd one out: it judges nothing, it *installs*. Per repo it wires the reviewer role, the project-specific check catalogue, the taboo scope (read-only means Codex doesn't write — everything it reads still goes to OpenAI), the trust entry, and the read-only wrapper below.
 
 ### The actor is configuration, not a name
 
@@ -117,7 +120,24 @@ From the first end-to-end greenfield run (a solo-creator CRM):
 /plugin install claudex-loop@claudex-loop
 ```
 
-Skills arrive namespaced: `/claudex-loop:claudex-loop`, `/claudex-loop:plan-review`, `/claudex-loop:build`, `/claudex-loop:code-review` (post-build acceptance gate — DoD / quality / security / docs / tests, selectable via `scope=`), `/claudex-loop:docs-backfill` and `/claudex-loop:audit`. (Intent triggering works regardless — say "claudex this plan" or even the legacy "crucible this plan" and the right skill fires.) Enable auto-update for the marketplace in the `/plugin` menu and new versions pull in on their own.
+Skills arrive namespaced: `/claudex-loop:claudex-loop`, `/claudex-loop:plan-review`, `/claudex-loop:build`, `/claudex-loop:code-review` (post-build acceptance gate — DoD / quality / security / docs / tests, selectable via `scope=`), `/claudex-loop:docs-backfill`, `/claudex-loop:audit` and `/claudex-loop:setup`. (Intent triggering works regardless — say "claudex this plan" or even the legacy "crucible this plan" and the right skill fires.) Enable auto-update for the marketplace in the `/plugin` menu and new versions pull in on their own.
+
+### Option C — From a local checkout *(for working on the skills themselves)*
+
+The installed plugin copy is a snapshot, so edits made inside it do not survive a
+reinstall — and on some harnesses the plugin directory is re-provisioned per session, so
+they do not survive at all. Point the marketplace at your working tree instead:
+
+```bash
+claude plugin marketplace add ./          # from the repo root
+claude plugin uninstall claudex-loop
+claude plugin install claudex-loop@claudex-loop
+```
+
+The install copies the **working tree**, uncommitted changes included — nothing has to be
+committed or pushed to try a change. Restart the session afterwards: skills and hooks are
+read at session start. `claude plugin marketplace add ujconsulting/claudex-loop` switches
+back to the published source.
 
 > **Installed back when this was `crucible`?** Your existing marketplace source keeps working (GitHub redirects), but the plugin name changed — re-add with the commands above to pick up the new namespace.
 
@@ -187,6 +207,14 @@ With no `.env` profiles configured, nothing changes — Codex stays the only rev
 **Review (Phases 0–2):** Codex runs **read-only every round** — `-s read-only` on the first call, `-c sandbox_mode="read-only"` on every resume (the `resume` subcommand doesn't accept `-s`, and without forcing read-only it would inherit your `config.toml` sandbox default, which may be `danger-full-access`). The skills handle this for you. No code is written until you approve the final plan.
 
 **`build` (Phase 3)** deliberately inverts this: Codex gets full write access — which is exactly why the skill gates it hard. Clean git tree before launch, Claude reads every line of the diff and runs the proof itself, fix rounds bounded, commits human-gated and Claude-authored. Resume calls need the long flag `--dangerously-bypass-approvals-and-sandbox` (resume has no `--yolo`) — and always resume by explicit `thread_id`, never `--last`.
+
+### The read-only wrapper — and why it isn't enough on its own
+
+[`scripts/codex_ro.py`](./scripts/codex_ro.py) is the canonical wrapper (Windows and macOS, Python 3.8+). It pins `-s read-only` on `exec`, `-c sandbox_mode=read-only` on `resume`, and refuses with exit 2 any `-c` override touching `sandbox_mode`, `approval_policy`, `sandbox_permissions` or `sandbox_workspace_write`. Path arguments may only point into the repo and the OS temp dir — it deletes its own output file before each run, so an unbounded path argument would be a write primitive. `python -m unittest discover -s tests` covers the refusals; the sandbox behaviour itself is a measurement, recorded in the file's docstring.
+
+`setup` copies it to each repo as `tools/codex_ro.py`, because a permission rule has to name a stable path and the plugin directory carries a version hash. Copies drift — [`scripts/wrapper_drift.py`](./scripts/wrapper_drift.py) reports which ones have fallen behind and `--update` levels them.
+
+**The wrapper alone does not make an allowlist entry safe.** A permission rule matches the *start* of a command, so `Bash(python tools/codex_ro.py*)` also approves whatever is chained behind it. The wrapper nails Codex's sandbox down; it has nothing to say about a second command sharing its approval. [`hooks/wrapper_guard.py`](./hooks/wrapper_guard.py) is the missing half: a `PreToolUse` hook that denies any wrapper invocation carrying chaining, a pipe, a redirect, command substitution, or unbalanced quotes. Without a verified hook, the honest configuration is no allowlist entry at all — roughly six prompts across a five-round review, which is the price of seeing which sandbox Codex starts in.
 
 ## Credits
 

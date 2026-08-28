@@ -8,7 +8,7 @@
     {
       "name": "claudex-loop",
       "source": "./",
-      "description": "Four-phase plan hardening: recon → interrogate → adversarial Codex review → cross-model build & inspection. Ships claudex-loop, plan-review (plan gate), build, code-review (acceptance gate), docs-backfill (documentation backfill) and audit (first pass over an unreviewed codebase)."
+      "description": "Four-phase plan hardening: recon → interrogate → adversarial Codex review → cross-model build & inspection. Ships claudex-loop, plan-review (plan gate), build, code-review (acceptance gate), docs-backfill (documentation backfill), audit (first pass over an unreviewed codebase) and setup (wires a repo up) — plus the cross-platform read-only Codex wrapper and the PreToolUse guard that stops an allowlisted wrapper call from carrying a second command."
     }
   ]
 }
