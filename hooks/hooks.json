@@ -1,0 +1,16 @@
+{
+  "description": "claudex-loop — keeps an allowlisted read-only Codex wrapper call from carrying a second command along on the same approval",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/claudex-python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/wrapper_guard.py\""
+          }
+        ]
+      }
+    ]
+  }
+}
