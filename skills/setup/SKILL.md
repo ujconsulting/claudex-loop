@@ -35,7 +35,7 @@ Die drei Korrekturen, die am meisten kosten, wenn man sie nicht kennt:
 
 | Plugin-README sagt | Verifiziert gilt |
 | --- | --- |
-| „Don't pin a model" | **Doch pinnen:** `-m gpt-5.6-terra -c model_reasoning_effort="high"`. Der Pin läuft unter ChatGPT-Auth einwandfrei; die Warnung zielt auf die alten `*-codex`-Slugs. ⛔ **Nicht `sol`** — reißt an echten Plänen das 10-Minuten-Ceiling (exit 143). |
+| „Don't pin a model" | **Doch pinnen:** `-m gpt-5.6-terra -c model_reasoning_effort="high"`. Der Pin läuft unter ChatGPT-Auth einwandfrei; die Warnung zielt auf die alten `*-codex`-Slugs. ⛔ **Nicht `sol`** — reißt an echten Plänen das 10-Minuten-Ceiling (exit 143). Ausnahme: der Exposure-Pass von `code-review`/`audit` läuft bewusst auf `sol`/`medium` (Rolle `exposure-review`, begrenzter Input). |
 | Plan als Datei, Codex liest ihn | **Plantext inline in den Prompt.** Codex' Shell-Aufrufe können per Policy blockiert werden und eine frische `PLAN.md` ist oft untracked — dann reviewt Codex den Code, aber nicht den Plan. |
 | `2>/dev/null` | **stderr in eine Datei.** Ein abgelaufener Token liefert exit 0, gültige `thread_id` und eine *leere* Verdict-Datei; der 401 steht nur in stderr. |
 

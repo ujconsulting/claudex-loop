@@ -65,9 +65,9 @@ The four phases end when the code exists. These three pick up there — same doc
 
 | Skill | Judges | Verdict |
 |---|---|---|
-| **`code-review`** | the finished diff against the plan, in up to five dimensions | `DOD` · `QUALITY` · `SECURITY` · `DOCS` · `TESTS` |
+| **`code-review`** | the finished diff against the plan, in up to five dimensions — plus, for anything that faces the network, a separate exposure pass on its own model | `DOD` · `QUALITY` · `SECURITY` · `DOCS` · `TESTS` · `EXPOSURE` |
 | **`docs-backfill`** | standing documentation debt, decoupled from any diff | `DOCS: ACCURATE / INACCURATE` |
-| **`audit`** | a codebase nobody ever reviewed — no diff, no plan, no baseline | `AUDIT: CLEAN / CONCERNS / CRITICAL` per slice |
+| **`audit`** | a codebase nobody ever reviewed — no diff, no plan, no baseline | `AUDIT: CLEAN / CONCERNS / CRITICAL` per slice · `EXPOSURE: SAFE / UNSAFE` per exposed component |
 | **`setup`** | nothing — it *wires a repo up*: wrapper, reviewer role, check catalogue, taboo scope, trust | a live read-only Codex call that must answer |
 
 `code-review` gained `docs` and `tests` because a gate that never asks "is this documented" and "would the tests fail if the code were wrong" leaves the two cheapest defects in place. Add them whenever the diff changes behaviour.
@@ -88,6 +88,7 @@ roles:
   plan-review: codex    # Dual draft:  plan: [claude, codex] + plan-review: cross
   build: claude
   code-review: codex
+  exposure-review: codex   # second grader of build — gpt-5.6-sol/medium by default, see ROLES.md
   docs: claude
   docs-review: codex
   audit: codex
@@ -179,11 +180,13 @@ instead of refusing on a violated rule. Prefer Option A, or copy `scripts/` as w
 | `code-review` | `scope` | `dod,quality,security` | Add `docs,tests` whenever the diff changes behaviour |
 | `code-review` | `BASELINE_FILE` | newest `docs/audit/*-baseline.md` | Known debt from an `audit` run — raised again only where a change makes it worse |
 | `code-review` | `DOCSTRING_MIN` | `80` | Percent of new/changed public units that must be documented |
+| `code-review` | `EXPOSURE` | `auto` | Exposure pass for anything that faces the network — `no` is a logged claim, refused when the diff says otherwise |
 | `docs-backfill` | `TARGET` | *required* | What to document. Refuses to run unbounded |
 | `docs-backfill` | `BATCH` | `15` | Units per write-then-review cycle |
 | `audit` | `SLICES` | auto | Which parts to audit. The excluded remainder is reported, not hidden |
 | `audit` | `DIMENSIONS` | `security,quality,docs,tests,rules` | `rules` = conformance to the repo's own CLAUDE.md / AGENTS.md |
 | `audit` | `BASELINE_FILE` | `docs/audit/<date>-baseline.md` | The deliverable |
+| `audit` | `EXPOSED` | auto | Components that face the network; each gets its own exposure session. Unknown counts as exposed |
 
 Pass e.g. `rounds=3` when invoking to override.
 

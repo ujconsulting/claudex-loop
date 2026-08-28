@@ -286,6 +286,8 @@ Opt-out: `inspect=off` at invocation or the user declining at Resolution. Skippi
 
 After the cross-inspection (whichever model built), offer the **`code-review`** skill as a parameterizable acceptance gate on top: a fresh read-only Codex session judges the finished work on `dod` (everything implemented, Definition of Done met), `quality` (readability, clean code, documentation) and `security` — each with its own verdict line, findings arbitrated by Claude, appended to the same `LOG_FILE`. Scope is selectable (`scope=dod,quality,security`); invoke with `SPEC_FILE=<PLAN_FILE>` and the same `LOG_FILE` so one artifact tells the whole story. Offer it, don't force it — the user opts in per run (high-stakes builds are the natural case).
 
+**One exception: a change that faces the network.** If the built diff touches routes, authentication, sessions, webhooks, `ports:`, proxy/tunnel or DNS config, `code-review` is **required** before the human gate, and its exposure pass runs with it — a separate session on the `exposure-review` role (own model and effort, `python scripts/claudex_roles.py --spec exposure-review`) that judges only the exposed components with verdict `EXPOSURE: SAFE/UNSAFE`. `UNSAFE` blocks the commit. Say at the gate whether the pass ran; an exposed change without it is presented as *not reviewed*, not as done.
+
 ---
 
 ## Hard rules

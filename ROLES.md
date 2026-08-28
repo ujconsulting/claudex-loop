@@ -11,8 +11,9 @@ configuration and names the skills after the **activity** instead.
 | `plan-review` | attack a plan before code exists | `roles.plan-review` |
 | `build` | implement a frozen plan | `roles.build` |
 | `code-review` | grade the finished diff (dod/quality/security/docs/tests) | `roles.code-review` |
+| `code-review` · exposure pass | judge only the parts of the diff that face the network, from outside | `roles.exposure-review` |
 | `docs-backfill` | fill standing documentation debt | `roles.docs` + `roles.docs-review` |
-| `audit` | first pass over a codebase nobody reviewed; produces a baseline | `roles.audit` |
+| `audit` | first pass over a codebase nobody reviewed; produces a baseline | `roles.audit` (+ `roles.exposure-review` per exposed component) |
 | `setup` | wires a repo up — wrapper, reviewer role, check catalogue, taboo scope, trust | none: it installs, it does not judge |
 
 Skill names are activities; role names in the config are the steps those
@@ -53,12 +54,18 @@ roles:
   plan-review: codex
   build:       claude
   code-review: codex
+  exposure-review: codex   # second grader of build: the parts that face the network
   docs:        claude
   docs-review: codex
   audit:       codex   # standalone adversary: no producer to pair with
 
 actors:
-  codex:  { model: gpt-5.6-terra, effort: high, sandbox: read-only }
+  codex:
+    model: gpt-5.6-terra
+    effort: high
+    sandbox: read-only
+    roles:                              # per-role model/effort only, never the sandbox
+      exposure-review: { model: gpt-5.6-sol, effort: medium }
   claude: { fresh_subagent: true }
   fallback: [lmstudio]
 
@@ -73,6 +80,7 @@ Resolve and check before any run:
 ```bash
 python scripts/claudex_roles.py --explain   # table + gates, exit 1 if violated
 python scripts/claudex_roles.py --role build    # -> claude
+python scripts/claudex_roles.py --spec exposure-review   # -> codex model=gpt-5.6-sol effort=medium sandbox=read-only
 ```
 
 **Every skill resolves its actor this way and refuses to start on a non-zero
@@ -103,6 +111,22 @@ expensive: data models, tenant isolation, migrations. It answers something a
 single-draft review cannot: a reviewer looking at the producer's document
 inherits its framing. What appears in only one draft is either a blind spot of
 the other or ballast, and both are worth knowing.
+
+## Why the exposure review has its own model
+
+`build` has two graders. `code-review` reads the whole diff against the plan on the
+everyday reviewer (`terra`/high — `sol` at high effort ran a 120-line plan with repo
+context into the ten-minute ceiling). `exposure-review` reads far less — only the
+components that face the network, entire, with the config that publishes them — and
+asks one question: standing outside the machine, what can I reach? A bounded input is
+what makes the stronger model affordable at medium effort, and a different model is
+what makes the pass a second opinion instead of a longer first one.
+
+The override lives under the actor (`actors.codex.roles.<role>`) and may set `model`
+and `effort` only. The sandbox is a property of the actor, and `adversary_read_only`
+checks the actor — a per-role sandbox would be a way around the gate. Under
+Delegation the exposure grader flips with `code-review`; the resolver refuses a build
+graded for exposure by its own author just as it refuses the acceptance review.
 
 ## Standalone adversary roles
 

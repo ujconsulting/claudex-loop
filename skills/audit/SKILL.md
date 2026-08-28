@@ -1,6 +1,6 @@
 ---
 name: audit
-description: "First-pass review of a codebase nobody ever reviewed — no diff, no plan, no baseline. Slices the repo into reviewable pieces, runs the deterministic tooling first, then has a fresh read-only session judge each slice on quality, security, docs, tests and conformance to the repo's own documented rules. Produces a prioritised baseline file so every later review only has to look at the delta instead of re-raising the same debt. Use when the user says \"/audit\", \"initial code review\", \"nobody ever reviewed this\", \"audit this repo\", \"wie steht es um die Codequalitaet\", \"Sicherheitsluecken finden\", or when onboarding an inherited codebase. NOT for reviewing a change — that is code-review, which is anchored to a diff and a plan. NOT a penetration test and NOT a substitute for a real security process on high-stakes code."
+description: "First-pass review of a codebase nobody ever reviewed — no diff, no plan, no baseline. Slices the repo into reviewable pieces, runs the deterministic tooling first, then has a fresh read-only session judge each slice on quality, security, docs, tests and conformance to the repo's own documented rules. Produces a prioritised baseline file so every later review only has to look at the delta instead of re-raising the same debt. Use when the user says \"/audit\", \"initial code review\", \"nobody ever reviewed this\", \"audit this repo\", \"wie steht es um die Codequalitaet\", \"Sicherheitsluecken finden\", or when onboarding an inherited codebase. NOT for reviewing a change — that is code-review, which is anchored to a diff and a plan. Every component reachable from outside the machine — ports, proxy hosts, tunnels, webhooks, public DNS — additionally gets its own exposure session on the `exposure-review` role (stronger model, bounded effort, default gpt-5.6-sol/medium) with a per-component verdict `EXPOSURE: SAFE/UNSAFE` recorded in the baseline. NOT a penetration test and NOT a substitute for a real security process on high-stakes code."
 ---
 
 # Audit — the first pass over code nobody reviewed
@@ -34,7 +34,9 @@ python scripts/claudex_roles.py --explain
 ```
 
 Use the actor printed for `audit`. **A non-zero exit means stop.** Where this document
-says "the reviewer", read it as that resolved actor.
+says "the reviewer", read it as that resolved actor. The exposure sessions (Step 3b)
+run on `exposure-review` — `python scripts/claudex_roles.py --spec exposure-review`
+prints its model and effort; pass them to the wrapper, never pick them here.
 
 ## Tunables (read from skill args, else default)
 
@@ -45,6 +47,7 @@ says "the reviewer", read it as that resolved actor.
 | `BASELINE_FILE` | `docs/audit/<YYYY-MM-DD>-baseline.md` | The deliverable. |
 | `LOG_FILE` | `docs/audit/<YYYY-MM-DD>-audit-log.md` | Reviewer output verbatim + dispositions. |
 | `SEVERITY_FLOOR` | `low` | Drop findings below this. Raise it on a large legacy repo to keep the first pass finishable. |
+| `EXPOSED` | auto | Comma-list of the components that face the network, or `none` as an explicit claim. Auto = mapped in Step 1 from ports, proxy/tunnel config, DNS and the repo's own inventory, listed for confirmation. **Unknown counts as exposed.** |
 
 Echo the resolved values and the slice list before the first call.
 
@@ -64,6 +67,17 @@ this list.
 Refuse to run on an unbounded target with no slices — the same reason `docs-backfill`
 demands a target: one oversized pass produces a report nobody can act on, and a wrong
 judgement propagates through all of it.
+
+**Map the exposed surface while slicing.** For every slice answer: can bytes reach it
+from outside this machine? Evidence, not memory: `ports:` in every compose file and
+whether the bind is loopback or all interfaces, `EXPOSE` in Dockerfiles, reverse-proxy
+and tunnel configs (Caddy, nginx, Traefik, NPM, cloudflared), webhook receivers, public
+DNS names in config or docs, and the repo's own inventory (`## Exposed surface` in
+`AGENTS.md`/`CLAUDE.md`, `docs/exposure.md`) when one exists. Present the list as its own
+table — component, how it is reached, whether it has a login — and get it confirmed
+with the slices. A component whose reachability nobody can state is **exposed until
+proven otherwise**; the audit that assumes "internal" is the one that misses the
+dashboard that was on all interfaces the whole time.
 
 ### Step 2 — Machines first, model second
 
@@ -129,9 +143,16 @@ error.
 > wrong place and costs more time than it saves.
 > Tool output for this slice is inlined — do not repeat what it already found; go where
 > it cannot.
-> {security:} Section SECURITY — authn/authz gaps, injection, secrets in code or
-> config, unsafe deserialisation, path traversal, SSRF, missing input validation at
-> trust boundaries, dependency risk.
+> {security:} Section SECURITY — every route, page and endpoint: does it require
+> authentication, and is authorisation checked per object (a dashboard, API, health or
+> debug endpoint without login is a finding, never a note); default credentials and
+> open signup; secrets in code, config defaults, logs, responses or URLs; injection
+> (SQL, shell, template), path traversal, SSRF, unsafe deserialisation at every trust
+> boundary; webhook and callback signatures verified fail-closed; bind addresses and
+> `ports:` (loopback vs all interfaces); trusted-header or IP-based identity shortcuts
+> and whether they can be switched off; dependency risk from the inlined scanner
+> output. Say what you examined and what you found — a section that names no route it
+> checked has not checked any.
 > {quality:} Section QUALITY — error handling that hides failure, duplicated logic that
 > has already drifted, dead code, functions doing too much, magic values, concurrency
 > and resource-lifetime mistakes.
@@ -152,6 +173,71 @@ an audit is many sessions, so check the remaining budget against the slice count
 **`AUDIT: CLEAN` on a non-trivial slice with zero findings is an invalid review**, not a
 pass. Rerun it or record it as invalid; grown code that nobody reviewed does not come
 back clean.
+
+### Step 3b — Exposure session per exposed component (`exposure-review` role)
+
+For every component in the Step-1 exposure table, one **additional** fresh session on
+the `exposure-review` role — after the slice review, on its own model and effort. The
+slice review asks "what is wrong in here?"; this one asks the attacker's question:
+*standing outside the machine, what can I reach, forge, inject, exhaust or read?*
+
+Input, all numbered: the component's entry points **entire** — routes, handlers,
+middleware, auth, session and webhook code — plus every file that publishes it
+(compose, Dockerfile, proxy/tunnel config, `.env.example`) and the Step-2 scanner
+output for it. Nothing else inlined; the rest is context by path. The bounded input is
+what lets a stronger model run at medium effort inside the ceiling.
+
+> You are the exposure reviewer. The component below faces the network: someone
+> outside this machine can send it bytes. You are read-only. Judge ONLY the inlined
+> component and its deployment config — not code quality, not the rest of the repo.
+> Findings numbered, anchored to file:line citing the inlined numbers verbatim, each
+> with the concrete attack and a one-line fix, severity CRITICAL/HIGH/MEDIUM/LOW.
+> Work through this checklist item by item and say for each what you examined and
+> what you found — "checked, nothing" is a result, silence is not:
+> 1. **Reachability** — what listens where: bind addresses (`0.0.0.0` vs loopback),
+>    compose `ports:`, reverse-proxy hosts, tunnels, public DNS. Name every endpoint
+>    that is reachable from outside the machine.
+> 2. **Authentication on every route** — no dashboard, API, health, metrics, debug or
+>    admin endpoint without login or token. Default credentials. Signup open when it
+>    should be an allowlist. Unauthenticated-by-design must be stated as such, per route.
+> 3. **Authorisation per object** — can one user reach another's records by id (IDOR)?
+>    Admin-only actions gated on the server, not in the UI?
+> 4. **Identity shortcuts** — trusted headers (`X-Forwarded-User`, `X-*-User`), IP
+>    allowlists, "internal" flags: can they be forged from outside, and are they
+>    disableable at all?
+> 5. **Secrets** — in env readable by tasks or agents, in logs, error pages, responses,
+>    URLs, client bundles. Every secret that leaves the process boundary.
+> 6. **Input at the trust boundary** — injection (SQL, shell, template), path traversal,
+>    SSRF (URL fetchers, webhooks), unsafe deserialisation, uploads (type, size, path),
+>    missing size limits.
+> 7. **Webhooks and callbacks** — signature verified with a constant-time compare, secret
+>    required (fail-closed when unset), replay considered, sender allowlisted.
+> 8. **Transport and browser** — TLS, CORS origins, CSRF, cookie flags (Secure, HttpOnly,
+>    SameSite), security headers, WebSocket origin checks.
+> 9. **Abuse** — rate limiting on login and expensive routes, brute-force lockout,
+>    resource exhaustion.
+> 10. **Execution** — anything that runs code or commands from a request (agents, task
+>     runners, eval, YOLO modes): the container boundary and its mounts ARE the sandbox;
+>     what is mounted, and writable?
+> 11. **Dependencies and images** — the inlined grype/hadolint output for exposed
+>     images and manifests; anything running as root that need not.
+> 12. **Leakage** — stack traces, version banners, directory listings, verbose errors.
+> Any route reachable from outside without authentication that is not explicitly
+> public-by-design is CRITICAL. End with a line `Checked: <items>, n/a: <items>` and
+> then exactly `EXPOSURE: SAFE` or `EXPOSURE: UNSAFE`.
+
+```bash
+python tools/codex_ro.py --model "$EXPOSURE_MODEL" --effort "$EXPOSURE_EFFORT" \
+  --prompt-file "$SCRATCH/exposure-<component>.txt" --out-file "$SCRATCH/exposure-<component>-verdict.txt" \
+  --err-file "$SCRATCH/exposure-<component>-stderr.txt"
+```
+
+`EXPOSURE_MODEL`/`EXPOSURE_EFFORT` come from `claudex_roles.py --spec exposure-review`.
+Log each as `## Exposure — <component> — <model>/<effort>` + report verbatim.
+`EXPOSURE: SAFE` with zero findings and an empty `Checked:` line is invalid. A
+CRITICAL here — an unauthenticated reachable route, a forgeable identity header, a
+secret in a response — goes to the user **immediately**, before the rest of the audit
+continues; that is the one exception to "the audit does not fix anything".
 
 ### Step 4 — Triage (the part that decides whether this was worth doing)
 
@@ -176,9 +262,13 @@ Write `BASELINE_FILE`:
    what breaks if it is not fixed.
 2. **Full findings** by slice and severity, with the triage decision on each.
 3. **Accepted risks** with reasons and revisit conditions.
-4. **Coverage** — slices audited, slices excluded, dimensions run, tools that ran and
+4. **Exposed surface** — the Step-1 table with one `EXPOSURE:` verdict per component
+   and its open findings. A component listed without a verdict is marked **not
+   reviewed**, never omitted. This section is what a later `code-review` reads to
+   decide whether a change touches something that faces the network.
+5. **Coverage** — slices audited, slices excluded, dimensions run, tools that ran and
    tools that were missing.
-5. **Tool versions and date.** A baseline without them cannot be compared to the next one.
+6. **Tool versions and date.** A baseline without them cannot be compared to the next one.
 
 Then tell the user the numbers plainly: findings by severity, how many were rejected and
 why, and what was not looked at.
@@ -214,7 +304,9 @@ place an audit is used: reporting that 122 findings were reviewed when 48 were.
 - **The audit does not fix anything.** It produces a baseline; fixes are their own work
   with their own review. The one exception is a CRITICAL finding that is actively
   exploitable — surface that to the user immediately, do not wait for the report.
-- Fresh session per slice; read-only every call.
+- Fresh session per slice; read-only every call. One more per exposed component, on
+  the `exposure-review` role — an exposed component without an `EXPOSURE:` verdict has
+  not been audited, whatever its slice verdict says.
 - Every reviewer output lands in `LOG_FILE` verbatim, including invalid ones, marked as
   such.
 

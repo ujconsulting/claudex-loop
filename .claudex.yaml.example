@@ -8,6 +8,7 @@ roles:
   plan-review: codex     # graded cold by a foreign context
   build:       claude
   code-review: codex
+  exposure-review: codex   # second grader of build: only what faces the network
   docs:        claude
   docs-review: codex
   audit:       codex     # standalone adversary - judges code nobody here produced
@@ -17,6 +18,10 @@ actors:
     model: gpt-5.6-terra   # NOT sol - it runs into the 10-minute ceiling on real plans
     effort: high
     sandbox: read-only     # adversary roles may never be anything else
+    roles:                 # per-role model/effort; the sandbox cannot be overridden here
+      exposure-review:
+        model: gpt-5.6-sol # stronger model, bounded input: only the exposed components
+        effort: medium     # medium keeps sol inside the ceiling on that input
   claude:
     fresh_subagent: true   # as a reviewer, never the orchestrator that built it
   fallback: [lmstudio]     # when the assigned actor is out of quota - user decides, never automatic
@@ -34,6 +39,7 @@ rules:
 # roles:
 #   build:       codex
 #   code-review: claude
+#   exposure-review: claude   # flips with code-review: the maker never grades its own doors
 
 # --- Dual draft: both models plan the same task blind, then grade each other ---
 # Costs two plans. Worth it where a wrong problem framing is expensive - data

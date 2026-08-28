@@ -142,6 +142,15 @@ den 10-Minuten-Timeout (Exit 143), die Verdict-Datei kam erst auf der Ziellinie.
 **1–2 Minuten je Runde**. Die frühere `sol`-Empfehlung stammte aus einem
 8-Sekunden-Smoketest, nicht aus einem Review.
 
+**Die eine Ausnahme: der Exposure-Pass.** `code-review` und `audit` schicken alles, was
+aus dem Netz erreichbar ist (Routen, Auth, Webhooks, `ports:`, Proxy-/Tunnel-Config), in
+eine eigene Sitzung auf der Rolle `exposure-review` — Vorgabe `gpt-5.6-sol` mit
+`medium`. Das geht, weil der Input begrenzt ist: nur die exponierten Komponenten,
+nicht der ganze Diff. Ein stärkeres Modell bei mittlerem Effort über wenig Text bleibt
+unter dem Ceiling; ein anderes Modell macht den Pass zur zweiten Meinung statt zum
+längeren Blick derselben. Modell und Effort kommen aus
+`python scripts/claudex_roles.py --spec exposure-review`, nie aus dem Skill.
+
 Verfügbar sind `gpt-5.6-sol` / `-terra` / `-luna`, Effort bis `ultra`. Der Wrapper nimmt
 `terra`/high als Vorgabe. ⛔ `gpt-5.4` und `gpt-5.4-mini` verschwinden am **31.08.2026**
 aus Codex.
