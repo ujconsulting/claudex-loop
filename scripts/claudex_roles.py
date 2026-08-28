@@ -20,6 +20,7 @@ Config is looked up repo-first, then user, then built-in defaults:
 Usage:
     python scripts/claudex_roles.py                # resolved table, gates checked
     python scripts/claudex_roles.py --role build   # just the actor, for scripting
+    python scripts/claudex_roles.py --spec exposure-review   # actor + model/effort/sandbox
     python scripts/claudex_roles.py --json
     python scripts/claudex_roles.py --explain      # table plus why each gate passed
 """
@@ -33,15 +34,18 @@ import sys
 from pathlib import Path
 
 # --- what a workflow is made of ------------------------------------------------
-# Each artefact is produced by one role and graded by another. The pairing is
-# what the producer_never_reviews gate walks.
+# Each artefact is produced by one role and graded by one or more adversary
+# roles. The pairing is what the producer_never_reviews gate walks. `build` has
+# two graders: the acceptance review and the exposure review, which looks only at
+# the parts of the change that face the network and runs on its own model/effort
+# (a stronger model at bounded effort over a bounded input -- see ROLES.md).
 PAIRS = {
-    "plan": "plan-review",
-    "build": "code-review",
-    "docs": "docs-review",
+    "plan": ("plan-review",),
+    "build": ("code-review", "exposure-review"),
+    "docs": ("docs-review",),
 }
 PRODUCER_ROLES = tuple(PAIRS.keys())
-PAIRED_ADVERSARY_ROLES = tuple(PAIRS.values())
+PAIRED_ADVERSARY_ROLES = tuple(r for rs in PAIRS.values() for r in rs)
 
 # Standalone adversary roles judge something nobody in this workflow produced --
 # a codebase that predates the loop. There is no producer to pair them with, so
@@ -60,12 +64,23 @@ DEFAULTS = {
         "plan-review": "codex",
         "build": "claude",
         "code-review": "codex",
+        "exposure-review": "codex",
         "docs": "claude",
         "docs-review": "codex",
         "audit": "codex",
     },
     "actors": {
-        "codex": {"model": "gpt-5.6-terra", "effort": "high", "sandbox": "read-only"},
+        "codex": {
+            "model": "gpt-5.6-terra",
+            "effort": "high",
+            "sandbox": "read-only",
+            # Per-role overrides of model and effort only. The sandbox is not
+            # overridable here: an adversary role stays read-only whatever the
+            # model, and the gate below checks the actor's sandbox, not a copy.
+            "roles": {
+                "exposure-review": {"model": "gpt-5.6-sol", "effort": "medium"},
+            },
+        },
         "claude": {"fresh_subagent": True},
         "fallback": ["lmstudio"],
     },
@@ -204,6 +219,23 @@ def _validate_shape(cfg: dict) -> None:
     for role in cfg.get("rules", {}).get("write_access", []):
         if role not in ALL_ROLES:
             raise ConfigError(f"write_access names unknown role {role!r}")
+    for actor, spec in cfg.get("actors", {}).items():
+        if not isinstance(spec, dict):
+            continue
+        for role, over in (spec.get("roles") or {}).items():
+            if role not in ALL_ROLES:
+                raise ConfigError(f"actors.{actor}.roles names unknown role {role!r}")
+            if not isinstance(over, dict):
+                raise ConfigError(
+                    f"actors.{actor}.roles.{role}: expected a mapping of model/effort"
+                )
+            illegal = set(over) - {"model", "effort"}
+            if illegal:
+                raise ConfigError(
+                    f"actors.{actor}.roles.{role}: only model and effort may be "
+                    f"overridden per role, not {sorted(illegal)} -- the sandbox is "
+                    f"a property of the actor, and adversary roles stay read-only"
+                )
 
 
 # --- the gates -------------------------------------------------------------------
@@ -214,7 +246,7 @@ def check(cfg: dict) -> list[str]:
     problems: list[str] = []
 
     if rules.get("producer_never_reviews", True):
-        for producer, reviewer in PAIRS.items():
+        for producer, reviewer in _pairs():
             made_by = roles[producer]
             graded_by = roles[reviewer]
             if isinstance(made_by, list):
@@ -262,19 +294,43 @@ def check(cfg: dict) -> list[str]:
     return problems
 
 
+def _pairs() -> list[tuple[str, str]]:
+    """Flatten PAIRS to (producer, reviewer) tuples, one per grader."""
+    return [(p, r) for p, rs in PAIRS.items() for r in rs]
+
+
 def _actors_for(roles: dict, role: str) -> list[str]:
     """Resolve 'cross' to the concrete authors it stands for."""
     value = roles[role]
     if value == "cross":
-        producer = next(p for p, r in PAIRS.items() if r == role)
+        producer = next(p for p, rs in PAIRS.items() if role in rs)
         authors = roles[producer]
         return authors if isinstance(authors, list) else [authors]
     return value if isinstance(value, list) else [value]
 
 
+def actor_spec(cfg: dict, role: str) -> list[dict]:
+    """The concrete actor(s) for a role with per-role model/effort applied.
+
+    One dict per actor: {"actor", "model", "effort", "sandbox", "fresh_subagent"}
+    as far as the actor defines them. This is what a skill reads to build the
+    wrapper call -- the skill never chooses a model itself.
+    """
+    out = []
+    for actor in _actors_for(cfg["roles"], role):
+        base = {k: v for k, v in cfg["actors"].get(actor, {}).items() if k != "roles"}
+        over = (cfg["actors"].get(actor, {}).get("roles") or {}).get(role, {})
+        spec = {"actor": actor, **base, **over}
+        out.append(spec)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--role", help="print only this role's actor(s)")
+    ap.add_argument("--spec", metavar="ROLE",
+                    help="print the role's actor with model/effort/sandbox resolved "
+                         "(per-role overrides applied); one line per actor")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--explain", action="store_true", help="show why each gate passed")
     args = ap.parse_args(argv)
@@ -299,6 +355,20 @@ def main(argv: list[str] | None = None) -> int:
         print(",".join(_actors_for(cfg["roles"], args.role)))
         return 0
 
+    if args.spec:
+        if args.spec not in ALL_ROLES:
+            print(f"claudex-roles: unknown role {args.spec!r}", file=sys.stderr)
+            return 2
+        if problems:
+            print("claudex-roles: refusing to resolve, gates violated:", file=sys.stderr)
+            for p in problems:
+                print(f"  - {p}", file=sys.stderr)
+            return 1
+        for spec in actor_spec(cfg, args.spec):
+            fields = " ".join(f"{k}={v}" for k, v in spec.items() if k != "actor")
+            print(f"{spec['actor']} {fields}".rstrip())
+        return 0
+
     if args.json:
         print(json.dumps(
             {"config": str(path) if path else None, "roles": cfg["roles"],
@@ -308,15 +378,18 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"config: {path or 'built-in defaults (no .claudex.yaml found)'}")
     print()
-    for producer, reviewer in PAIRS.items():
+    for producer, reviewer in _pairs():
         made = cfg["roles"][producer]
         made_s = " + ".join(made) if isinstance(made, list) else made
-        graded = ", ".join(_actors_for(cfg["roles"], reviewer))
+        graded = ", ".join(
+            f"{sp['actor']}" + (f" ({sp['model']}/{sp['effort']})" if sp.get("model") else "")
+            for sp in actor_spec(cfg, reviewer)
+        )
         note = "  (cross-check)" if cfg["roles"][reviewer] == "cross" else ""
-        print(f"  {producer:<6} {made_s:<16} -> {reviewer:<12} {graded}{note}")
+        print(f"  {producer:<6} {made_s:<16} -> {reviewer:<16} {graded}{note}")
     for role in STANDALONE_ADVERSARY_ROLES:
         graded = ", ".join(_actors_for(cfg["roles"], role))
-        print(f"  {'(bestand)':<6} {'-':<16} -> {role:<12} {graded}")
+        print(f"  {'(bestand)':<6} {'-':<16} -> {role:<16} {graded}")
     print()
     if args.explain:
         rules = cfg.get("rules", {})
