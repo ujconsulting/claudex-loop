@@ -13,6 +13,7 @@ configuration and names the skills after the **activity** instead.
 | `code-review` | grade the finished diff (dod/quality/security/docs/tests) | `roles.code-review` |
 | `docs-backfill` | fill standing documentation debt | `roles.docs` + `roles.docs-review` |
 | `audit` | first pass over a codebase nobody reviewed; produces a baseline | `roles.audit` |
+| `setup` | wires a repo up — wrapper, reviewer role, check catalogue, taboo scope, trust | none: it installs, it does not judge |
 
 Skill names are activities; role names in the config are the steps those
 activities occupy. `docs-backfill` is the skill; `docs` and `docs-review` are the
