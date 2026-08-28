@@ -1,6 +1,6 @@
 ---
 name: claudex-loop
-description: Four-phase plan hardening (renamed from /crucible 2026-08-16; old triggers still work) — supersedes /grill-me-codex and /grill-with-docs-codex. PHASE 0 RECON — Claude scouts first (codebase + docs on brownfield; prior art, stack, and pitfalls research on greenfield) and drafts an assumptions ledger. PHASE 1 INTERROGATE — confirm the ledger in one batch, then question only the load-bearing decisions one at a time (each with why-it-matters, a recommendation, and what-breaks-if-we-guess-wrong), cosmetic ones batched, with a visible decision map and an accept-all-recommendations escape hatch. PHASE 2 REVIEW — the locked plan goes to PLAN.md and OpenAI Codex adversarially reviews it in a read-only sandbox (VERDICT: APPROVED/REVISE); Claude revises and re-submits to the SAME Codex session until APPROVED or MAX_ROUNDS, then you sign off before any code. PHASE 3 BUILD (optional) — you pick the builder and the models swap jobs: Codex builds via build and Claude reads the full diff + runs the proof itself; Claude builds and a fresh read-only Codex session cross-inspects the diff (on by default, logged opt-out only); either way you approve the final diff. Use when the user says "/claudex-loop", "claudex this", "run the claudex loop", "/crucible" (legacy), "put this through the crucible", "crucible this plan", "grill me then have codex review", "stress-test this plan before we build", or is about to build something high-stakes (auth, schema, concurrency, migrations, payments, greenfield architecture) and wants alignment AND a cross-model sanity check first. Locked plan needing only the Codex loop → /plan-review. Reviewing already-written code → /codex:review. NOT for trivial changes.
+description: "Four-phase plan hardening (renamed from /crucible 2026-08-16; old triggers still work) — supersedes /grill-me-codex and /grill-with-docs-codex. PHASE 0 RECON — Claude scouts first (codebase + docs on brownfield; prior art, stack, and pitfalls research on greenfield) and drafts an assumptions ledger. PHASE 1 INTERROGATE — confirm the ledger in one batch, then question only the load-bearing decisions one at a time (each with why-it-matters, a recommendation, and what-breaks-if-we-guess-wrong), cosmetic ones batched, with a visible decision map and an accept-all-recommendations escape hatch. PHASE 2 REVIEW — the locked plan goes to PLAN.md and OpenAI Codex adversarially reviews it in a read-only sandbox (VERDICT: APPROVED/REVISE); Claude revises and re-submits to the SAME Codex session until APPROVED or MAX_ROUNDS, then you sign off before any code. PHASE 3 BUILD (optional) — you pick the builder and the models swap jobs: Codex builds via build and Claude reads the full diff + runs the proof itself; Claude builds and a fresh read-only Codex session cross-inspects the diff (on by default, logged opt-out only); either way you approve the final diff. Use when the user says \"/claudex-loop\", \"claudex this\", \"run the claudex loop\", \"/crucible\" (legacy), \"put this through the crucible\", \"crucible this plan\", \"grill me then have codex review\", \"stress-test this plan before we build\", or is about to build something high-stakes (auth, schema, concurrency, migrations, payments, greenfield architecture) and wants alignment AND a cross-model sanity check first. Locked plan needing only the Codex loop → /plan-review. Reviewing already-written code → /codex:review. NOT for trivial changes."
 ---
 
 # Claudex-Loop — Recon, Interrogate, Review, Build
@@ -172,10 +172,23 @@ Phases 0-1 (recon + interrogation) complete — plan locked with the user. MAX_R
 Hand the locked plan to Codex for adversarial review. Mechanics verified end-to-end (2026-06-04) — do not "improve" the invocations below.
 
 ### Prerequisites (verify once, fast)
-- `codex --version` ≥ 0.130 (older CLIs error on the default `gpt-5.5` model).
+- `codex --version` must actually PRINT a version, ≥ 0.130 (older CLIs error on the
+  config default model). **Empty output with a non-zero exit is neither a hang nor an
+  auth failure** — it is a dead binary; do not retry it. Exit 137 (SIGKILL) on macOS
+  means a stale npm-global `codex` shadows the current CLI, which now ships inside the
+  ChatGPT desktop app at `/Applications/ChatGPT.app/Contents/Resources/codex`. Symlink
+  that into a PATH dir ahead of the stale one, then have the *user* run
+  `sudo npm uninstall -g @openai/codex` (needs their password). ⛔ Never delete
+  `~/.codex/` — config, auth and sessions live there and the bundled binary uses them.
+  (upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 - Codex authenticated (prior `codex login`; ChatGPT account is fine). On auth/model error, surface it — don't silently retry.
+- **Start every call from the repo root.** Outside a git repo Codex refuses with
+  `Not inside a trusted directory and --skip-git-repo-check was not specified`. That
+  guard scopes Codex's writable root to the repo. ⛔ Never pass the flag the message
+  names — pointless under `-s read-only`, dangerous in Phase 3, which runs `--yolo`.
+  Greenfield: `git init` first.
 - Do NOT pin `-m`. Use the config default. Pinning `gpt-5.x-codex` variants 400s on ChatGPT-account auth.
-- **Echo the active model before Round 1** so the user can confirm: read the `model` line from `~/.codex/config.toml` (if absent, report "CLI default"). State it alongside the resolved tunables, e.g. `Reviewer model: CLI default (config unpinned) — codex-cli 0.137.0`. If the user objects, stop and let them adjust config before burning a review round.
+- **Echo the active model before Round 1** so the user can confirm: read the `model` line from `~/.codex/config.toml` (if absent, report "CLI default"). State it alongside the resolved tunables, e.g. `Reviewer model: CLI default (config unpinned) — codex-cli 0.149.1` (whatever `codex --version` actually reports; the number moves). If the user objects, stop and let them adjust config before burning a review round.
 
 ### Tunables (read from args, else default)
 | Var | Default | Meaning |
@@ -186,8 +199,26 @@ Hand the locked plan to Codex for adversarial review. Mechanics verified end-to-
 | `research` | ask | `none` / `web` / `deep` — pre-answers the Phase 0 research gate. `deep` = the deep-research dynamic workflow (prompt still shown for sign-off first). |
 | `inspect` | `on` | Post-build cross-inspection of Claude-built code by a fresh read-only Codex session. `off` = skip (logged as an explicit opt-out, never silently). |
 | `MAX_INSPECTION_ROUNDS` | `2` | Initial post-build review + one reinspection after accepted fixes. |
+| `SCRATCH_DIR` | harness scratchpad, else `<repo>/.claudex-tmp/` | Disposable staging for Codex's `-o` capture and stderr. ⛔ Never `/tmp`. |
 
 If invoked with e.g. `rounds=3`, use that for `MAX_ROUNDS`. Echo resolved values before starting.
+
+### Where files go
+
+- **Durable, in the repo:** `PLAN_FILE` and `LOG_FILE` — the deliverables, committed.
+- **Disposable, in `SCRATCH_DIR`:** the `-o` capture and the stderr file, named **per
+  round** (`codex-verdict-r<n>.txt`, `codex-stderr-r<n>.txt`). A single fixed filename
+  reused each round means a failed write silently destroys the previous round's critique,
+  and a lost critique looks exactly like a round that found nothing.
+
+⛔ **Never `/tmp`.** World-readable, so on a shared machine every critique is legible to
+every other user; and on macOS it is a symlink to `/private/tmp`, which breaks path
+matching against `git rev-parse --show-toplevel` (that resolves symlinks, transcript paths
+do not). Prefer the harness's session scratchpad; otherwise create `<repo>/.claudex-tmp/`
+and gitignore it in the same step. Quote the path — on Windows it usually contains spaces.
+
+**A round is not complete until its output is copied into `LOG_FILE`.**
+(upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 
 ### The review prompt (sent each round)
 > You are an adversarial reviewer for an implementation plan. Be skeptical and specific — your job is to find what breaks, not to be agreeable. Read the plan at `PLAN.md` (and `CONTEXT.md`/ADRs for domain language, if present) and any repo files you need (you are read-only). Identify concrete flaws: security holes, race conditions, missing edge cases, schema conflicts, wrong assumptions, observability gaps, simpler alternatives. For each, give a one-line fix. Do NOT modify any files. End your reply with EXACTLY one line: `VERDICT: APPROVED` if the plan is sound enough to implement, or `VERDICT: REVISE` if it still has material problems.
@@ -196,10 +227,10 @@ If invoked with e.g. `rounds=3`, use that for `MAX_ROUNDS`. Echo resolved values
 
 ### Round 1 — fresh session (capture `thread_id`)
 ```bash
-codex exec -s read-only --json -o /tmp/codex-verdict.txt "$(cat REVIEW_PROMPT)" \
-  < /dev/null 2>/tmp/codex-stderr.txt | grep '"type":"thread.started"'
+codex exec -s read-only --json -o "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" "$(cat REVIEW_PROMPT)" \
+  < /dev/null 2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" | grep '"type":"thread.started"'
 ```
-Parse `thread_id` from the `{"type":"thread.started","thread_id":"..."}` line → that's `THREAD_ID`. The critique is in `/tmp/codex-verdict.txt`. Confirm success by the verdict file + a `thread.started` line; if neither appears, the run failed (auth/model) — stop and tell the user. stderr goes to a **file**, not `/dev/null`: it carries cosmetic MCP/auth noise, but it is also the ONLY place a quota or auth failure shows up — a 429 or 401 can present as exit 0 + valid `thread_id` + empty verdict file, and without the stderr file that is indistinguishable from a model that said nothing (see [FALLBACK.md](../../FALLBACK.md)). **`< /dev/null` is mandatory:** `codex exec` reads stdin *in addition to* the prompt arg, so under a non-interactive driver (Claude Code's Bash tool, CI, any non-TTY pipeline) it blocks forever waiting on stdin EOF — a silent ~0% CPU hang. The redirect gives it immediate EOF.
+Parse `thread_id` from the `{"type":"thread.started","thread_id":"..."}` line → that's `THREAD_ID`. The critique is in `$SCRATCH_DIR/codex-verdict-r$ROUND.txt`. Confirm success by the verdict file + a `thread.started` line; if neither appears, the run failed (auth/model) — stop and tell the user. stderr goes to a **file**, not `/dev/null`: it carries cosmetic MCP/auth noise, but it is also the ONLY place a quota or auth failure shows up — a 429 or 401 can present as exit 0 + valid `thread_id` + empty verdict file, and without the stderr file that is indistinguishable from a model that said nothing (see [FALLBACK.md](../../FALLBACK.md)). **`< /dev/null` is mandatory:** `codex exec` reads stdin *in addition to* the prompt arg, so under a non-interactive driver (Claude Code's Bash tool, CI, any non-TTY pipeline) it blocks forever waiting on stdin EOF — a silent ~0% CPU hang. The redirect gives it immediate EOF.
 
 ### Rounds 2..MAX — resume the SAME session (Codex remembers its prior critiques)
 ```bash
@@ -207,16 +238,16 @@ Parse `thread_id` from the `{"type":"thread.started","thread_id":"..."}` line �
 # config.toml (possibly danger-full-access) and could WRITE files. This is the
 # single most important safety line in the skill — verified 2026-06-04.
 codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --json \
-  -o /tmp/codex-verdict.txt \
+  -o "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" \
   "I revised the plan. Re-review PLAN.md — check whether your prior findings are addressed and flag anything new. End with VERDICT: APPROVED or VERDICT: REVISE." \
-  < /dev/null 2>/tmp/codex-stderr.txt >/dev/null
+  < /dev/null 2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" >/dev/null
 ```
 Both `codex exec` and `codex exec resume` support `--json` and `-o/--output-last-message`. The `< /dev/null` redirect is required on the resume call too — same non-interactive stdin hang as Round 1.
 
 **Timeout guard (both rounds):** run every `codex exec` / `codex exec resume` with a 10-minute ceiling so any future stall fails loud instead of hanging silently. Via Claude Code's Bash tool, pass `timeout: 600000` on the tool call (the default 2-minute tool timeout is too short for real reviews and would kill them mid-run). In a plain shell, prefix the command with `timeout 600` (Linux / Git Bash) or `gtimeout 600` (macOS via coreutils — stock macOS has no `timeout`). If the ceiling trips, treat it as a failed run: stop and tell the user rather than retrying blind.
 
 ### Each round, after Codex returns
-1. Read `/tmp/codex-verdict.txt`; append to `LOG_FILE`: `## Round <n> — Codex` + the full critique.
+1. Read `$SCRATCH_DIR/codex-verdict-r$ROUND.txt`; append to `LOG_FILE`: `## Round <n> — Codex` + the full critique.
 2. Grep the last line for the verdict:
    - `VERDICT: APPROVED` → break to Resolution (converged).
    - `VERDICT: REVISE` → Claude decides **what's actually worth acting on** (Claude is final arbiter — Codex advises, doesn't command). Revise `PLAN_FILE`. Append `### Claude's response` to `LOG_FILE`: what changed, what was rejected, why. Increment round.
@@ -230,7 +261,7 @@ Full protocol: [FALLBACK.md](../../FALLBACK.md). The short form:
 - **Terminal-failure signals** mid-loop: 429/"usage limit"/401 in the stderr file, or an empty verdict file on exit 0 twice in a row (once = stumble, retry one time).
 - **No blind retries.** Halt, state cause + reset time, and let the USER pick — never automatically, never silently:
   1. **Wait** — resume the same `$THREAD_ID` after the reset (session memory survives).
-  2. **Switch** to a configured fallback reviewer: `python scripts/fallback_review.py --plan PLAN.md --log <LOG_FILE> --round <n> --out /tmp/verdict.txt` — any OpenAI-compatible endpoint (LM Studio/Ollama local, OpenRouter, OpenAI, Gemini, Anthropic; profiles in `.env`, see `.env.example`). It sees only plan+log text (read-only by construction), rejects rubber-stamps (round-1 APPROVED with < 3 findings = invalid), and binds the verdict to the plan's SHA256. Log such rounds as `## Round <n> — <model> (via <reviewer>, fallback)` — the approval is weaker than a repo-reading Codex round and the log must say so.
+  2. **Switch** to a configured fallback reviewer: `python scripts/fallback_review.py --plan PLAN.md --log <LOG_FILE> --round <n> --out "$SCRATCH_DIR/fallback-verdict-r$ROUND.txt"` — any OpenAI-compatible endpoint (LM Studio/Ollama local, OpenRouter, OpenAI, Gemini, Anthropic; profiles in `.env`, see `.env.example`). It sees only plan+log text (read-only by construction), rejects rubber-stamps (round-1 APPROVED with < 3 findings = invalid), and binds the verdict to the plan's SHA256. Log such rounds as `## Round <n> — <model> (via <reviewer>, fallback)` — the approval is weaker than a repo-reading Codex round and the log must say so.
   3. **Skip** — Phase 2 ends without a verdict; log `## Review skipped — Codex quota exhausted (<window>, resets <time>), decided by <user>` and take the plan to sign-off marked **not cross-reviewed**. Same doctrine as `inspect=off`: skipping yes, silent skipping never.
 
 ### Resolution (you sign off — final gate)

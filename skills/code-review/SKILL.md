@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: A parameterizable SECOND review gate that runs AFTER the build and after the primary review (the post-build cross-inspection, or whatever review your flow ran first). A fresh read-only Codex session judges the finished work on up to five acceptance dimensions — dod (everything implemented, Definition of Done met), quality (readability, clean-code rules, documentation), security, docs (documentation completeness and docstring coverage of the diff), tests (are the changed paths actually covered, and do the tests fail when the code is broken) — each with its own verdict line, findings arbitrated by Claude, one bounded recheck after fixes. Use when the user says "/code-review", "second review", "acceptance review", "DoD check", "verify the build against the plan", "code quality review of what we just built", "security review of the change", or at the end of a claudex-loop/build run when an extra acceptance gate is wanted. Scope is selectable: `scope=dod,quality,security,docs,tests` (default: `dod,quality,security`; add `docs,tests` whenever the diff changes behaviour). NOT a plan review (that is plan-review) and NOT the primary correctness inspection (that is claudex-loop's built-in post-build cross-inspection) — this is the acceptance layer on top.
+description: "A parameterizable SECOND review gate that runs AFTER the build and after the primary review (the post-build cross-inspection, or whatever review your flow ran first). A fresh read-only Codex session judges the finished work on up to five acceptance dimensions — dod (everything implemented, Definition of Done met), quality (readability, clean-code rules, documentation), security, docs (documentation completeness and docstring coverage of the diff), tests (are the changed paths actually covered, and do the tests fail when the code is broken) — each with its own verdict line, findings arbitrated by Claude, one bounded recheck after fixes. Use when the user says \"/code-review\", \"second review\", \"acceptance review\", \"DoD check\", \"verify the build against the plan\", \"code quality review of what we just built\", \"security review of the change\", or at the end of a claudex-loop/build run when an extra acceptance gate is wanted. Scope is selectable: `scope=dod,quality,security,docs,tests` (default: `dod,quality,security`; add `docs,tests` whenever the diff changes behaviour). NOT a plan review (that is plan-review) and NOT the primary correctness inspection (that is claudex-loop's built-in post-build cross-inspection) — this is the acceptance layer on top."
 ---
 
 # code-review — Post-Build Acceptance Review (second gate)
@@ -48,8 +48,25 @@ Reference: `ROLES.md`.
 | `MAX_RECHECK` | `1` | Rechecks after accepted fixes (initial pass + N rechecks; the gate ALWAYS terminates). |
 | `BASELINE_FILE` | newest `docs/audit/*-baseline.md`, else none | Known pre-existing debt from an `audit` run. Everything listed there is NOT this change's fault: raise it again only where the change makes it worse or touches that code. Without this, every review of a legacy repo re-litigates the same findings and the real ones drown. |
 
+| `SCRATCH_DIR` | harness scratchpad, else `<repo>/.claudex-tmp/` | Disposable staging for the assembled prompt, the `-o` capture and stderr. ⛔ Never `/tmp`. |
+
 Echo the resolved values (and the active Codex model, read from
 `~/.codex/config.toml`) before the first call.
+
+### Where files go
+
+- **Durable, in the repo:** `LOG_FILE` (and `BASELINE_FILE` when one exists) — committed.
+- **Disposable, in `SCRATCH_DIR`:** the assembled prompt, the `-o` capture, the stderr
+  file and the scanner reports, named **per round** (`code-review-r<n>.txt`,
+  `verify-prompt-r<n>.txt`, `codex-stderr-r<n>.txt`). A fixed filename reused across the
+  initial pass and the recheck destroys the first verdict on a failed write.
+
+⛔ **Never `/tmp`.** World-readable, so the diff, the spec and any scanner findings sit
+where every other user on the machine can read them — and this skill deliberately puts
+secret-scanner output in there. On macOS it is also a symlink to `/private/tmp`, which
+breaks path matching against `git rev-parse --show-toplevel`. Prefer the harness
+scratchpad; otherwise `<repo>/.claudex-tmp/`, gitignored in the same step. Quote the path.
+(upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 
 ## Flow
 
@@ -128,14 +145,31 @@ Echo the resolved values (and the active Codex model, read from
 > and supply-chain risks introduced by this change. End with exactly
 > `SECURITY: PASS` or `SECURITY: FAIL`.
 
+**Before assembling the `security` section, run the machines** — the same standing
+four as `audit`, scoped to the changed files, with their output pasted into the
+prompt as evidence. A model reading a diff will not spot a secret that a scanner
+finds in a second, and it cannot know a dependency's CVEs at all:
+
+| Tool | Run it when | Command |
+|---|---|---|
+| **gitleaks** | always | `gitleaks dir . --no-banner --redact -f json -r <SCRATCH_DIR>/gitleaks.json` |
+| **grype** | the diff touches dependencies or an image | `grype dir:. -o table` |
+| **hadolint** | the diff touches a `Dockerfile` | `hadolint <Dockerfile>` |
+| **actionlint** | the diff touches `.github/workflows/` | `actionlint` |
+
+⛔ **`--redact` is mandatory.** The findings go into a prompt bound for a remote
+model; unredacted, the review would transmit the very secret it just found. State
+in `LOG_FILE` which tools ran and which were absent — a tool that never ran is not
+a `PASS`, and `SECURITY: PASS` on an unscanned diff is a claim nobody checked.
+
 Write the assembled prompt to a temp file and feed it via **stdin** — never as
 a command-line argument: with the diff inlined the prompt easily exceeds the
 OS argument-size limit ("Argument list too long", found the first time this
 skill reviewed its own diff). Otherwise plan-review mechanics apply:
 
 ```bash
-codex exec -s read-only --json -o /tmp/code-review.txt - \
-  < /tmp/verify-prompt.txt 2>/tmp/codex-stderr.txt | grep '"type":"thread.started"'
+codex exec -s read-only --json -o "$SCRATCH_DIR/code-review-r$ROUND.txt" - \
+  < "$SCRATCH_DIR/verify-prompt-r$ROUND.txt" 2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" | grep '"type":"thread.started"'
 ```
 
 Capture `thread_id` from the `thread.started` line; 10-minute ceiling
@@ -226,13 +260,13 @@ to the user to decide. Never average a red scope away — `SECURITY: FAIL` with
      ```bash
      # SPEC (+ DoD) + diff concatenated into one file = everything the
      # reviewer needs, since fallbacks only see inlined text anyway (Step 1).
-     cat "$SPEC_FILE" > /tmp/verify-input.md
-     [ -n "$DOD_FILE" ] && cat "$DOD_FILE" >> /tmp/verify-input.md
-     { echo; echo "=== DIFF ==="; git diff "$BASE_REF"...HEAD; } >> /tmp/verify-input.md
-     python scripts/fallback_review.py --chain --plan /tmp/verify-input.md \
-       --system-file /tmp/verify-prompt.txt \
+     cat "$SPEC_FILE" > "$SCRATCH_DIR/verify-input-r$ROUND.md"
+     [ -n "$DOD_FILE" ] && cat "$DOD_FILE" >> "$SCRATCH_DIR/verify-input-r$ROUND.md"
+     { echo; echo "=== DIFF ==="; git diff "$BASE_REF"...HEAD; } >> "$SCRATCH_DIR/verify-input-r$ROUND.md"
+     python scripts/fallback_review.py --chain --plan "$SCRATCH_DIR/verify-input-r$ROUND.md" \
+       --system-file "$SCRATCH_DIR/verify-prompt-r$ROUND.txt" \
        --require-verdicts "DOD:COMPLETE|INCOMPLETE,QUALITY:ACCEPTABLE|REVISE,SECURITY:PASS|FAIL,DOCS:COMPLETE|INCOMPLETE,TESTS:ADEQUATE|INSUFFICIENT" \
-       --out /tmp/code-review.txt
+       --out "$SCRATCH_DIR/code-review-r$ROUND.txt"
      ```
 
      `--system-file` carries the Step-2 verify prompt (trimmed to the selected
@@ -261,6 +295,10 @@ to the user to decide. Never average a red scope away — `SECURITY: FAIL` with
 - Claude arbitrates — incorporate real findings, reject bad ones with logged
   reasons; the gate result and all dispositions live in `LOG_FILE`.
 - The gate ALWAYS terminates: initial pass + `MAX_RECHECK` rechecks.
+- **The requested scope is carried out in full.** Dropping a dimension, or judging it
+  more shallowly than the others, is not a smaller review — it is a different one, and
+  saying so afterwards does not repair it. If the work does not fit, do it in blocks; if
+  a real limit is hit, name it and ask.
 - Code changes during this skill are limited to fixing accepted findings
   (docstrings and tests written per Step 3b included) — no new features under
   the flag of verification.

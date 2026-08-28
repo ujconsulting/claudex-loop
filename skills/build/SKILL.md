@@ -1,6 +1,6 @@
 ---
 name: build
-description: Hand a frozen spec (PLAN.md or any locked plan) to OpenAI Codex to IMPLEMENT with full write access, while Claude stays the spec-writer and reviewer — the exact role-flip of /plan-review. Codex builds from the spec in a --yolo sandbox, Claude reads the full diff like a contributor PR, runs the proof test, and iterates fixes via the SAME Codex session up to MAX_FIX_ROUNDS before taking over. Human approves the diff before any commit. Use when the user says "/build", "have codex build this", "codex implement the plan", "hand the plan to codex", "delegate the build to codex", or right after a plan survives /grill-me-codex, /grill-with-docs-codex, or /plan-review and they choose Codex for implementation (Act 3). Also for standalone delegation: refactors, mechanical migrations, bug fixes with a known repro, test/coverage writing — anything that reads as a work order. NOT for tiny edits (~<20 lines — delegation overhead loses), NOT for design work (if writing the spec forces decisions, that's /grill-me-codex first), NOT for reviewing existing code (/codex:review), and NOT for anything needing Claude-session tools (MCP, secrets, browser).
+description: "Hand a frozen spec (PLAN.md or any locked plan) to OpenAI Codex to IMPLEMENT with full write access, while Claude stays the spec-writer and reviewer — the exact role-flip of /plan-review. Codex builds from the spec in a --yolo sandbox, Claude reads the full diff like a contributor PR, runs the proof test, and iterates fixes via the SAME Codex session up to MAX_FIX_ROUNDS before taking over. Human approves the diff before any commit. Use when the user says \"/build\", \"have codex build this\", \"codex implement the plan\", \"hand the plan to codex\", \"delegate the build to codex\", or right after a plan survives /grill-me-codex, /grill-with-docs-codex, or /plan-review and they choose Codex for implementation (Act 3). Also for standalone delegation: refactors, mechanical migrations, bug fixes with a known repro, test/coverage writing — anything that reads as a work order. NOT for tiny edits (~<20 lines — delegation overhead loses), NOT for design work (if writing the spec forces decisions, that's /grill-me-codex first), NOT for reviewing existing code (/codex:review), and NOT for anything needing Claude-session tools (MCP, secrets, browser)."
 ---
 
 # Codex-Build — Codex Types, Claude Verifies
@@ -27,12 +27,25 @@ role with an open sandbox), and no run may start on it. Where this document says
 Reference: `ROLES.md`.
 ## Prerequisites (verify once, fast)
 
-- `codex --version` ≥ 0.130 (older CLIs error on the default `gpt-5.5` model).
+- `codex --version` must actually PRINT a version, ≥ 0.130 (older CLIs error on the
+  config default model). **Empty output with a non-zero exit is neither a hang nor an
+  auth failure** — it is a dead binary; do not retry it. Exit 137 (SIGKILL) on macOS
+  means a stale npm-global `codex` shadows the current CLI, which now ships inside the
+  ChatGPT desktop app at `/Applications/ChatGPT.app/Contents/Resources/codex`. Symlink
+  that into a PATH dir ahead of the stale one, then have the *user* run
+  `sudo npm uninstall -g @openai/codex` (needs their password). ⛔ Never delete
+  `~/.codex/`. (upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 - Codex authenticated (prior `codex login`; ChatGPT account is fine). On auth/model error, surface it — don't silently retry.
 - Do NOT pin `-m` or model config (e.g. `model_reasoning_effort`) unless the user asks. Pinning `gpt-5.x-codex` variants 400s on ChatGPT-account auth; config defaults come from `~/.codex/config.toml`.
 - **Echo the active model at kickoff** so the user can confirm: read the `model` line from `~/.codex/config.toml` (absent = "CLI default"); state it with the resolved tunables. If the user objects, stop before launching the build.
 - **Codex has a native image-generation tool** in `codex exec` sessions (ChatGPT-account backed, no API key; verified 2026-07-08 — it saved a generated PNG to disk headless). Specs may therefore include "generate these image assets yourself" steps: name exact file paths, dimensions, and style in the prompt contract.
 - Run from the target repo's root (both `exec` and `resume` then need no `-C`; `resume` doesn't support `-C` anyway).
+- **The repo root is not a convenience, it is the sandbox boundary.** Outside a git
+  repo Codex refuses: `Not inside a trusted directory and --skip-git-repo-check was
+  not specified`. That guard is what scopes Codex's writable root to the repo. ⛔
+  **Never pass `--skip-git-repo-check`** — under `-s read-only` it is merely pointless,
+  but this skill runs `--yolo`, where removing the boundary means Codex may write
+  anywhere. Genuine greenfield: `git init` first, then start.
 
 ## Tunables (read from args, else default)
 
@@ -42,8 +55,28 @@ Reference: `ROLES.md`.
 | `MAX_FIX_ROUNDS` | `2` | Fix iterations via resume before Claude takes over and finishes directly. |
 | `LOG_FILE` | `PLAN-REVIEW-LOG.md` | Append-only build transcript. If it exists (Act 1/2 ran), append `## Act 3 — Build`; else create it. |
 | `PROOF_CMD` | from spec | Exact test/verify command Codex must run as proof. If the spec lacks one, ask the user ONE question to get it before launching. |
+| `SCRATCH_DIR` | harness scratchpad, else `<repo>/.claudex-tmp/` | Disposable staging for the prompt contract, the `-o` capture and stderr. ⛔ Never `/tmp`. |
 
 Echo resolved values before starting.
+
+### Where files go
+
+`ROUND` is `0` for the initial build and `1..MAX_FIX_ROUNDS` for the fix rounds.
+
+- **Durable, in the repo:** `SPEC_FILE` and `LOG_FILE` — committed.
+- **Disposable, in `SCRATCH_DIR`:** the prompt contract, Codex's report
+  (`codex-build-r<n>.txt`) and stderr (`codex-stderr-r<n>.txt`), named **per round**. One
+  fixed name means fix round 2 overwrites the report that documented what round 1 changed
+   — and in this skill that report is the only prose record of a `--yolo` session.
+
+⛔ **Never `/tmp`.** World-readable, and on macOS a symlink to `/private/tmp`, which breaks
+path matching against `git rev-parse --show-toplevel`. Prefer the harness scratchpad;
+otherwise `<repo>/.claudex-tmp/`, gitignored in the same step. Quote the path.
+
+Note the `mktemp` in Step 1: that is fine for the prompt file — it lands in the OS temp
+dir, not in `/tmp` literally — but the report and stderr belong in `SCRATCH_DIR` where you
+can still find them after the run.
+(upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 
 ## Step 0 — Gates (before any Codex launch)
 
@@ -74,12 +107,13 @@ EOF
 ## Step 2 — Launch Codex (fresh session, capture `thread_id`)
 
 ```bash
-codex exec --yolo --json -o /tmp/build.txt - <"$P" 2>/dev/null | grep '"type":"thread.started"'
+codex exec --yolo --json -o "$SCRATCH_DIR/codex-build-r$ROUND.txt" - <"$P" \
+  2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" | grep '"type":"thread.started"'
 ```
 
 - Prompt goes via stdin (`- <"$P"`) — this both avoids quoting bugs AND sidesteps the non-TTY stdin hang (`codex exec` blocks forever waiting on stdin EOF under Claude Code's Bash tool; feeding the file gives immediate EOF).
-- Parse `thread_id` from the `{"type":"thread.started","thread_id":"..."}` line → `THREAD_ID`. Codex's final report lands in `/tmp/build.txt` — read that file; don't parse the JSONL stream for content.
-- `2>/dev/null` suppresses cosmetic MCP/auth stderr noise. Confirm success by the report file + a `thread.started` line; neither → failed run (auth/model) — stop and tell the user.
+- Parse `thread_id` from the `{"type":"thread.started","thread_id":"..."}` line → `THREAD_ID`. Codex's final report lands in `$SCRATCH_DIR/codex-build-r$ROUND.txt` — read that file; don't parse the JSONL stream for content.
+- **stderr goes to a file, never `/dev/null`.** It carries cosmetic MCP/auth noise, but it is also the ONLY place a quota or auth failure appears: a 401 or 429 presents as exit 0 with a valid `thread_id` and an empty report file, which is indistinguishable from a model that said nothing. Confirm success by the report file + a `thread.started` line; neither → failed run — read the stderr file, then stop and tell the user.
 - **Timing:** foreground with `timeout: 600000` on the Bash tool call (default 2-min tool timeout kills real builds). If the spec is clearly >10 min of work (multi-file feature, migration, anything with image generation), launch with `run_in_background: true` instead and read the `-o` file when it exits. Don't kill a quiet background run early — Codex builds are legitimately slow.
 - **Heads-up on completion (required):** when a background Codex run finishes, the FIRST line of your next message to the user must be a loud standalone banner — `🔔 CODEX FINISHED — <what> (exit ok/fail) — verifying now` — BEFORE any verification output. The user is not watching tool calls; never let a completed build slide silently into the verify phase.
 
@@ -99,7 +133,8 @@ Problems found → resume the SAME session (Codex keeps its context; cheaper and
 # resume has no --yolo and no -C: run from the repo dir and spell the long flag,
 # or Codex inherits config.toml's sandbox (possibly read-only) and can't write.
 codex exec resume "$THREAD_ID" --dangerously-bypass-approvals-and-sandbox --json \
-  -o /tmp/build.txt - <"$P2" 2>/dev/null >/dev/null
+  -o "$SCRATCH_DIR/codex-build-r$ROUND.txt" - <"$P2" \
+  2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" >/dev/null
 ```
 
 Re-verify (Step 3) after each round. After `MAX_FIX_ROUNDS` failed rounds: STOP delegating — Claude takes over and finishes the remaining fixes directly. Log the takeover. Ping-ponging trivia through delegation burns more than it saves.

@@ -1,6 +1,6 @@
 ---
 name: docs-backfill
-description: Backfills missing API documentation across a target — a module, package, directory or whole repo — decoupled from any diff or plan. Claude reads each undocumented unit, writes a docstring in the codebase's own format, and a fresh read-only Codex session grades the result: does every docstring match what the code actually does, or does it merely restate the name. Coverage is measured before and after, and the change is proven docs-only. Use when the user says "/docs-backfill", "document this module", "write the missing docstrings", "backfill documentation", "our docs coverage is bad", or when a docs-coverage gate fails and the fix is bulk documentation rather than a per-change fix. NOT for reviewing the documentation of a change under review — that is code-review's `docs` scope, which is anchored to a diff. NOT for prose documentation (README, runbooks, guides).
+description: "Backfills missing API documentation across a target — a module, package, directory or whole repo — decoupled from any diff or plan. Claude reads each undocumented unit, writes a docstring in the codebase's own format, and a fresh read-only Codex session grades the result: does every docstring match what the code actually does, or does it merely restate the name. Coverage is measured before and after, and the change is proven docs-only. Use when the user says \"/docs-backfill\", \"document this module\", \"write the missing docstrings\", \"backfill documentation\", \"our docs coverage is bad\", or when a docs-coverage gate fails and the fix is bulk documentation rather than a per-change fix. NOT for reviewing the documentation of a change under review — that is code-review's `docs` scope, which is anchored to a diff. NOT for prose documentation (README, runbooks, guides)."
 ---
 
 # Codex-Code-Docs — documentation backfill with an adversarial pass
@@ -123,8 +123,9 @@ Per batch, with the changed units inlined:
 
 Mechanics are `code-review`'s: `-s read-only`, prompt via **stdin**, output
 to a file via `cygpath -w`, stderr to a **file** (a 401/429 presents as exit 0
-with empty output), 600 s ceiling, `< /dev/null`. On Windows use
-`powershell -File tools/codex_ro.ps1`. Preflight the quota with
+with empty output), 600 s ceiling, `< /dev/null`. Or hand all of that to the
+wrapper: `python tools/codex_ro.py --prompt-file p.txt --out-file v.txt`, which
+does it the same way on Windows and macOS. Preflight the quota with
 `python scripts/codex_usage.py`; on exhaustion the user decides — wait, fallback
 via `scripts/fallback_review.py --chain --require-verdicts "DOCS:ACCURATE|INACCURATE"`,
 or skip with an explicit log entry. Never silently.

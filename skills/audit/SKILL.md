@@ -1,6 +1,6 @@
 ---
 name: audit
-description: First-pass review of a codebase nobody ever reviewed — no diff, no plan, no baseline. Slices the repo into reviewable pieces, runs the deterministic tooling first, then has a fresh read-only session judge each slice on quality, security, docs, tests and conformance to the repo's own documented rules. Produces a prioritised baseline file so every later review only has to look at the delta instead of re-raising the same debt. Use when the user says "/audit", "initial code review", "nobody ever reviewed this", "audit this repo", "wie steht es um die Codequalitaet", "Sicherheitsluecken finden", or when onboarding an inherited codebase. NOT for reviewing a change — that is code-review, which is anchored to a diff and a plan. NOT a penetration test and NOT a substitute for a real security process on high-stakes code.
+description: "First-pass review of a codebase nobody ever reviewed — no diff, no plan, no baseline. Slices the repo into reviewable pieces, runs the deterministic tooling first, then has a fresh read-only session judge each slice on quality, security, docs, tests and conformance to the repo's own documented rules. Produces a prioritised baseline file so every later review only has to look at the delta instead of re-raising the same debt. Use when the user says \"/audit\", \"initial code review\", \"nobody ever reviewed this\", \"audit this repo\", \"wie steht es um die Codequalitaet\", \"Sicherheitsluecken finden\", or when onboarding an inherited codebase. NOT for reviewing a change — that is code-review, which is anchored to a diff and a plan. NOT a penetration test and NOT a substitute for a real security process on high-stakes code."
 ---
 
 # Audit — the first pass over code nobody reviewed
@@ -73,10 +73,28 @@ cheaper, and put the *results* into the reviewer's prompt:
 - **Whatever the repo already has.** Most repos have a validation entry point (a
   `validate` command, a Makefile target, a CI workflow). Use it instead of
   re-inventing the toolchain — and say in the log which one you used.
-- Typical layers when nothing exists: linters (ruff/eslint/golangci-lint), dependency
-  and image scanning (pip-audit, npm audit, Grype, OSV), secret scanning (Gitleaks,
-  TruffleHog), IaC and pipeline checks (Checkov, hadolint, actionlint), docstring and
-  test coverage (`interrogate`, coverage report).
+- **The standing four**, language-independent and worth running on almost any repo.
+  Probe first — `command -v <tool>` — and name in the log which ones were absent;
+  a tool that never ran is not a clean result:
+
+  | Tool | Run it when | Command |
+  |---|---|---|
+  | **gitleaks** | always — history included | `gitleaks dir . --no-banner --redact -f json -r <SCRATCH>/gitleaks.json` · add `gitleaks git .` for the history |
+  | **grype** | a dependency manifest or an image exists | `grype dir:. -o table` (`-o json` to file; `--fail-on high` if you want a gate) |
+  | **hadolint** | a `Dockerfile` exists | `hadolint <Dockerfile>` |
+  | **actionlint** | `.github/workflows/` exists | `actionlint` (it discovers the workflows itself) |
+
+  ⛔ **`--redact` on gitleaks is not optional.** Its findings go into the reviewer's
+  prompt, and the reviewer is a remote model. Without redaction an audit *transmits*
+  every secret it discovers — turning a scan into the leak it was looking for.
+
+- Language layers on top, when they exist: linters (ruff/eslint/golangci-lint),
+  dependency audits (pip-audit, npm audit, OSV), further secret scanning (TruffleHog),
+  IaC checks (Checkov), docstring and test coverage (`interrogate`, coverage report).
+
+Verified 2026-08-28 against gitleaks 8.30.1, grype 0.118.0, hadolint 2.15.1,
+actionlint 1.7.12 — flags differ across major versions, so check `--help` if a call is
+rejected rather than dropping the tool.
 
 This is not busywork: it takes the mechanical findings off the reviewer's plate so its
 attention goes where only a model helps — missing authorisation, silently swallowed
@@ -172,6 +190,18 @@ From here the repo has a reference point. Later runs of `code-review` take
 raised again only when the change makes it worse or touches that code. That is what
 stops every future review from re-litigating the same debt — and it only works if the
 baseline is committed.
+
+## The scope is the scope
+
+An audit is commissioned with a scope — these slices, these dimensions, every finding
+verified. **Carrying it out at reduced depth is not a smaller version of the job, it is
+a different one.** Declaring the reduction openly does not repair it: the person who may
+shrink a scope is the one who set it.
+
+If the work does not fit one sitting, do it in blocks and continue. If a real limit is
+reached — quota exhausted, access missing, a decision pending — say so and ask. That is
+not the same as quietly lowering the bar, and the difference matters most in exactly the
+place an audit is used: reporting that 122 findings were reviewed when 48 were.
 
 ## Hard rules
 
