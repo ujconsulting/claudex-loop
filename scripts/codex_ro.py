@@ -29,15 +29,30 @@ PowerShell's `Start-Process -ArgumentList` does not quote, which is what made
 argument injection through `-Model` and `-c` possible there (audit 2026-08-28,
 two CRITICAL findings). With a list there is no command line to inject into.
 
+WHAT AN ACCEPTED CALL STILL CANNOT DO (audit 2026-08-30, two CRITICALs)
+    - widen its own write confinement. `--allow-path` and CLAUDEX_ALLOWED_PATHS
+      arrive on the same unattended approval as the call, and --out-file is
+      unlinked while --err-file is truncated. They now widen READS only; write
+      targets stay in the repo and the OS temp dir, always.
+    - point a write target at a symlink, a directory or a device -- checked before
+      the unlink, and opened O_NOFOLLOW so the gap cannot be raced.
+    - define or re-enable an MCP server. Codex runs those as separate processes
+      OUTSIDE the sandbox, so `-c mcp_servers.*` is refused like the sandbox keys,
+      and so is `-c profile=` (a profile carries its own sandbox_mode).
+
 Exit codes:
     0    Codex ran and produced a non-empty answer
     1    Codex exited 0 but the answer file is empty -- the classic expired-token
          case: exit 0, a valid thread_id, and the 401 only in stderr
-    2    refused: bad arguments, a path outside the allowed roots, or a config
-         override that would touch the sandbox
+    2    refused: bad arguments, a path outside the allowed roots, a write target
+         that is not a plain file, a file that cannot be read or opened, or a
+         config override that would touch the sandbox
     124  timeout -- treat as a failure, do not blindly retry
     127  codex executable not found
     else Codex's own exit code
+
+No filesystem failure escapes as a traceback: every path this wrapper opens,
+reads, deletes or creates reports through the codes above instead.
 """
 
 from __future__ import annotations
@@ -51,17 +66,29 @@ import sys
 import tempfile
 from pathlib import Path
 
-WRAPPER_VERSION = "2.1.0"
+WRAPPER_VERSION = "2.2.0"
 
 DEFAULT_MODEL = "gpt-5.6-terra"
 EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
 
-# MCP servers bring nothing to a plan review and cost startup time. These are
-# THIS INSTALLATION's servers; set CLAUDEX_DISABLE_MCP (comma-separated, empty
-# string to disable nothing) to override. Naming a server that does not exist is
-# harmless. Note: `-c mcp_servers="{}"` does NOT work -- only the dotted path per
-# server takes effect.
-DEFAULT_DISABLE_MCP = ("n8n", "MCP_DOCKER")
+# MCP servers bring nothing to a plan review, cost startup time, and -- the part
+# that matters -- Codex runs them as separate processes OUTSIDE the shell sandbox.
+# So the default is: disable every server this installation actually has, read from
+# its config. Set CLAUDEX_DISABLE_MCP (comma-separated) or --disable-mcp to name a
+# subset instead. An EMPTY value is refused with exit 2 whenever servers are
+# configured -- it would leave them all enabled, which is a caller weakening this
+# wrapper from its own command line, exactly like --allow-path widening writes or
+# a `-c mcp_servers.*` override. (This comment claimed the opposite until
+# CodeRabbit read it against the code, 2026-08-30.)
+#
+# ⛔ Naming a server that is NOT configured is the opposite of harmless, whatever
+# this comment used to claim: `-c mcp_servers.X.enabled=false` SYNTHESISES a server
+# table with no `transport`, and Codex then refuses to load its config at all --
+# exit 1, empty answer file, and an error naming the user's config rather than us.
+# The old default `("n8n", "MCP_DOCKER")` cost this repo's own audit its first four
+# sessions (2026-08-30). Hence installed_mcp_servers(): never name one that is not
+# there. Note: `-c mcp_servers="{}"` does not work either -- only the dotted path
+# per server takes effect.
 
 # The whole point of the wrapper. Refused as `-c` overrides, including any dotted
 # child key such as `sandbox_workspace_write.network_access`.
@@ -70,6 +97,12 @@ FORBIDDEN_CONFIG_KEYS = (
     "approval_policy",
     "sandbox_permissions",
     "sandbox_workspace_write",
+    # A profile carries its own sandbox_mode and approval_policy, so allowing it
+    # would let the forbidden keys in through the side door rather than the front.
+    "profile",
+    # The wrapper owns MCP, not the caller: `-c mcp_servers.x.command=...` defines
+    # a server that runs outside the sandbox this wrapper exists to pin.
+    "mcp_servers",
 )
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -111,21 +144,169 @@ def _repo_root(start: Path) -> Path | None:
     return None
 
 
-def allowed_roots(extra: list[str]) -> list[Path]:
+SCRATCH_DIR_ENV = "CLAUDEX_SCRATCH_DIR"
+
+
+def _is_private_dir(path: Path) -> bool:
+    """True when this directory is not writable by other local users.
+
+    On Windows the POSIX mode bits are meaningless -- `os.stat` reports 0o777 for
+    everything -- but the per-user temp dir (`%LOCALAPPDATA%\\Temp`) is genuinely
+    private, so the answer there is yes without asking. On POSIX the question is
+    real, and `/tmp` (mode 1777) is exactly the case this exists to exclude.
+    """
+    if os.name == "nt":
+        return True
+    import stat
+
+    # Every ancestor, not just the directory itself: a private leaf under a
+    # world-writable parent can be replaced wholesale, which is the same race
+    # one level up. Walk upward to the filesystem root.
+    for candidate in (path, *path.parents):
+        try:
+            if os.stat(candidate).st_mode & stat.S_IWOTH:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def allowed_roots(extra: list[str], for_write: bool = False) -> list[Path]:
     """Roots a path argument may point into: the repo, the OS temp dir, opt-ins.
 
     The repo, because that is the work. The temp dir, because prompt and verdict
-    files are routinely staged there. Everything else has to be named explicitly
-    via --allow-path or CLAUDEX_ALLOWED_PATHS, which is the point: an unattended
-    call cannot reach outside unless someone said so.
+    files are routinely staged there.
+
+    ⛔ `for_write=True` drops the opt-ins, and that asymmetry is the whole fix from
+    the audit of 2026-08-30 (CRITICAL). `--allow-path` is an ordinary flag, so it
+    matches the same allowlist prefix as the call itself and arrives unattended --
+    while --out-file gets unlinked and --err-file truncated inside whatever root it
+    named. `--allow-path / --out-file <anything>` was therefore an arbitrary delete
+    approved as a "read-only review". A caller may not widen its own confinement
+    for writes. Reads keep the opt-in: pointing the wrapper at a prompt file
+    somewhere else grants nothing the caller could not do with `cat`.
     """
     cwd = Path.cwd().resolve()
-    roots = [(_repo_root(cwd) or cwd).resolve(), Path(tempfile.gettempdir()).resolve()]
+    repo = (_repo_root(cwd) or cwd).resolve()
+    roots = [repo, Path(tempfile.gettempdir()).resolve()]
+    if for_write:
+        # Write targets get a narrower list than reads, because this wrapper
+        # DELETES --out-file and truncates --err-file. A world-writable parent is
+        # then a real exposure: any local user can swap the directory for a
+        # symlink between resolve() and open(), and O_NOFOLLOW only protects the
+        # final component. CodeRabbit called for openat-style directory handles;
+        # those do not exist on Windows, which is this plugin's main platform, so
+        # the exposure is removed instead of raced -- a target whose parent
+        # nobody else can write to has no race to lose. (2026-08-30.)
+        candidates = [repo, (repo / ".claudex-tmp"), Path(tempfile.gettempdir()).resolve()]
+        named = os.environ.get(SCRATCH_DIR_ENV, "").strip()
+        if named:
+            candidates.append(Path(named).expanduser().resolve())
+        # EVERY candidate is screened, not just the temp dir. A repo checked out
+        # under /tmp, or a CLAUDEX_SCRATCH_DIR pointed at a shared directory, is
+        # the same exposure as /tmp itself -- and the first version of this only
+        # asked the question of the temp dir. (CodeRabbit, 2026-08-30.)
+        private = [d for d in candidates if _is_private_dir(d)]
+        if not private:
+            # Fail closed, but say WHY. An empty allowed list rendered as a
+            # refusal listing nothing, which reads like a bug in the wrapper
+            # rather than a property of the machine. (CodeRabbit, 2026-08-30.)
+            rejected = "\n    ".join(str(d) for d in candidates)
+            die(
+                "no usable write root: every candidate is writable by other local "
+                "users, so a target there could be swapped for a symlink between "
+                "the check and the open.\n"
+                f"  rejected:\n    {rejected}\n"
+                f"  Set {SCRATCH_DIR_ENV} to a directory only you can write to "
+                f"(and whose parents likewise), or move the repo off a shared path.",
+                EXIT_REFUSED,
+            )
+        return private
     opt_ins = list(extra) + os.environ.get("CLAUDEX_ALLOWED_PATHS", "").split(os.pathsep)
     for raw in opt_ins:
         if raw and raw.strip():
             roots.append(Path(raw.strip()).expanduser().resolve())
     return roots
+
+
+def prepare_write_target(path: Path, label: str) -> None:
+    """Refuse a write target that is anything but a plain file, present or absent.
+
+    The wrapper deletes --out-file and truncates --err-file. A symlink there aims
+    that at someone else's file; a directory or device aims it at something worse.
+    Checked before the unlink, and the open below is O_NOFOLLOW so the gap between
+    the two cannot be raced (audit 2026-08-30).
+    """
+    if path.is_symlink():
+        die(
+            f"{label} is a symlink: {path}\n"
+            f"  Refusing: this file gets deleted and rewritten, and a symlink points "
+            f"that at something else. Name the real path.",
+            EXIT_REFUSED,
+        )
+    if path.exists() and not path.is_file():
+        die(f"{label} exists and is not a regular file: {path}", EXIT_REFUSED)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        die(f"{label}: cannot create the directory for {path}: {exc}", EXIT_REFUSED)
+
+
+def open_for_write(path: Path, label: str):
+    """Open a write target without following a link into it.
+
+    O_NOFOLLOW closes the window between prepare_write_target() and here. Windows
+    has no such flag; there, creating a symlink needs a privilege most accounts do
+    not have, so the earlier check carries that platform on its own.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_BINARY", 0)
+    try:
+        return os.fdopen(os.open(path, flags, 0o600), "wb")
+    except OSError as exc:
+        die(f"{label}: cannot open {path} for writing: {exc}", EXIT_REFUSED)
+        raise AssertionError("unreachable")
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+
+
+MCP_SECTION_RE = re.compile(r"^\s*\[mcp_servers\.(?:\"([^\"]+)\"|'([^']+)'|([^\].]+))\]", re.M)
+
+
+def installed_mcp_servers() -> set[str]:
+    """The MCP servers this installation actually configures.
+
+    Only these may be named in a `-c mcp_servers.<name>.enabled=false` override:
+    naming an absent one makes Codex reject its whole config (see the note at the
+    top of this file). Parsed with tomllib from Python 3.11, and with a section
+    regex on 3.10 (the declared floor, where tomllib does not exist yet), which
+    handles every `[mcp_servers.<name>]` spelling the CLI writes. An unreadable or
+    absent config yields the empty set -- there is then nothing to disable, and
+    nothing to break.
+    """
+    config = _codex_home() / "config.toml"
+    try:
+        raw = config.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        # UnicodeError too: a config saved as cp1252 with an umlaut in a path is
+        # not exotic on Windows, and a decode error here would be a traceback in
+        # a function whose documented answer is "then there is nothing to
+        # disable". (CodeRabbit, 2026-08-30.)
+        return set()
+
+    try:
+        import tomllib
+    except ImportError:
+        tomllib = None
+    if tomllib is not None:
+        try:
+            return set(tomllib.loads(raw).get("mcp_servers") or {})
+        except Exception:  # a config we cannot parse: fall through to the regex
+            pass
+    return {next(g for g in match.groups() if g) for match in MCP_SECTION_RE.finditer(raw)}
 
 
 def _within(child: Path, root: Path) -> bool:
@@ -137,19 +318,27 @@ def _within(child: Path, root: Path) -> bool:
     return common == _case_key(str(root))
 
 
-def resolve_in_roots(raw: str, roots: list[Path], label: str) -> Path:
+def resolve_in_roots(raw: str, roots: list[Path], label: str, widenable: bool = True) -> Path:
     """Normalise a path argument and refuse it if it escapes the allowed roots.
 
     realpath() first, so a symlink or a `..` cannot smuggle the target out of a
     root that the literal string appears to stay inside.
+
+    `widenable=False` for write targets: --allow-path does not reach them, so
+    suggesting it would send the reader after a fix that cannot work.
     """
     path = Path(os.path.realpath(Path(raw).expanduser()))
     if not any(_within(path, root) for root in roots):
         listed = "\n    ".join(str(r) for r in roots)
+        advice = (
+            "  Add a root with --allow-path or CLAUDEX_ALLOWED_PATHS if that is intended."
+            if widenable
+            else "  Write targets cannot be widened -- that is deliberate. Choose a path\n"
+            "  inside the repo or the OS temp dir."
+        )
         die(
             f"{label} points outside the allowed roots: {path}\n"
-            f"  allowed:\n    {listed}\n"
-            f"  Add a root with --allow-path or CLAUDEX_ALLOWED_PATHS if that is intended.",
+            f"  allowed:\n    {listed}\n{advice}",
             EXIT_REFUSED,
         )
     return path
@@ -182,8 +371,14 @@ def build_argv(args: argparse.Namespace, out_file: Path) -> list[str]:
         # exec: -s beats any trailing -c sandbox_mode (measured, see module docstring).
         argv += ["-s", "read-only"]
     argv += ["-m", args.model, "-c", f"model_reasoning_effort={args.effort}"]
+    # Only servers this installation has: an override for an absent one makes Codex
+    # reject its entire config. Whatever the caller asked for, this is the filter.
+    installed = installed_mcp_servers()
     for server in args.disable_mcp:
-        argv += ["-c", f"mcp_servers.{server}.enabled=false"]
+        if server in installed:
+            argv += ["-c", f"mcp_servers.{server}.enabled=false"]
+        else:
+            warn(f"MCP server '{server}' is not configured here -- not naming it.")
     for override in args.config:
         argv += ["-c", override]
     argv += ["--json", "-o", str(out_file)]
@@ -379,9 +574,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if raw_mcp is None:
         raw_mcp = os.environ.get("CLAUDEX_DISABLE_MCP")
     if raw_mcp is None:
-        args.disable_mcp = list(DEFAULT_DISABLE_MCP)
+        # Default: every server this installation has. build_argv() filters again,
+        # so an explicit list can never name one that is not there either.
+        args.disable_mcp = sorted(installed_mcp_servers())
     else:
         args.disable_mcp = [name.strip() for name in raw_mcp.split(",") if name.strip()]
+        if not args.disable_mcp and installed_mcp_servers():
+            # Refused, not warned about. The audit fixed the two other ways a
+            # caller could weaken this wrapper from its own command line
+            # (--allow-path widening writes, -c mcp_servers.*), and an empty
+            # --disable-mcp is the third door to the same room: Codex runs MCP
+            # servers as separate processes OUTSIDE the sandbox. A warning on
+            # stderr is not a control -- nobody reads stderr on a call that
+            # succeeded. (CodeRabbit, 2026-08-30.)
+            die(
+                "an empty --disable-mcp / CLAUDEX_DISABLE_MCP would leave this "
+                "installation's MCP servers enabled, and Codex runs those outside "
+                "the read-only sandbox this wrapper exists to pin.\n"
+                f"  configured here: {', '.join(sorted(installed_mcp_servers()))}\n"
+                "  Name the ones you want off, or drop the flag to disable all of "
+                "them. Whoever genuinely needs them on calls codex directly -- and "
+                "answers the permission prompt.",
+                EXIT_REFUSED,
+            )
     return args
 
 
@@ -401,10 +616,16 @@ def main(argv: list[str] | None = None) -> int:
         die(f"--timeout must be positive: {args.timeout}", EXIT_REFUSED)
 
     # 2. Paths -- resolved and confined before anything is created or deleted.
-    roots = allowed_roots(args.allow_path)
-    out_file = resolve_in_roots(args.out_file, roots, "--out-file")
+    #    Two root sets on purpose: --allow-path widens reads, never writes. See
+    #    allowed_roots(); the caller may not widen its own confinement for the
+    #    files this wrapper deletes and truncates.
+    read_roots = allowed_roots(args.allow_path)
+    write_roots = allowed_roots([], for_write=True)
+    if args.allow_path or os.environ.get("CLAUDEX_ALLOWED_PATHS", "").strip():
+        warn("--allow-path / CLAUDEX_ALLOWED_PATHS widen --prompt-file only, not the write targets.")
+    out_file = resolve_in_roots(args.out_file, write_roots, "--out-file", widenable=False)
     err_file = (
-        resolve_in_roots(args.err_file, roots, "--err-file")
+        resolve_in_roots(args.err_file, write_roots, "--err-file", widenable=False)
         if args.err_file
         else out_file.with_suffix(out_file.suffix + ".stderr.txt")
     )
@@ -413,10 +634,14 @@ def main(argv: list[str] | None = None) -> int:
     #    cp1252 on Windows, which mangles every non-ASCII prompt.
     prompt = args.prompt
     if args.prompt_file:
-        prompt_file = resolve_in_roots(args.prompt_file, roots, "--prompt-file")
+        prompt_file = resolve_in_roots(args.prompt_file, read_roots, "--prompt-file")
         if not prompt_file.is_file():
             die(f"--prompt-file not found: {prompt_file}", EXIT_REFUSED)
-        prompt = prompt_file.read_text(encoding="utf-8")
+        try:
+            prompt = prompt_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            # The docstring publishes an exit-code contract; a traceback is not in it.
+            die(f"--prompt-file cannot be read as UTF-8: {prompt_file}: {exc}", EXIT_REFUSED)
     if not prompt or not prompt.strip():
         die("neither --prompt nor --prompt-file provided (or the prompt is empty).", EXIT_REFUSED)
 
@@ -424,10 +649,22 @@ def main(argv: list[str] | None = None) -> int:
     argv_child = build_argv(args, out_file)
     stream_file = Path(str(out_file) + ".stream.json")
 
-    for path in (out_file, err_file, stream_file):
-        path.parent.mkdir(parents=True, exist_ok=True)
+    # Three separate files, and they must stay separate: pointing --err-file at
+    # --out-file makes each truncate the other, and the answer file would end up
+    # holding stderr or nothing at all -- read as "the model said nothing", which
+    # is the auth signature. (CodeRabbit, 2026-08-30.)
+    targets = {"--out-file": out_file, "--err-file": err_file, "the event stream": stream_file}
+    for label, path in targets.items():
+        clashes = [other for other, p in targets.items() if other != label and p == path]
+        if clashes:
+            die(f"{label} and {clashes[0]} are the same file: {path}", EXIT_REFUSED)
+    for label, path in targets.items():
+        prepare_write_target(path, label)
     if out_file.exists():
-        out_file.unlink()
+        try:
+            out_file.unlink()
+        except OSError as exc:
+            die(f"--out-file cannot be replaced: {out_file}: {exc}", EXIT_REFUSED)
 
     mode = f"resume {args.resume}" if args.resume else "exec (new)"
     print(
@@ -445,7 +682,9 @@ def main(argv: list[str] | None = None) -> int:
         if os.name == "nt"
         else {"start_new_session": True}
     )
-    with open(stream_file, "wb") as stream_handle, open(err_file, "wb") as err_handle:
+    with open_for_write(stream_file, "the event stream") as stream_handle, open_for_write(
+        err_file, "--err-file"
+    ) as err_handle:
         proc = subprocess.Popen(
             [executable, *argv_child],
             stdin=subprocess.PIPE,

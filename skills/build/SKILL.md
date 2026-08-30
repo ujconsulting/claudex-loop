@@ -73,9 +73,18 @@ Echo resolved values before starting.
 path matching against `git rev-parse --show-toplevel`. Prefer the harness scratchpad;
 otherwise `<repo>/.claudex-tmp/`, gitignored in the same step. Quote the path.
 
-Note the `mktemp` in Step 1: that is fine for the prompt file — it lands in the OS temp
-dir, not in `/tmp` literally — but the report and stderr belong in `SCRATCH_DIR` where you
-can still find them after the run.
+⛔ **That applies to the `mktemp` in Step 1 too.** This note used to claim bare `mktemp`
+"lands in the OS temp dir, not in `/tmp` literally" — which is true on Windows and false
+on Linux and macOS, where `TMPDIR` is usually unset and `mktemp` puts the file in `/tmp`
+exactly. The prompt carries the whole spec, and on a shared host `/tmp` is world-readable
+(audit 2026-08-30). Give it a template under your own directory:
+
+```bash
+P=$(mktemp "$SCRATCH_DIR/build-prompt.XXXXXX")
+```
+
+The report and stderr belong in `SCRATCH_DIR` for the different reason that you still
+need to find them after the run.
 (upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 
 ## Step 0 — Gates (before any Codex launch)
@@ -89,7 +98,12 @@ can still find them after the run.
 Never inline-quote the prompt — write it to a temp file. Fill this contract completely; when chained from a grill/review skill, derive it from the plan's sections:
 
 ```bash
-P=$(mktemp)
+# ROUND is the build round: 0 for the first build, incremented per fix round.
+# Initialise it HERE. Every report path below carries it, and without an explicit
+# start the fix round reuses `r0` and overwrites the initial build report -- the
+# only prose record of a `--yolo` session (audit 2026-08-30).
+ROUND=0
+P=$(mktemp "$SCRATCH_DIR/build-prompt.XXXXXX")
 cat >"$P" <<'EOF'
 GOAL: <one paragraph — what done looks like>
 SPEC: Read <SPEC_FILE> at the repo root. It is a frozen, already-reviewed spec.
@@ -130,12 +144,20 @@ Codex's report is advisory. Verify yourself:
 Problems found → resume the SAME session (Codex keeps its context; cheaper and better than a fresh run). Write the fix list to a temp file (`$P2`), same contract discipline: exact problem, exact file, proof expected.
 
 ```bash
+ROUND=$((ROUND + 1))   # never reuse r0 — that report is the only record of the build
+P2=$(mktemp "$SCRATCH_DIR/fix-prompt.XXXXXX")
+# ... write the fix list into "$P2" ...
+
 # resume has no --yolo and no -C: run from the repo dir and spell the long flag,
 # or Codex inherits config.toml's sandbox (possibly read-only) and can't write.
 codex exec resume "$THREAD_ID" --dangerously-bypass-approvals-and-sandbox --json \
   -o "$SCRATCH_DIR/codex-build-r$ROUND.txt" - <"$P2" \
   2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" >/dev/null
 ```
+
+This is the one place in the plugin that does NOT go through `tools/codex_ro.py`, and
+deliberately so: the wrapper exists to make write access impossible, and this step is
+the build. Everything else — ping, review, resume-for-review — goes through it.
 
 Re-verify (Step 3) after each round. After `MAX_FIX_ROUNDS` failed rounds: STOP delegating — Claude takes over and finishes the remaining fixes directly. Log the takeover. Ping-ponging trivia through delegation burns more than it saves.
 

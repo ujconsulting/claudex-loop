@@ -22,18 +22,25 @@ Two classes of file:
 
     python scripts/wrapper_drift.py                      # the repo you are standing in
     python scripts/wrapper_drift.py --repo A --repo B    # named repos
-    python scripts/wrapper_drift.py --scan ROOT          # every repo under ROOT
+    python scripts/wrapper_drift.py --scan ROOT          # repos ONE OR TWO levels under ROOT
     python scripts/wrapper_drift.py --scan ROOT --update # and bring the copies level
 
+⚠️ `--scan` looks one and two levels below ROOT, not the whole tree. A copy sitting
+deeper is not reported, and silence from `--scan` is therefore not proof that a
+repo is level -- name it with `--repo` if it lives further down. (The docs claimed
+"every repo under ROOT" until the audit of 2026-08-30.)
+
 Exit code 0 when every copy matches, 1 when at least one does not. `--update`
-rewrites drifted copies from the canonical files and then exits 0 if all are
-level. It never deletes anything.
+rewrites drifted REQUIRED copies and installs missing ones; drifted OPTIONAL copies
+need `--update-optional` as well, because those get edited in place on purpose. It
+never deletes anything, and it refuses to write through a symlink.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import sys
@@ -83,6 +90,52 @@ def inspect_file(repo: Path, canonical: Path, required: bool) -> dict:
     report["status"] = DRIFTED
     report["detail"] = f"{version_of(copy)} ({digest(copy)}) vs {version_of(canonical)} ({digest(canonical)})"
     return report
+
+
+def unsafe_destination(repo: Path, copy: Path) -> str | None:
+    """Why this destination must not be written, or None when it is fine.
+
+    `--update` walks repos it did not create and overwrites files in them, and
+    `shutil.copyfile` happily writes THROUGH a symlink. A scanned repo could
+    therefore point `tools/codex_ro.py` -- or `tools/` itself -- at any file the
+    user can write, and an update would clobber it. (Audit 2026-08-30, HIGH.)
+    """
+    if copy.is_symlink():
+        return "the destination is a symlink"
+    if copy.parent.is_symlink():
+        return "tools/ is a symlink"
+    if copy.exists() and not copy.is_file():
+        return "the destination is not a regular file"
+    try:
+        resolved_repo = repo.resolve()
+        resolved_parent = copy.resolve().parent
+    except OSError as exc:
+        return f"the path cannot be resolved ({exc})"
+    # commonpath, not startswith. A string prefix accepts `<repo>-evil/tools/`
+    # as being "inside" `<repo>` -- the exact false positive codex_ro.py's own
+    # _within() exists to avoid, reintroduced here. (CodeRabbit, 2026-08-30.)
+    try:
+        if os.path.commonpath([str(resolved_parent), str(resolved_repo)]) != str(resolved_repo):
+            return "it resolves outside the repo"
+    except ValueError:
+        # Different drives on Windows: commonpath refuses, and rightly so.
+        return "it resolves onto a different drive"
+    return None
+
+
+def write_atomically(source: Path, destination: Path) -> None:
+    """Write beside the target, then replace it -- never truncate in place.
+
+    An interrupted `copyfile` leaves a half-written wrapper that still satisfies
+    the allowlist entry pointing at it.
+    """
+    staging = destination.with_name(destination.name + ".claudex-new")
+    try:
+        shutil.copyfile(source, staging)
+        staging.replace(destination)
+    finally:
+        if staging.exists():
+            staging.unlink()
 
 
 def find_repos(root: Path) -> list[Path]:
@@ -151,11 +204,15 @@ def main(argv: list[str] | None = None) -> int:
                 problems += 1
                 may_write = (args.update and required) or (args.update_optional and not required)
                 if may_write:
-                    verb = "installed" if status == MISSING else "updated"
-                    report["copy"].parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(path, report["copy"])
-                    status, report["detail"] = LEVEL, f"{verb} {version_of(path)}"
-                    problems -= 1
+                    refusal = unsafe_destination(repo, report["copy"])
+                    if refusal:
+                        report["detail"] += f"  [NOT written: {refusal}]"
+                    else:
+                        verb = "installed" if status == MISSING else "updated"
+                        report["copy"].parent.mkdir(parents=True, exist_ok=True)
+                        write_atomically(path, report["copy"])
+                        status, report["detail"] = LEVEL, f"{verb} {version_of(path)}"
+                        problems -= 1
                 elif status == DRIFTED and not required:
                     report["detail"] += "  [local edits possible — read the diff]"
             marker = {LEVEL: "ok   ", DRIFTED: "DRIFT", MISSING: "GONE "}[status]

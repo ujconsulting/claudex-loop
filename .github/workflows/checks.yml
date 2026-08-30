@@ -1,0 +1,108 @@
+name: checks
+
+# The repo had no CI at all until the audit of 2026-08-30. The 90-test suite ran
+# when someone remembered, `actionlint` had nothing to check, and the security
+# shim `hooks/claudex-python.sh` had never been through shellcheck even once.
+#
+# Windows is in the matrix on purpose, not for completeness: the wrapper carries
+# Windows-specific code (taskkill, the codex.cmd shim, no O_NOFOLLOW, casefolded
+# path comparison) and that is where this plugin is actually used.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 3.10 is the declared floor and the last version WITHOUT tomllib, so it
+        # is the only one that exercises the regex fallback in
+        # installed_mcp_servers(). 3.13 is the ceiling anyone actually runs.
+        python: ["3.10", "3.13"]
+        exclude:
+          - { os: windows-latest, python: "3.10" }
+          - { os: macos-latest, python: "3.10" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade pip
+      - run: pip install ".[dev]"
+      - name: Tests
+        run: python -m pytest -q
+
+  tests-without-pyyaml:
+    # PyYAML is optional, and both degradation paths are load-bearing: the role
+    # resolver falls back to its own parser, and the egress allowlist fails
+    # CLOSED. Neither is exercised by a run where the parser is present.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      # Assert the premise before relying on it. `pip install pytest` does not
+      # bring PyYAML, but nothing here PROVED it was absent -- so a runner image
+      # that happened to ship it would turn this job into a duplicate of the one
+      # above while still reporting green. A job that cannot fail for the reason
+      # it exists is not a check. (CodeRabbit, 2026-08-30.)
+      - name: Assert PyYAML really is absent
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+          if importlib.util.find_spec("yaml") is not None:
+              sys.exit("PyYAML is installed — this job would not exercise the fallback paths")
+          print("PyYAML absent, as this job requires")
+          PY
+      - run: python -m pytest -q
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck hooks/*.sh
+
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Pinned to an immutable digest, not `:latest`. A mutable tag means the
+      # thing that lints this repo's CI can be replaced upstream without anyone
+      # here approving it -- and it runs in the same job as the checkout.
+      # Digest resolved from rhysd/actionlint:1.7.12 on 2026-08-30; bump both
+      # together. (CodeRabbit, 2026-08-30.)
+      - uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: -color
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

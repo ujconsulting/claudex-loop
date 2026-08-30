@@ -221,36 +221,93 @@ and gitignore it in the same step. Quote the path — on Windows it usually cont
 (upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 
 ### The review prompt (sent each round)
-> You are an adversarial reviewer for an implementation plan. Be skeptical and specific — your job is to find what breaks, not to be agreeable. Read the plan at `PLAN.md` (and `CONTEXT.md`/ADRs for domain language, if present) and any repo files you need (you are read-only). Identify concrete flaws: security holes, race conditions, missing edge cases, schema conflicts, wrong assumptions, observability gaps, simpler alternatives. For each, give a one-line fix. Do NOT modify any files. End your reply with EXACTLY one line: `VERDICT: APPROVED` if the plan is sound enough to implement, or `VERDICT: REVISE` if it still has material problems.
+
+⛔ **Inline the plan text; do not tell Codex to read `PLAN_FILE`.** `docs/betrieb.md`
+records why from the first real run: a freshly written plan is usually still untracked,
+Codex's shell calls came back `rejected: blocked by policy`, and it reviewed the
+surrounding code instead of the plan — then returned a confident verdict. Reading the
+file is best-effort; inlining is not. Inline `CONTEXT.md`/ADRs the same way when they
+exist, and interpolate the resolved `PLAN_FILE` **path** only as a label, so a
+non-default plan cannot be signed off on the strength of a review of `PLAN.md`.
+
+> You are an adversarial reviewer for an implementation plan. Be skeptical and specific — your job is to find what breaks, not to be agreeable. The plan is inlined below in full; review THAT text, and read any repo files you need for context (you are read-only). Identify concrete flaws: security holes, race conditions, missing edge cases, schema conflicts, wrong assumptions, observability gaps, simpler alternatives. For each, give a one-line fix. Do NOT modify any files. End your reply with EXACTLY one line: `VERDICT: APPROVED` if the plan is sound enough to implement, or `VERDICT: REVISE` if it still has material problems.
+>
+> `=== BEGIN PLAN (<PLAN_FILE>, sha256 <hash>) ===` … `=== END PLAN ===`
 
 (On greenfield there are no repo files — Codex reviews `PLAN.md` and its `## Assumptions` section on their own merits; the assumption sources give it something concrete to attack.)
 
 ### Round 1 — fresh session (capture `thread_id`)
+
+First write the prompt above into `$SCRATCH_DIR/review-prompt.txt` **yourself**, then:
+
 ```bash
-codex exec -s read-only --json -o "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" "$(cat REVIEW_PROMPT)" \
-  < /dev/null 2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" | grep '"type":"thread.started"'
+ROUND=1
+# Model and effort come from the role config. Reading them and not passing them
+# leaves the wrapper on its own defaults — the drift this doctrine exists to stop.
+SPEC=$(python scripts/claudex_roles.py --spec plan-review) || exit 2
+MODEL=$(echo "$SPEC" | sed -n 's/.*model=\([^ ]*\).*/\1/p')
+EFFORT=$(echo "$SPEC" | sed -n 's/.*effort=\([^ ]*\).*/\1/p')
+
+python tools/codex_ro.py --model "$MODEL" --effort "$EFFORT" \
+  --prompt-file "$SCRATCH_DIR/review-prompt.txt" \
+  --out-file "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" \
+  --err-file "$SCRATCH_DIR/codex-stderr-r$ROUND.txt"
 ```
-Parse `thread_id` from the `{"type":"thread.started","thread_id":"..."}` line → that's `THREAD_ID`. The critique is in `$SCRATCH_DIR/codex-verdict-r$ROUND.txt`. Confirm success by the verdict file + a `thread.started` line; if neither appears, the run failed (auth/model) — stop and tell the user. stderr goes to a **file**, not `/dev/null`: it carries cosmetic MCP/auth noise, but it is also the ONLY place a quota or auth failure shows up — a 429 or 401 can present as exit 0 + valid `thread_id` + empty verdict file, and without the stderr file that is indistinguishable from a model that said nothing (see [FALLBACK.md](../../FALLBACK.md)). **`< /dev/null` is mandatory:** `codex exec` reads stdin *in addition to* the prompt arg, so under a non-interactive driver (Claude Code's Bash tool, CI, any non-TTY pipeline) it blocks forever waiting on stdin EOF — a silent ~0% CPU hang. The redirect gives it immediate EOF.
+
+⛔ **Never `"$(cat REVIEW_PROMPT)"`.** That is what this line said until the audit of
+2026-08-30, and `REVIEW_PROMPT` is a bare relative filename that no step ever creates.
+On a clean repo `cat` fails and Codex is launched with an EMPTY prompt — a review that
+reviews nothing and still produces a verdict. On a repo that happens to ship a file by
+that name, **the repository under review writes the reviewer's instructions**. Write the
+prompt to a scratch file you control, and pass it with `--prompt-file`.
+
+The wrapper also pins the sandbox, confines the paths, silences MCP and files stderr in
+one call — `ROUND` is initialised here so the per-round filenames are actually distinct.
+Parse `thread_id` from the `{"type":"thread.started","thread_id":"..."}` line → that's `THREAD_ID`. The critique is in `$SCRATCH_DIR/codex-verdict-r$ROUND.txt`. Confirm success by the verdict file + a `thread.started` line; if neither appears, the run failed (auth/model) — stop and tell the user. stderr goes to a **file**, not `/dev/null`: it carries cosmetic MCP/auth noise, but it is also the ONLY place a quota or auth failure shows up — a 429 or 401 can present as exit 0 + valid `thread_id` + empty verdict file, and without the stderr file that is indistinguishable from a model that said nothing (see [FALLBACK.md](../../FALLBACK.md)).
+
+> **Do not add `< /dev/null`.** Historically it was mandatory: raw `codex exec` reads
+> stdin *in addition to* the prompt argument, so under a non-interactive driver (Claude
+> Code's Bash tool, CI, any non-TTY pipeline) it blocks forever waiting on stdin EOF — a
+> silent ~0% CPU hang. The wrapper supplies that EOF itself. Appending the redirect now
+> does nothing useful and gets the whole command **denied** by `hooks/wrapper_guard.py`,
+> which treats `<` as shell syntax capable of starting a second command.
 
 ### Rounds 2..MAX — resume the SAME session (Codex remembers its prior critiques)
+
+Write the re-review prompt to `$SCRATCH_DIR/review-prompt-r$ROUND.txt` (the plan text
+inlined again, per the rule below), then:
+
 ```bash
-# resume REJECTS -s. Force read-only via -c sandbox_mode, or Codex inherits
-# config.toml (possibly danger-full-access) and could WRITE files. This is the
-# single most important safety line in the skill — verified 2026-06-04.
-codex exec resume "$THREAD_ID" -c sandbox_mode="read-only" --json \
-  -o "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" \
-  "I revised the plan. Re-review PLAN.md — check whether your prior findings are addressed and flag anything new. End with VERDICT: APPROVED or VERDICT: REVISE." \
-  < /dev/null 2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" >/dev/null
+ROUND=$((ROUND + 1))
+python tools/codex_ro.py --resume "$THREAD_ID" --model "$MODEL" --effort "$EFFORT" \
+  --prompt-file "$SCRATCH_DIR/review-prompt-r$ROUND.txt" \
+  --out-file "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" \
+  --err-file "$SCRATCH_DIR/codex-stderr-r$ROUND.txt"
 ```
-Both `codex exec` and `codex exec resume` support `--json` and `-o/--output-last-message`. The `< /dev/null` redirect is required on the resume call too — same non-interactive stdin hang as Round 1.
+
+⛔ **`resume` REJECTS `-s`.** Read-only is reachable there only through `-c sandbox_mode`,
+and a LATER `-c` beats an earlier one — so a raw `codex exec resume` is one appended
+argument away from inheriting `config.toml` and writing files. The wrapper makes
+`sandbox_mode` the only one it will emit and refuses any `-c` that touches the sandbox,
+`profile` or `mcp_servers`. It also supplies stdin EOF itself, which is what the old
+`< /dev/null` was for: `codex exec` reads stdin *in addition to* the prompt and hangs
+forever at ~0% CPU under a non-interactive driver without it.
 
 **Timeout guard (both rounds):** run every `codex exec` / `codex exec resume` with a 10-minute ceiling so any future stall fails loud instead of hanging silently. Via Claude Code's Bash tool, pass `timeout: 600000` on the tool call (the default 2-minute tool timeout is too short for real reviews and would kill them mid-run). In a plain shell, prefix the command with `timeout 600` (Linux / Git Bash) or `gtimeout 600` (macOS via coreutils — stock macOS has no `timeout`). If the ceiling trips, treat it as a failed run: stop and tell the user rather than retrying blind.
 
 ### Each round, after Codex returns
 1. Read `$SCRATCH_DIR/codex-verdict-r$ROUND.txt`; append to `LOG_FILE`: `## Round <n> — Codex` + the full critique.
-2. Grep the last line for the verdict:
+2. Grep the **last non-blank line** for the verdict:
    - `VERDICT: APPROVED` → break to Resolution (converged).
    - `VERDICT: REVISE` → Claude decides **what's actually worth acting on** (Claude is final arbiter — Codex advises, doesn't command). Revise `PLAN_FILE`. Append `### Claude's response` to `LOG_FILE`: what changed, what was rejected, why. Increment round.
+   - **Anything else — a missing verdict, a malformed one, or an empty file — is an
+     INVALID ROUND, not a quiet no-op.** There was no third branch here until the audit
+     of 2026-08-30, so a reply that ended without a verdict simply fell through: logged,
+     uncounted, and the loop went round again learning nothing. Log it as
+     `## Round <n> — INVALID (no verdict)` with the reply verbatim, read the stderr
+     file, and STOP to tell the user. An empty verdict file on exit 0 is the documented
+     auth/quota signature (see FALLBACK.md) — treat the FIRST one as a possible stumble
+     worth one retry, and the second as terminal.
 3. If round > `MAX_ROUNDS` → break to Resolution (deadlock).
 
 ### If Codex dies mid-loop (quota, credits, outage) — degrade, don't dead-end
@@ -261,7 +318,7 @@ Full protocol: [FALLBACK.md](../../FALLBACK.md). The short form:
 - **Terminal-failure signals** mid-loop: 429/"usage limit"/401 in the stderr file, or an empty verdict file on exit 0 twice in a row (once = stumble, retry one time).
 - **No blind retries.** Halt, state cause + reset time, and let the USER pick — never automatically, never silently:
   1. **Wait** — resume the same `$THREAD_ID` after the reset (session memory survives).
-  2. **Switch** to a configured fallback reviewer: `python scripts/fallback_review.py --plan PLAN.md --log <LOG_FILE> --round <n> --out "$SCRATCH_DIR/fallback-verdict-r$ROUND.txt"` — any OpenAI-compatible endpoint (LM Studio/Ollama local, OpenRouter, OpenAI, Gemini, Anthropic; profiles in `.env`, see `.env.example`). It sees only plan+log text (read-only by construction), rejects rubber-stamps (round-1 APPROVED with < 3 findings = invalid), and binds the verdict to the plan's SHA256. Log such rounds as `## Round <n> — <model> (via <reviewer>, fallback)` — the approval is weaker than a repo-reading Codex round and the log must say so.
+  2. **Switch** to a configured fallback reviewer: `python scripts/fallback_review.py --plan "$PLAN_FILE" --log "$LOG_FILE" --round "$ROUND" --append-log "$LOG_FILE" --out "$SCRATCH_DIR/fallback-verdict-r$ROUND.txt"` — any OpenAI-compatible endpoint (LM Studio/Ollama local, OpenRouter, OpenAI, Gemini, Anthropic; profiles in `.env`, see `.env.example`). It sees only plan+log text (read-only by construction), rejects rubber-stamps (round-1 APPROVED with < 3 findings = invalid), and binds the verdict to the plan's SHA256. It writes the round into `LOG_FILE` itself as `## Round <n> — <model> (via <reviewer>, fallback — plan-text only, no repo access)`, invalid attempts included — the approval is weaker than a repo-reading Codex round and the log says so in the heading. **`--append-log` is required**, and `--plan` takes the resolved `PLAN_FILE` rather than a literal `PLAN.md`; both were wrong here, which would have failed the escape hatch on its own argument check. A remote reviewer additionally needs `CLAUDEX_EGRESS_ALLOW=<host>` — loopback profiles need nothing.
   3. **Skip** — Phase 2 ends without a verdict; log `## Review skipped — Codex quota exhausted (<window>, resets <time>), decided by <user>` and take the plan to sign-off marked **not cross-reviewed**. Same doctrine as `inspect=off`: skipping yes, silent skipping never.
 
 ### Resolution (you sign off — final gate)

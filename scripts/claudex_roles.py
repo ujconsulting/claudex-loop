@@ -152,12 +152,21 @@ def _parse_minimal_yaml(text: str) -> dict:
 
 
 def _load_yaml(path: Path) -> dict:
-    text = path.read_text(encoding="utf-8")
+    # Every failure below becomes a ConfigError: main() catches that and exits 2
+    # with one line. A traceback here exits 1 and reads like a crash in the tool
+    # rather than a problem in the file the user just edited (audit 2026-08-30).
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"{path} cannot be read: {exc}") from exc
     try:
         import yaml  # type: ignore
     except ImportError:
         return _parse_minimal_yaml(text)
-    data = yaml.safe_load(text)
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path} is not valid YAML: {exc}") from exc
     if data is None:
         return {}
     if not isinstance(data, dict):
@@ -166,14 +175,19 @@ def _load_yaml(path: Path) -> dict:
 
 
 def find_config(start: Path | None = None) -> Path | None:
-    """Repo config wins over user config; neither is required."""
+    """The REPO ROOT's config, else the user's; neither is required.
+
+    ⛔ The repo root, and only the repo root. This used to walk every ancestor of
+    the working directory and take the first `.claudex.yaml` it met, so standing
+    in `services/api/` let a nested file override the repository's own policy --
+    while ROLES.md promised "in the repo root" (audit 2026-08-30). Policy that a
+    subdirectory can redefine is not policy.
+    """
     here = (start or Path.cwd()).resolve()
-    for candidate in [here, *here.parents]:
-        p = candidate / ".claudex.yaml"
-        if p.is_file():
-            return p
-        if (candidate / ".git").exists():
-            break
+    root = next((c for c in [here, *here.parents] if (c / ".git").exists()), here)
+    candidate = root / ".claudex.yaml"
+    if candidate.is_file():
+        return candidate
     user = Path.home() / ".claude" / "claudex.yaml"
     return user if user.is_file() else None
 
@@ -192,8 +206,46 @@ def load(start: Path | None = None) -> tuple[dict, Path | None]:
     return cfg, path
 
 
+# Rules that exist to be enforced, not chosen. A config that could switch them off
+# would let the repo under review decide whether it gets reviewed -- and the
+# resolver would still print "gates OK" (audit 2026-08-30, HIGH). ROLES.md states
+# both as mandatory; this is that sentence made executable.
+UNSWITCHABLE_RULES = ("producer_never_reviews", "adversary_read_only")
+
+
+def _require_mapping(value, what: str) -> dict:
+    if not isinstance(value, dict):
+        raise ConfigError(f"{what}: expected a mapping, got {type(value).__name__}")
+    return value
+
+
 def _validate_shape(cfg: dict) -> None:
-    roles = cfg.get("roles", {})
+    roles = _require_mapping(cfg.get("roles", {}), "roles")
+    rules = _require_mapping(cfg.get("rules", {}), "rules")
+    _require_mapping(cfg.get("actors", {}), "actors")
+
+    for rule in UNSWITCHABLE_RULES:
+        if rule in rules and not rules[rule]:
+            raise ConfigError(
+                f"rules.{rule} is not switchable. It is the doctrine this tool "
+                f"exists to enforce (ROLES.md), and a repo that could turn it off "
+                f"would be deciding whether it gets reviewed. Remove the line."
+            )
+
+    # The adversary sandbox is likewise not a preference. The gate below would
+    # catch it too, but refusing here says WHY instead of listing consequences.
+    codex = cfg.get("actors", {}).get("codex")
+    if isinstance(codex, dict) and codex.get("sandbox", "read-only") != "read-only":
+        raise ConfigError(
+            f"actors.codex.sandbox is {codex.get('sandbox')!r}; adversary roles run "
+            f"read-only, always. A build that needs to write does not get there "
+            f"through this file."
+        )
+
+    write_access = rules.get("write_access", [])
+    if not isinstance(write_access, list):
+        raise ConfigError("rules.write_access: expected a list of role names")
+
     unknown = set(roles) - set(ALL_ROLES)
     if unknown:
         raise ConfigError(
@@ -216,13 +268,15 @@ def _validate_shape(cfg: dict) -> None:
                 raise ConfigError(
                     f"role '{role}': unknown actor {a!r}. Known: {list(KNOWN_ACTORS)}"
                 )
-    for role in cfg.get("rules", {}).get("write_access", []):
+    for role in write_access:
         if role not in ALL_ROLES:
             raise ConfigError(f"write_access names unknown role {role!r}")
     for actor, spec in cfg.get("actors", {}).items():
         if not isinstance(spec, dict):
             continue
-        for role, over in (spec.get("roles") or {}).items():
+        per_role = spec.get("roles") or {}
+        _require_mapping(per_role, f"actors.{actor}.roles")
+        for role, over in per_role.items():
             if role not in ALL_ROLES:
                 raise ConfigError(f"actors.{actor}.roles names unknown role {role!r}")
             if not isinstance(over, dict):
@@ -241,50 +295,80 @@ def _validate_shape(cfg: dict) -> None:
 # --- the gates -------------------------------------------------------------------
 
 def check(cfg: dict) -> list[str]:
-    """Return violations. Empty list means the arrangement is sound."""
+    """Return violations. Empty list means the arrangement is sound.
+
+    None of the three checks below asks a config flag whether it should run.
+    producer_never_reviews and adversary_read_only used to be consulted here and
+    could therefore be set false by the repo under review -- which reported "gates
+    OK" for an arrangement where the author graded itself with an open sandbox
+    (audit 2026-08-30). _validate_shape() now refuses such a config outright, and
+    these checks are unconditional so there is no second way in.
+    """
     roles, rules = cfg["roles"], cfg.get("rules", {})
+    return (
+        _producer_never_reviews(roles)
+        + _adversaries_are_read_only(cfg, roles)
+        + _write_access_matches_the_roles(rules)
+    )
+
+
+def _producer_never_reviews(roles: dict) -> list[str]:
     problems: list[str] = []
-
-    if rules.get("producer_never_reviews", True):
-        for producer, reviewer in _pairs():
-            made_by = roles[producer]
-            graded_by = roles[reviewer]
-            if isinstance(made_by, list):
-                # Dual draft: each draft is graded by the other author, so the
-                # reviewer must be that cross-check and not a single actor who
-                # also wrote one of the drafts.
-                if graded_by != "cross":
-                    problems.append(
-                        f"'{producer}' has {len(made_by)} authors {made_by}, so "
-                        f"'{reviewer}' must be 'cross' (each draft graded by the "
-                        f"other author) -- it is '{graded_by}', who co-wrote one."
-                    )
-            elif graded_by == "cross":
+    for producer, reviewer in _pairs():
+        made_by, graded_by = roles[producer], roles[reviewer]
+        if isinstance(made_by, list):
+            # Dual draft: each draft is graded by the other author, so the
+            # reviewer must be that cross-check and not a single actor who also
+            # wrote one of the drafts.
+            if len(set(made_by)) < 2:
+                # A one-element or repeated author list used to sail through here:
+                # `plan: [claude]` + `plan-review: cross` resolved to "claude
+                # cross-checks claude" and reported gates OK. There is no second
+                # reader in that arrangement, only the word for one.
                 problems.append(
-                    f"'{reviewer}' is 'cross' but '{producer}' has a single "
-                    f"author -- there is nothing to cross-check."
+                    f"'{producer}' is a dual draft but names {made_by} -- a "
+                    f"cross-check needs two DISTINCT authors, so that each draft "
+                    f"is graded by the one who did not write it."
                 )
-            elif made_by == graded_by:
+            elif graded_by != "cross":
                 problems.append(
-                    f"'{made_by}' both produces '{producer}' and grades it as "
-                    f"'{reviewer}' -- the maker never grades the thing."
+                    f"'{producer}' has {len(made_by)} authors {made_by}, so "
+                    f"'{reviewer}' must be 'cross' (each draft graded by the "
+                    f"other author) -- it is '{graded_by}', who co-wrote one."
                 )
+        elif graded_by == "cross":
+            problems.append(
+                f"'{reviewer}' is 'cross' but '{producer}' has a single author "
+                f"-- there is nothing to cross-check."
+            )
+        elif made_by == graded_by:
+            problems.append(
+                f"'{made_by}' both produces '{producer}' and grades it as "
+                f"'{reviewer}' -- the maker never grades the thing."
+            )
+    return problems
 
-    if rules.get("adversary_read_only", True):
-        for reviewer in ADVERSARY_ROLES:
-            for actor in _actors_for(roles, reviewer):
-                spec = cfg["actors"].get(actor, {})
-                if actor == "codex" and spec.get("sandbox") != "read-only":
-                    problems.append(
-                        f"'{reviewer}' runs codex with sandbox "
-                        f"{spec.get('sandbox')!r}; adversary roles are read-only."
-                    )
-                if actor == "claude" and not spec.get("fresh_subagent"):
-                    problems.append(
-                        f"'{reviewer}' runs claude without fresh_subagent -- the "
-                        f"orchestrator would be grading its own work."
-                    )
 
+def _adversaries_are_read_only(cfg: dict, roles: dict) -> list[str]:
+    problems: list[str] = []
+    for reviewer in ADVERSARY_ROLES:
+        for actor in _actors_for(roles, reviewer):
+            spec = cfg["actors"].get(actor, {})
+            if actor == "codex" and spec.get("sandbox") != "read-only":
+                problems.append(
+                    f"'{reviewer}' runs codex with sandbox "
+                    f"{spec.get('sandbox')!r}; adversary roles are read-only."
+                )
+            if actor == "claude" and not spec.get("fresh_subagent"):
+                problems.append(
+                    f"'{reviewer}' runs claude without fresh_subagent -- the "
+                    f"orchestrator would be grading its own work."
+                )
+    return problems
+
+
+def _write_access_matches_the_roles(rules: dict) -> list[str]:
+    problems: list[str] = []
     allowed = set(rules.get("write_access", []))
     for role in ALL_ROLES:
         if role in ADVERSARY_ROLES and role in allowed:

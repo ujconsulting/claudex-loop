@@ -9,3 +9,9 @@ __pycache__/
 # Die Doktrin verlangt den Log, nicht seine Publikation - Ausnahme ist die
 # audit-Baseline, gegen die spaetere Reviews diffen (die gehoert committet).
 docs/self-review/
+
+# Build-Metadaten aus `pip install .` — entsteht durch das setuptools-Backend
+# in pyproject.toml, gehoert nie ins Repo.
+*.egg-info/
+build/
+dist/

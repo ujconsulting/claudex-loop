@@ -112,6 +112,40 @@ From the first end-to-end greenfield run (a solo-creator CRM):
 - **~7 missing subsystems**, including the homepage feature that had no backing data source
 - **What survived untouched:** every product decision from the interview. The review only ever attacked *how it would break* — the phases genuinely divide the labor
 
+## Upgrading to 2.2.0 — two deliberate breaks
+
+2.2.0 is the remediation of this repo's own first audit
+([baseline](./docs/audit/2026-08-30-baseline.md); the guard and the wrapper could each
+be walked around). Most of it is invisible. **Two changes will stop a run that used to
+work, and both do so on purpose** — the old behaviour was the defect:
+
+1. **Egress fails closed.** A *remote* fallback reviewer now needs to be named. With no
+   allowlist configured, any HTTPS host used to be accepted — so a repo-supplied `.env`
+   could point the reviewer at an arbitrary provider and the plan, the review log and
+   whatever files were passed went there. **Loopback endpoints (LM Studio, Ollama) are
+   unaffected and need nothing** — `127.0.0.1`, `localhost` and `::1`, each verified
+   through the resolver rather than trusted by spelling, bypass every allowlist source.
+   `host.docker.internal` is *not* among them: it points across a bridge, so it counts
+   as remote and needs an entry like any other. If you use OpenRouter or similar, add
+   one line:
+
+   ```bash
+   CLAUDEX_EGRESS_ALLOW=openrouter.ai        # comma-separated, exact hostnames
+   ```
+
+   or a `config/allowed_egress.yaml` entry with a reason. The refusal message names both
+   the host and the variable, so the fix is a copy-paste.
+
+2. **`fallback_review.py --append-log <LOG_FILE>` is required.** [FALLBACK.md](./FALLBACK.md)
+   always said every fallback round is recorded, valid or invalid — the flag being
+   optional meant that held only for whoever remembered it.
+
+Also worth knowing, though nothing breaks: the wrapper now derives which MCP servers to
+disable from your actual Codex config instead of guessing two names. The old default
+named `MCP_DOCKER`, and an override for a server you do not have makes Codex reject its
+*entire* config — exit 1, empty answer file, an error pointing at your `config.toml`
+rather than at us. If the wrapper ever failed on a fresh machine, that was why.
+
 ## Install
 
 ### Option A — Plugin *(recommended: updates flow automatically)*
@@ -144,19 +178,23 @@ back to the published source.
 
 ### Option B — Manual copy *(bare skill names)*
 
-```bash
-# macOS / Linux
-cp -r skills/* ~/.claude/skills/
+**Withdrawn as of 2.2.0 — copying `skills/` was never a working install.** It left behind
+both halves of the machinery the skills call, and the second omission is the dangerous
+one:
 
-# Windows (PowerShell)
-Copy-Item -Recurse skills\* $env:USERPROFILE\.claude\skills\
-```
+- **`scripts/`** — the read-only wrapper and the role resolver. The skills' commands
+  invoke `tools/codex_ro.py` and `scripts/claudex_roles.py` by path. Copied skills alone
+  have nothing to run, and no supported way to be pointed elsewhere.
+- **`hooks/`** — the `PreToolUse` guard. The setup instructions recommend an allowlist
+  entry for the wrapper, and *the guard is the only thing keeping a matched command from
+  carrying a second one along on the same approval.* An install with the allowlist and
+  without the hook is worse than no install at all.
 
-Invoke as `/claudex-loop`, `/plan-review`, `/build`, `/code-review`, `/docs-backfill`, `/audit`. Update by `git pull` + re-copy.
-
-⚠️ The manual copy leaves `scripts/` and `.claudex.yaml.example` behind, so the role
-resolver is not on the path — the gates then fall back to their built-in defaults
-instead of refusing on a violated rule. Prefer Option A, or copy `scripts/` as well.
+A plugin install wires `hooks/hooks.json` up on its own; a manual copy cannot, because
+there is no per-user path Claude Code reads hooks from for loose skills. Rather than
+document a configuration that does not exist, this option is gone. Use **Option A**, or
+**Option C** if you are working on the skills themselves — that one is a real checkout
+with everything in place.
 
 > **Coming from grill-me-codex or crucible?** This repo *was* both — GitHub redirects the old URLs, so `git pull` in your existing clone just works. The old grill skills live on in [`legacy/`](./legacy/) (copy them only if you want them; `/claudex-loop` doesn't need them).
 
@@ -213,7 +251,9 @@ With no `.env` profiles configured, nothing changes — Codex stays the only rev
 
 ### The read-only wrapper — and why it isn't enough on its own
 
-[`scripts/codex_ro.py`](./scripts/codex_ro.py) is the canonical wrapper (Windows and macOS, Python 3.8+). It pins `-s read-only` on `exec`, `-c sandbox_mode=read-only` on `resume`, and refuses with exit 2 any `-c` override touching `sandbox_mode`, `approval_policy`, `sandbox_permissions` or `sandbox_workspace_write`. Path arguments may only point into the repo and the OS temp dir — it deletes its own output file before each run, so an unbounded path argument would be a write primitive. `python -m unittest discover -s tests` covers the refusals; the sandbox behaviour itself is a measurement, recorded in the file's docstring.
+[`scripts/codex_ro.py`](./scripts/codex_ro.py) is the canonical wrapper (Windows and macOS, Python 3.10+). It pins `-s read-only` on `exec`, `-c sandbox_mode=read-only` on `resume`, and refuses with exit 2 any `-c` override touching `sandbox_mode`, `approval_policy`, `sandbox_permissions`, `sandbox_workspace_write`, `profile` or `mcp_servers` — the last two because a profile carries its own sandbox setting and Codex runs MCP servers as separate processes *outside* the sandbox.
+
+Path arguments are confined, and **write targets more tightly than reads**: the wrapper deletes `--out-file` and truncates `--err-file`, so an unbounded path argument would be a write primitive on a call the allowlist approved without a prompt. Reads may additionally use `--allow-path` / `CLAUDEX_ALLOWED_PATHS`; writes may not — a caller cannot widen its own confinement. Write targets must sit in the repo, in `<repo>/.claudex-tmp/`, in an explicit `CLAUDEX_SCRATCH_DIR`, or in the OS temp dir *when that is not world-writable* (it is per-user on Windows; `/tmp` on Linux is not, and is refused). A target that is a symlink, a directory, or the same file as another output is refused outright. `python -m unittest discover -s tests` covers the refusals; the sandbox behaviour itself is a measurement, recorded in the file's docstring.
 
 `setup` copies it to each repo as `tools/codex_ro.py`, because a permission rule has to name a stable path and the plugin directory carries a version hash. Copies drift — [`scripts/wrapper_drift.py`](./scripts/wrapper_drift.py) reports which ones have fallen behind and `--update` levels them.
 

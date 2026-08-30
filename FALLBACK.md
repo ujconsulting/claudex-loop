@@ -146,7 +146,11 @@ Every fallback round is recorded as:
 `scripts/fallback_review.py --append-log <LOG_FILE>` writes exactly this entry
 (header, status line with the plan hash, full critique) the moment the reply
 arrives — including **INVALID attempts**, labeled `INVALID ATTEMPT, does not
-count as a round`. A rejected reply is still evidence: it shows which model was
+count as a round`. **`--append-log` is required for a review run**: the flag was
+optional until 2026-08-30, so a rule stated as mandatory here held only for
+whoever remembered to pass it, and the heading the code wrote said just
+`fallback` — dropping the very limitation this section exists to put in front of
+the reader. A rejected reply is still evidence: it shows which model was
 tried, why it failed (truncation, missing verdict, rubber stamp), and what the
 user decided next. Claude then appends its per-finding dispositions under the
 entry, as for any Codex round. Findings never live only in the chat.

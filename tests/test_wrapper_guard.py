@@ -10,12 +10,15 @@ payload on stdin -- because the exit code is half of its contract.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import unittest
 from pathlib import Path
 
-GUARD = Path(__file__).resolve().parent.parent / "hooks" / "wrapper_guard.py"
+HOOKS = Path(__file__).resolve().parent.parent / "hooks"
+GUARD = HOOKS / "wrapper_guard.py"
+SHIM = HOOKS / "claudex-python.sh"
 
 WRAPPER_CALL = "python tools/codex_ro.py --prompt-file p.txt --out-file v.txt"
 
@@ -146,6 +149,132 @@ class DeniedTests(unittest.TestCase):
 
     def test_chaining_before_the_wrapper_is_denied_as_well(self):
         self.assert_denied(f"whoami && {WRAPPER_CALL}")
+
+
+class ExpansionInTheWrapperPathTests(unittest.TestCase):
+    """Audit 2026-08-30, CRITICAL: `${IFS}` walked straight past the guard.
+
+    Bash splits control operators BEFORE it expands parameters, so
+    `python tools/codex_ro.py${IFS}&&whoami` runs as two commands -- while the
+    token `tools/codex_ro.py${IFS}` does not END in the wrapper name and so was
+    not recognised as an invocation at all. The allowlist rule
+    `Bash(python tools/codex_ro.py*)` matched the prefix, and the second command
+    rode along unreviewed. Measured: guard exit 0.
+
+    An expansion inside the wrapper path is never legitimate, so each of these is
+    denied whether or not a second command is visible.
+    """
+
+    def assert_denied(self, command):
+        result = run_guard(command)
+        self.assertEqual(result.returncode, 2, f"should have been denied: {command!r}")
+        decision = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+
+    def test_braced_ifs_before_an_operator_is_denied(self):
+        self.assert_denied("python tools/codex_ro.py${IFS}&&whoami")
+
+    def test_bare_ifs_before_an_operator_is_denied(self):
+        self.assert_denied("python tools/codex_ro.py$IFS&&whoami")
+
+    def test_an_expansion_splitting_the_wrapper_name_is_denied(self):
+        self.assert_denied("python tools/codex${x}_ro.py && whoami")
+
+    def test_an_expansion_in_the_wrapper_path_is_denied_even_without_chaining(self):
+        # Unresolvable statically, and nobody writes this on purpose.
+        self.assert_denied("python tools/codex_ro.py${IFS} --out-file v.txt")
+
+    def test_the_powershell_wrapper_is_covered_too(self):
+        self.assert_denied("powershell -File tools/codex_ro.ps1${IFS};whoami")
+
+    def test_an_operator_glued_to_the_wrapper_name_is_denied(self):
+        self.assert_denied("python tools/codex_ro.py&&whoami")
+
+    def test_command_substitution_in_the_wrapper_path_is_denied(self):
+        """CodeRabbit, 2026-08-30: the ${IFS} fix left the other half open.
+
+        `_strip_expansions` handled `${...}` and `$NAME` but not `$(...)` or
+        backticks, so `codex_ro.py$(echo)` was not recognised as the wrapper at
+        all -- and the substitution check in analyse() runs AFTER that
+        recognition, so it never fired. Measured: exit 0, same bypass as ${IFS}
+        wearing different clothes.
+        """
+        self.assert_denied("python tools/codex_ro.py$(echo)&&whoami")
+
+    def test_backtick_substitution_in_the_wrapper_path_is_denied(self):
+        self.assert_denied("python tools/codex_ro.py`echo`&&whoami")
+
+    def test_a_nested_substitution_is_denied(self):
+        self.assert_denied("python tools/codex_ro.py$(echo $(echo))&&whoami")
+
+    def test_a_normal_variable_argument_is_still_allowed(self):
+        """The skills' own commands use $SCRATCH_DIR -- this must not become a denial."""
+        result = run_guard(
+            'python tools/codex_ro.py --prompt-file "$SCRATCH_DIR/p.txt" '
+            '--out-file "$SCRATCH_DIR/v-r$ROUND.txt"'
+        )
+        self.assertEqual(result.returncode, 0, f"should have been allowed: {result.stderr}")
+
+
+BASH = shutil.which("bash")
+
+
+@unittest.skipUnless(BASH, "no bash on PATH")
+class ShimWithoutPythonTests(unittest.TestCase):
+    """The interpreter shim is the hook's other half, and it used to fail OPEN.
+
+    Audit 2026-08-30 (HIGH): with no Python 3.10+ on PATH the shim exited 1. A
+    PreToolUse hook denies with exit 2; exit 1 is a non-blocking error, so the
+    call proceeded -- allowlist intact, guard gone. It must deny the wrapper and
+    only the wrapper: this hook matches every Bash and PowerShell call, so a
+    blanket deny would brick the session over a missing interpreter.
+    """
+
+    def run_shim(self, command):
+        return subprocess.run(
+            [BASH, str(SHIM), str(GUARD)],
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+            capture_output=True,
+            text=True,
+            env={"PATH": "/nonexistent-so-no-python-is-found"},
+        )
+
+    def test_a_wrapper_call_is_denied_when_the_guard_cannot_run(self):
+        result = self.run_shim("python tools/codex_ro.py --out-file v.txt")
+        self.assertEqual(result.returncode, 2, f"must fail closed: {result.stderr}")
+        decision = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+
+    def test_an_unrelated_command_still_passes(self):
+        result = self.run_shim("git status")
+        self.assertEqual(result.returncode, 0, "a missing interpreter must not brick the session")
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_it_says_why_on_stderr_either_way(self):
+        for command in ("git status", "python tools/codex_ro.py --out-file v.txt"):
+            with self.subTest(command=command):
+                self.assertIn("no working Python 3.10+", self.run_shim(command).stderr)
+
+
+@unittest.skipUnless(BASH, "no bash on PATH")
+class ShimDelegationTests(unittest.TestCase):
+    """With Python present the shim must hand over to the guard, verdict intact."""
+
+    def run_shim(self, command):
+        return subprocess.run(
+            [BASH, str(SHIM), str(GUARD)],
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+            capture_output=True,
+            text=True,
+        )
+
+    def test_the_guard_verdict_survives_the_shim(self):
+        result = self.run_shim(f"{WRAPPER_CALL} && whoami")
+        self.assertEqual(result.returncode, 2, f"shim swallowed the deny: {result.stderr}")
+        self.assertIn("claudex-loop", result.stderr)
+
+    def test_a_clean_call_still_passes_through_the_shim(self):
+        self.assertEqual(self.run_shim(WRAPPER_CALL).returncode, 0)
 
 
 if __name__ == "__main__":

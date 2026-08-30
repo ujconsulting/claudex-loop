@@ -28,10 +28,17 @@ import sys
 
 
 def find_latest_snapshot():
-    """Most recent rate_limits entry across rollout files (newest files first)."""
+    """Most recent rate_limits entry across rollout files (newest files first).
+
+    No file-count cutoff. There used to be a `[:10]`, which meant ten recent
+    sessions that happened to carry no rate_limits entry -- short runs, aborted
+    ones -- reported "no snapshot" while a perfectly good one sat in the
+    eleventh, contradicting this docstring (audit 2026-08-30). The loop returns
+    on the first hit, so the normal case still reads one file.
+    """
     pattern = os.path.expanduser("~/.codex/sessions/*/*/*/rollout-*.jsonl")
     files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-    for path in files[:10]:
+    for path in files:
         snap = None
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:

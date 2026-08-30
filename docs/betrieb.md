@@ -185,7 +185,7 @@ Frage, wie viele Funde man begründet zurückweisen konnte.
 |---|---|
 | `codex --version` | muss eine Version **ausgeben**; gefordert ≥ 0.130, gemessen mit 0.149.1 |
 | `codex login status` | `Logged in using ChatGPT` (Abo, **kein** API-Key) |
-| Python | 3.8+ für Wrapper, Drift-Prüfung und Hook |
+| Python | 3.10+ für Wrapper, Drift-Prüfung und Hook |
 | Plugin | `claudex-loop@claudex-loop`, enabled |
 
 ⛔ **Leere Ausgabe plus Exit ≠ 0 ist weder ein Hänger noch ein Auth-Problem**, sondern ein

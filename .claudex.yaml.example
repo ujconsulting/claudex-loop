@@ -17,7 +17,7 @@ actors:
   codex:
     model: gpt-5.6-terra   # NOT sol - it runs into the 10-minute ceiling on real plans
     effort: high
-    sandbox: read-only     # adversary roles may never be anything else
+    sandbox: read-only     # the ONLY accepted value; anything else is refused outright
     roles:                 # per-role model/effort; the sandbox cannot be overridden here
       exposure-review:
         model: gpt-5.6-sol # stronger model, bounded input: only the exposed components
@@ -27,9 +27,17 @@ actors:
   fallback: [lmstudio]     # when the assigned actor is out of quota - user decides, never automatic
 
 rules:
-  producer_never_reviews: true      # refuses to resolve when maker == grader
   write_access: [plan, build, docs] # only these may open a sandbox
-  adversary_read_only: true
+
+# producer_never_reviews and adversary_read_only are NOT listed here on purpose:
+# they are always on and cannot be set false. Writing `producer_never_reviews:
+# false` is refused with exit 2, not honoured. Until 2026-08-30 both were ordinary
+# config, so a `.claudex.yaml` inside the repo being reviewed could switch off the
+# two rules that make the whole arrangement mean anything -- and the resolver
+# still printed "gates OK". A rule a subject can waive is not a rule.
+#
+# The config is read from the REPO ROOT only (or ~/.claude/claudex.yaml). A file
+# in a subdirectory is ignored: policy a nested folder can redefine is not policy.
 
 # --- Delegation: hand the build to Codex, and the reviewer flips with it -------
 # Use when Claude's context is the bottleneck (mechanical migrations, wide

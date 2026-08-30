@@ -70,10 +70,20 @@ actors:
   fallback: [lmstudio]
 
 rules:
-  producer_never_reviews: true
   write_access: [plan, build, docs]
-  adversary_read_only: true
 ```
+
+**`producer_never_reviews` and `adversary_read_only` are not in that block, and
+cannot be put there.** They are always on. A config that sets either to `false` is
+refused with exit 2, and so is any `actors.codex.sandbox` other than `read-only`.
+
+Until the audit of 2026-08-30 both were ordinary config keys the resolver merely
+consulted — so a `.claudex.yaml` **inside the repo being reviewed** could switch
+off the two rules this whole tool exists to enforce, and `--explain` would still
+print `gates OK` while `--spec audit` reported `sandbox=danger-full-access`. The
+subject of a review does not get to waive it. The same fix narrowed config lookup
+to the **repo root only**: a `.claudex.yaml` in a subdirectory used to win, which
+made policy something any nested folder could redefine.
 
 Resolve and check before any run:
 

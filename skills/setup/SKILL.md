@@ -12,7 +12,7 @@ Wrapper, Codex-Arbeitskontext, Prüfkatalog, Tabu-Scope, Ablage-Konvention, Trus
 
 ## Plattform
 
-Wrapper und Werkzeuge sind Python (3.8+) und laufen unter **Windows und macOS**
+Wrapper und Werkzeuge sind Python (3.10+) und laufen unter **Windows und macOS**
 gleichermaßen. Wo unten `python` steht, ist auf dem Mac in aller Regel `python3` gemeint —
 beide Formen gehören in die Allowlist, wenn dort je etwas stehen soll.
 
@@ -279,13 +279,28 @@ patchen, nichts davon ins Log oder in eine Antwort kopieren.
 
 ### 10. Verifizieren (Pflicht, kein „müsste jetzt gehen")
 
+Der Ping läuft über den Wrapper — wie jeder andere Codex-Aufruf auch. `docs/betrieb.md`
+sagt das als Regel: **„Auch Ping und Resume laufen über den Wrapper."** Bis zum Audit am
+30.08.2026 stand hier trotzdem ein direkter `codex exec`, und damit prüfte der
+Verifikationsschritt eine Konfiguration, die im echten Betrieb gar nicht verwendet wird.
+
 ```bash
-cd <repo> && codex exec -s read-only "Antworte nur mit: PING-OK" < /dev/null
+printf 'Antworte nur mit: PING-OK\n' > "$SCRATCH_DIR/ping.txt"
+python tools/codex_ro.py --effort low --timeout 120 \
+  --prompt-file "$SCRATCH_DIR/ping.txt" \
+  --out-file "$SCRATCH_DIR/ping-out.txt" \
+  --err-file "$SCRATCH_DIR/ping-err.txt"
 ```
 
-Erwartung: `item.completed` mit `PING-OK`, kein Trust-Prompt, kein Sandbox-Fehler.
-`ERROR rmcp::transport::worker ... AuthRequired` von nicht authentifizierten MCP-Servern
-ist harmlos (und verschwindet mit `-c mcp_servers.<name>.enabled=false`).
+Erwartung: Exit 0, `THREAD_ID=…`, und `PING-OK` in `ping-out.txt`. Kein Trust-Prompt,
+kein Sandbox-Fehler. Exit 2 = abgewiesen (Pfad oder `-c`), Exit 1 = leere Antwort trotz
+Exit 0 beim Kind — der Auth-Fall, der Grund steht dann in `ping-err.txt`.
+
+MCP-Server schaltet der Wrapper selbst ab, und zwar nur die, die diese Installation
+wirklich konfiguriert hat: `-c mcp_servers.<name>.enabled=false` für einen **nicht**
+vorhandenen Server erzeugt einen Server-Eintrag ohne `transport`, woraufhin Codex die
+gesamte Config verweigert (Exit 1, leere Antwortdatei). Genau das hat dem Audit dieses
+Repos die ersten vier Sessions gekostet.
 
 Dann `git status` zeigen und die geänderten Dateien benennen. Commit nur auf Zuruf.
 

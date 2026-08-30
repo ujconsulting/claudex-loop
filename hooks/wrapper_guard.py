@@ -32,8 +32,17 @@ mention the wrapper; those follow the normal permission rules.
 Contract: reads the PreToolUse payload on stdin, and on refusal exits 2 with the
 reason on stderr (the stable blocking contract) while also emitting the structured
 decision on stdout. Both say deny, so a harness that reads either one agrees.
-Anything it cannot parse is passed through: a guard that crashes closed on
-malformed input would block unrelated work.
+
+TWO KINDS OF "CANNOT PARSE", AND THEY GO OPPOSITE WAYS
+------------------------------------------------------
+A malformed hook PAYLOAD is passed through (exit 0). Its realistic cause is a
+harness change, not an attacker -- a caller controls the command, not the envelope
+-- and a guard that crashed closed on it would block every unrelated Bash call.
+
+An unparseable COMMAND that names the wrapper is DENIED. There we cannot tell what
+would run, and the wrapper's allowlist entry is exactly what must not be handed to
+something unreadable. Same for a wrapper path carrying a shell expansion.
+(The docstring claimed the first rule covered both until the audit of 2026-08-30.)
 """
 
 from __future__ import annotations
@@ -49,6 +58,30 @@ WRAPPER_RE = re.compile(r"codex_ro\.(py|ps1)\b", re.IGNORECASE)
 # merely mentions it. `grep -rl "codex_ro.ps1" .` talks about the wrapper; it does
 # not run it, and blocking it was a false positive this guard shipped with.
 WRAPPER_TOKEN_RE = re.compile(r"(^|[\\/])codex_ro\.(py|ps1)$", re.IGNORECASE)
+
+# Everything bash resolves AFTER it has already split the line into commands.
+# Stripping them is what lets `tools/codex_ro.py${IFS}` be recognised as the
+# wrapper it becomes.
+#
+# Audit 2026-08-30, CRITICAL: without this the `${IFS}` form was not seen as an
+# invocation at all, so a chained second command rode the allowlist unreviewed.
+# CodeRabbit, same day: that first fix covered only `${...}` and `$NAME`, which
+# left `$(...)` and backticks doing the identical trick. SUBSTITUTION_PATTERNS
+# below does reject those -- but only once analyse() has recognised an
+# invocation, and recognition was exactly what they defeated. So they belong
+# here as well, and the two checks stop depending on each other's order.
+EXPANSION_RE = re.compile(
+    r"\$\([^()]*\)"                 # $( ... )   command substitution
+    r"|`[^`]*`"                     # ` ... `    command substitution
+    r"|\$\{[^{}]*\}"                # ${ ... }   parameter expansion
+    r"|\$[A-Za-z_][A-Za-z0-9_]*"    # $NAME      parameter expansion
+    # A leftover introducer, LAST so the named forms above win at the same
+    # position ($SCRATCH still matches as a whole). shlex runs with
+    # punctuation_chars=True and splits the parentheses off, so `$(echo)` after
+    # the wrapper name arrives here as a bare trailing `$` -- which is how
+    # `codex_ro.py$(echo)&&whoami` still walked past the first fix.
+    r"|[$`]"
+)
 
 # Things that run a script rather than being one.
 INTERPRETERS = {
@@ -80,6 +113,45 @@ def _basename(token: str) -> str:
     return re.split(r"[\\/]", token)[-1].lower()
 
 
+def _strip_expansions(token: str) -> str:
+    """The token as bash will see it once every expansion is gone.
+
+    Applied to a fixpoint so a nested `$(echo $(echo))` collapses from the inside
+    out; the innermost form matches first, and the outer one becomes matchable in
+    the next pass. Bounded because a pathological input must not spin here -- and
+    a token still carrying `$` or a backtick after the cap is caught anyway, since
+    it cannot then look like a clean wrapper path.
+    """
+    for _ in range(8):
+        stripped = EXPANSION_RE.sub("", token)
+        if stripped == token:
+            return token
+        token = stripped
+    return token
+
+
+def _is_wrapper_token(token: str) -> bool:
+    """True when this token is the wrapper, before OR after expansion.
+
+    Checking only the literal token is what the `${IFS}` bypass exploited:
+    `tools/codex_ro.py${IFS}` does not end in the wrapper name, yet that is
+    exactly what bash runs.
+    """
+    return bool(
+        WRAPPER_TOKEN_RE.search(token)
+        or WRAPPER_TOKEN_RE.search(_strip_expansions(token))
+    )
+
+
+def _expanded_wrapper_token(token: str) -> bool:
+    """A wrapper token that only becomes one after expansion.
+
+    Never legitimate -- nobody writes `codex_ro.py${IFS}` on purpose -- and not
+    statically resolvable, so it is denied on its own, chained or not.
+    """
+    return _is_wrapper_token(token) and _strip_expansions(token) != token
+
+
 def _segments(tokens: "list[str]") -> "list[list[str]]":
     """Split a token list on unquoted shell operators."""
     segments, current = [], []
@@ -107,13 +179,13 @@ def _invokes_wrapper(segment: "list[str]") -> bool:
     tokens = [t for t in segment if not ENV_ASSIGNMENT_RE.match(t)]
     if not tokens:
         return False
-    if WRAPPER_TOKEN_RE.search(tokens[0]):
+    if _is_wrapper_token(tokens[0]):
         return True
     if _basename(tokens[0]) in INTERPRETERS:
         for token in tokens[1:]:
-            if token.startswith("-") and not WRAPPER_TOKEN_RE.search(token):
+            if token.startswith("-") and not _is_wrapper_token(token):
                 continue  # a flag, or the -File whose value comes next
-            return bool(WRAPPER_TOKEN_RE.search(token))
+            return _is_wrapper_token(token)
     return False
 
 
@@ -130,7 +202,7 @@ def _line_invokes(line: str) -> bool:
     tokens = _tokenise(line)
     if tokens is None:
         # Unparseable: fall back to "does a bare wrapper path appear at all".
-        return any(WRAPPER_TOKEN_RE.search(piece) for piece in line.split())
+        return any(_is_wrapper_token(piece) for piece in line.split())
     return any(_invokes_wrapper(segment) for segment in _segments(tokens))
 
 
@@ -155,6 +227,11 @@ def analyse(command: str) -> "str | None":
     if not any(_invokes_wrapper(segment) for segment in segments):
         return None
 
+    # The wrapper path itself carrying an expansion: unresolvable here, and the
+    # exact shape the `${IFS}` bypass used to hide a chained command behind.
+    if any(_expanded_wrapper_token(token) for token in tokens):
+        return "an expansion inside the wrapper path"
+
     if "\n" in command or "\r" in command:
         # A newline can hide a whole second command with no operator between them.
         return "a newline"
@@ -178,7 +255,11 @@ def main() -> int:
 
     tool_input = payload.get("tool_input") or {}
     command = tool_input.get("command")
-    if not isinstance(command, str) or not WRAPPER_RE.search(command):
+    if not isinstance(command, str):
+        return 0
+    # Both spellings: an expansion can split the name itself (`codex${x}_ro.py`),
+    # and this gate runs before analyse() ever sees the command.
+    if not (WRAPPER_RE.search(command) or WRAPPER_RE.search(_strip_expansions(command))):
         return 0
 
     found = analyse(command)

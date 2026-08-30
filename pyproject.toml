@@ -1,0 +1,47 @@
+[build-system]
+# Declared even though nothing here is meant to be published as a wheel: CI runs
+# `pip install ".[dev]"`, and without a build-system pip falls back to legacy
+# setuptools, whose auto-discovery then trips over the top-level `scripts/`,
+# `hooks/` and `tests/` directories. `py-modules = []` says the quiet part
+# outright -- there is no importable package here, only scripts that get copied.
+# (CodeRabbit, 2026-08-30.)
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []
+
+[project]
+name = "claudex-loop"
+version = "2.2.0"
+description = "Cross-model plan hardening and review for Claude Code: Claude plans, Codex attacks it read-only."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+
+# The scripts are stdlib-only BY DESIGN: they are copied into other repos, where
+# `pip install` is not part of the deal. PyYAML is the single exception and it is
+# optional -- both places that want it degrade without it:
+#
+#   claudex_roles.py    falls back to a tiny built-in parser
+#   fallback_review.py  FAILS CLOSED. A file egress allowlist that cannot be read
+#                       refuses the request; not installing the parser does not
+#                       lift the restriction.
+#
+# It is declared here anyway. Until 2026-08-30 this repo had no manifest at all,
+# which meant `grype` had nothing to inventory and reported "no vulnerabilities"
+# for a project it had not measured -- a clean scan that proved nothing, on the
+# one dependency sitting in an enforcement path.
+dependencies = []
+
+[project.optional-dependencies]
+# Needed only for a FILE egress allowlist (config/allowed_egress.yaml).
+yaml = ["PyYAML>=6.0.1"]
+# Everything the checks in .github/workflows/checks.yml run.
+dev = ["PyYAML>=6.0.1", "pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/ujconsulting/claudex-loop"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -73,12 +73,43 @@ class ArgvTests(unittest.TestCase):
         occurrences = [a for a in argv if a.startswith("sandbox_mode=")]
         self.assertEqual(occurrences, ["sandbox_mode=read-only"])
 
-    def test_disable_mcp_is_overridable_and_can_be_emptied(self):
-        argv = codex_ro.build_argv(self._args(["--disable-mcp", "foo, bar"]), Path("out.txt"))
-        self.assertIn("mcp_servers.foo.enabled=false", argv)
-        self.assertIn("mcp_servers.bar.enabled=false", argv)
-        argv_none = codex_ro.build_argv(self._args(["--disable-mcp", ""]), Path("out.txt"))
-        self.assertFalse([a for a in argv_none if a.startswith("mcp_servers.")])
+    def test_emptying_disable_mcp_is_refused_when_servers_are_configured(self):
+        """The third door to the same room as --allow-path and -c mcp_servers.
+
+        Codex runs MCP servers outside the sandbox, so an empty --disable-mcp is
+        a caller weakening the wrapper from its own command line. It used to warn
+        and continue; nobody reads stderr on a call that succeeded.
+        (CodeRabbit, 2026-08-30.)
+        """
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "config.toml").write_text(
+                "[mcp_servers]\n[mcp_servers.n8n]\ntransport='http'\n", encoding="utf-8"
+            )
+            previous = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = home
+            try:
+                with self.assertRaises(SystemExit) as caught:
+                    self._args(["--disable-mcp", ""])
+                self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+            finally:
+                if previous is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous
+
+    def test_emptying_disable_mcp_is_fine_when_there_are_no_servers(self):
+        """Nothing to leave enabled, so nothing to refuse."""
+        with tempfile.TemporaryDirectory() as home:
+            previous = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = home
+            try:
+                argv = codex_ro.build_argv(self._args(["--disable-mcp", ""]), Path("out.txt"))
+                self.assertFalse([a for a in argv if a.startswith("mcp_servers.")])
+            finally:
+                if previous is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous
 
     def test_prompt_is_never_passed_as_an_argument(self):
         # It goes over stdin; an argument would also have to be quoted, and the
@@ -123,6 +154,204 @@ class PathConfinementTests(unittest.TestCase):
     def test_an_opt_in_root_is_honoured(self):
         extra = Path(tempfile.gettempdir()).resolve()
         self.assertIn(extra, codex_ro.allowed_roots([str(extra)]))
+
+
+class WriteRootTests(unittest.TestCase):
+    """Audit 2026-08-30, CRITICAL: the caller could widen its own confinement.
+
+    `--allow-path` is an ordinary flag, so it rode the same allowlist prefix as the
+    call itself -- and the wrapper then unlinks `--out-file` and truncates
+    `--err-file` inside whatever root it was handed. `--allow-path /` turned an
+    approved "read-only review" into an arbitrary delete. Opt-in roots are for
+    READS now; write targets stay in the repo and the OS temp dir.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.extra = Path(self.tmp.name).resolve()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_an_opt_in_root_still_widens_reads(self):
+        self.assertIn(self.extra, codex_ro.allowed_roots([str(self.extra)]))
+
+    def test_an_opt_in_root_does_not_widen_writes(self):
+        self.assertNotIn(self.extra, codex_ro.allowed_roots([str(self.extra)], for_write=True))
+
+    def test_the_environment_variable_does_not_widen_writes_either(self):
+        previous = os.environ.get("CLAUDEX_ALLOWED_PATHS")
+        os.environ["CLAUDEX_ALLOWED_PATHS"] = str(self.extra)
+        try:
+            self.assertIn(self.extra, codex_ro.allowed_roots([]))
+            self.assertNotIn(self.extra, codex_ro.allowed_roots([], for_write=True))
+        finally:
+            if previous is None:
+                del os.environ["CLAUDEX_ALLOWED_PATHS"]
+            else:
+                os.environ["CLAUDEX_ALLOWED_PATHS"] = previous
+
+    def test_a_world_writable_temp_dir_is_not_a_write_root(self):
+        """The wrapper DELETES its out-file, so a shared parent is a real race.
+
+        O_NOFOLLOW covers the final component; a parent directory swapped for a
+        symlink between resolve() and open() is not covered, and on POSIX `/tmp`
+        (mode 1777) any local user can do that. openat-style directory handles
+        would close it but do not exist on Windows, so the exposure is removed
+        rather than raced. (CodeRabbit, 2026-08-30.)
+        """
+        temp = Path(tempfile.gettempdir()).resolve()
+        # Force the predicate instead of branching on it. Branching made the test
+        # assert whatever this machine happened to do -- it could not fail on a
+        # Windows runner, which is where it most needed to hold.
+        # (CodeRabbit, 2026-08-30.)
+        original = codex_ro._is_private_dir
+        codex_ro._is_private_dir = lambda p: Path(p) != temp
+        try:
+            self.assertNotIn(
+                temp,
+                codex_ro.allowed_roots([], for_write=True),
+                "a world-writable temp dir must not hold write targets",
+            )
+        finally:
+            codex_ro._is_private_dir = original
+
+        codex_ro._is_private_dir = lambda p: True
+        try:
+            self.assertIn(temp, codex_ro.allowed_roots([], for_write=True))
+        finally:
+            codex_ro._is_private_dir = original
+
+    def test_the_repo_is_always_a_write_root(self):
+        roots = codex_ro.allowed_roots([], for_write=True)
+        self.assertTrue(any((r / ".git").exists() for r in roots))
+
+    def test_an_explicit_scratch_dir_is_a_write_root(self):
+        previous = os.environ.get(codex_ro.SCRATCH_DIR_ENV)
+        os.environ[codex_ro.SCRATCH_DIR_ENV] = str(self.extra)
+        try:
+            self.assertIn(self.extra, codex_ro.allowed_roots([], for_write=True))
+        finally:
+            if previous is None:
+                os.environ.pop(codex_ro.SCRATCH_DIR_ENV, None)
+            else:
+                os.environ[codex_ro.SCRATCH_DIR_ENV] = previous
+
+
+class WriteTargetTests(unittest.TestCase):
+    """A write target must be a plain file, not something pointing elsewhere."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_a_regular_file_is_accepted(self):
+        target = self.root / "verdict.txt"
+        target.write_text("previous round", encoding="utf-8")
+        codex_ro.prepare_write_target(target, "--out-file")  # must not raise
+
+    def test_a_missing_file_is_accepted(self):
+        codex_ro.prepare_write_target(self.root / "fresh.txt", "--out-file")
+
+    def test_a_directory_is_refused(self):
+        (self.root / "adir").mkdir()
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.prepare_write_target(self.root / "adir", "--out-file")
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    def test_a_symlink_is_refused(self):
+        victim = self.root / "victim.txt"
+        victim.write_text("do not clobber me", encoding="utf-8")
+        link = self.root / "verdict.txt"
+        try:
+            link.symlink_to(victim)
+        except (OSError, NotImplementedError):
+            self.skipTest("this platform will not let the test create a symlink")
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.prepare_write_target(link, "--out-file")
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do not clobber me")
+
+
+class McpTests(unittest.TestCase):
+    """Audit 2026-08-30: MCP was open in one direction and broken in the other.
+
+    Broken: the default list named `MCP_DOCKER`, which is not configured on most
+    machines. `-c mcp_servers.MCP_DOCKER.enabled=false` then synthesises a server
+    table with no transport, and Codex refuses to load its config AT ALL -- exit 1,
+    empty answer file. It cost this repo's own audit its first four sessions.
+    Open: user `-c` overrides were appended after the disable list, so
+    `-c mcp_servers.x.command=...` defined a server. Codex runs MCP servers as
+    separate processes OUTSIDE the shell sandbox.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name).resolve()
+        self.addCleanup(self.tmp.cleanup)
+        self.previous = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(self.home)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self.previous is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = self.previous
+
+    def _write_config(self, text):
+        (self.home / "config.toml").write_text(text, encoding="utf-8")
+
+    def test_configured_servers_are_discovered(self):
+        self._write_config(
+            "model = 'gpt-5.6-terra'\n"
+            "[mcp_servers]\n"
+            "[mcp_servers.n8n]\n"
+            "transport = 'http'\n"
+            "url = 'http://127.0.0.1:3069/mcp'\n"
+            "[mcp_servers.other]\n"
+            "command = 'x'\n"
+        )
+        self.assertEqual(codex_ro.installed_mcp_servers(), {"n8n", "other"})
+
+    def test_no_config_means_no_servers(self):
+        self.assertEqual(codex_ro.installed_mcp_servers(), set())
+
+    def test_a_server_that_is_not_installed_is_never_named(self):
+        """The whole point: an override for an absent server breaks Codex outright."""
+        self._write_config("[mcp_servers]\n[mcp_servers.n8n]\ntransport = 'http'\n")
+        args = codex_ro.parse_args(
+            ["--prompt", "x", "--out-file", "out.txt", "--disable-mcp", "n8n,MCP_DOCKER"]
+        )
+        argv = codex_ro.build_argv(args, Path("out.txt"))
+        self.assertIn("mcp_servers.n8n.enabled=false", argv)
+        self.assertNotIn("mcp_servers.MCP_DOCKER.enabled=false", argv)
+
+    def test_the_default_is_every_installed_server(self):
+        self._write_config(
+            "[mcp_servers]\n[mcp_servers.alpha]\ncommand='a'\n[mcp_servers.beta]\ncommand='b'\n"
+        )
+        args = codex_ro.parse_args(["--prompt", "x", "--out-file", "out.txt"])
+        argv = codex_ro.build_argv(args, Path("out.txt"))
+        self.assertIn("mcp_servers.alpha.enabled=false", argv)
+        self.assertIn("mcp_servers.beta.enabled=false", argv)
+
+    def test_an_mcp_override_from_the_caller_is_refused(self):
+        for override in (
+            "mcp_servers.evil.command=/bin/sh",
+            "mcp_servers.n8n.enabled=true",
+            "mcp_servers=whatever",
+        ):
+            with self.subTest(override=override):
+                with self.assertRaises(SystemExit) as caught:
+                    codex_ro.check_config_overrides([override])
+                self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    def test_a_profile_override_is_refused(self):
+        # A profile can carry sandbox_mode and approval_policy of its own, which
+        # is the forbidden-key check being walked around rather than beaten.
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.check_config_overrides(["profile=wide-open"])
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
 
 
 class RefusalExitCodeTests(unittest.TestCase):

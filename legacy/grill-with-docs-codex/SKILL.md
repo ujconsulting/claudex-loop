@@ -3,6 +3,28 @@ name: grill-with-docs-codex
 description: SUPERSEDED by /claudex-loop (formerly /crucible; its docs-aware mode covers this variant) — prefer that skill unless you explicitly want this one. Two-act plan hardening with living documentation. ACT 1 (you ↔ Claude) — Claude interviews you relentlessly about a plan, one question at a time, challenging it against your project's existing domain model and glossary (CONTEXT.md), sharpening fuzzy terms, stress-testing with concrete scenarios, cross-referencing code, and updating CONTEXT.md + ADRs inline as decisions crystallise. ACT 2 (Claude ↔ Codex) — Claude writes the locked plan to PLAN.md and OpenAI Codex adversarially reviews it in a read-only sandbox (VERDICT:APPROVED/REVISE), Claude revises and re-submits to the SAME Codex session until APPROVED or a MAX_ROUNDS cap, then you sign off before any code. Use when the user says "/grill-with-docs-codex", "grill me against the docs then have codex review", "stress-test this against our domain model then get a second model on it", or is about to build something high-stakes in a project with established terminology/ADRs and wants alignment, documentation, AND a cross-model sanity check. Builds on Matt Pocock's grill-with-docs (MIT). NOT for reviewing already-written code (use /codex:review) and NOT for trivial changes.
 ---
 
+> ⚠️ **FROZEN, SUPERSEDED, AND NOT SAFE TO COPY AS-IS.** This file is kept for
+> provenance only; it is not registered as a skill and Claude never loads it. Use
+> `/claudex-loop` instead. The audit of 2026-08-30 found defects here that were
+> fixed in the current skills and deliberately NOT backported:
+>
+> - the reviewer output goes to the shared, predictable path `/tmp/codex-verdict.txt`
+>   — a local process can pre-create that as a symlink and have Codex overwrite the
+>   file it points at, and two concurrent reviews clobber each other. The current
+>   skills forbid `/tmp` outright.
+> - `"$(cat REVIEW_PROMPT)"` reads a file no step creates: on a clean repo Codex is
+>   launched with an EMPTY prompt, and on a repo that ships a file by that name, the
+>   repository under review writes the reviewer's instructions.
+> - resume failures go to `/dev/null` and the previous verdict is never cleared, so a
+>   failed round can be logged as the current one.
+> - `PLAN_FILE` is documented as configurable while every prompt hard-codes `PLAN.md`.
+> - every `codex` call bypasses `tools/codex_ro.py`, so the sandbox is advisory
+>   configuration rather than an enforced pin.
+>
+> If you want this workflow, take `/claudex-loop`. If you must copy from here, fix all
+> five first.
+
+
 # Grill-with-Docs-Codex — Grill Against Your Domain, Then Get Reviewed
 
 Two acts. Act 1 aligns intent *and* keeps your living docs honest; Act 2 has a different model attack the result.

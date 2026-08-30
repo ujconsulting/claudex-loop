@@ -169,6 +169,21 @@ scratchpad; otherwise `<repo>/.claudex-tmp/`, gitignored in the same step. Quote
 > examined and what you found — a PASS that names nothing it checked is not a PASS.
 > End with exactly `SECURITY: PASS` or `SECURITY: FAIL`.
 
+⛔ **Close the whole reply with the verdicts, one per line, nothing after them.**
+Append this to the prompt verbatim, listing only the scopes you selected:
+
+> Finish your reply with the verdict lines for every dimension you were asked to
+> judge — one per line, as the last non-blank lines, with no prose, no summary and
+> no closing remark after them. Repeat them there even though each section already
+> ends in its own.
+
+Each section still ends in its verdict, for a human reading top to bottom. The
+closing block is what a machine reads: `fallback_review.py`'s `validate()` checks the
+last non-blank lines, because a verdict buried mid-reply is how a model gets to say
+`APPROVED` and then keep talking. Without this instruction the section-verdict style
+above satisfies a Codex round but fails every fallback round — which is exactly the
+moment the gate is needed. (CodeRabbit, 2026-08-30.)
+
 **Before assembling the `security` section, run the machines** — the same standing
 four as `audit`, scoped to the changed files, with their output pasted into the
 prompt as evidence. A model reading a diff will not spot a secret that a scanner
@@ -192,9 +207,22 @@ OS argument-size limit ("Argument list too long", found the first time this
 skill reviewed its own diff). Otherwise plan-review mechanics apply:
 
 ```bash
-codex exec -s read-only --json -o "$SCRATCH_DIR/code-review-r$ROUND.txt" - \
-  < "$SCRATCH_DIR/verify-prompt-r$ROUND.txt" 2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" | grep '"type":"thread.started"'
+ROUND=0   # the acceptance round; incremented per recheck, up to MAX_RECHECK
+# Same rule as the exposure pass below: the model comes from the role config.
+SPEC=$(python scripts/claudex_roles.py --spec code-review) || exit 2
+MODEL=$(echo "$SPEC" | sed -n 's/.*model=\([^ ]*\).*/\1/p')
+EFFORT=$(echo "$SPEC" | sed -n 's/.*effort=\([^ ]*\).*/\1/p')
+
+python tools/codex_ro.py --model "$MODEL" --effort "$EFFORT" \
+  --prompt-file "$SCRATCH_DIR/verify-prompt-r$ROUND.txt" \
+  --out-file "$SCRATCH_DIR/code-review-r$ROUND.txt" \
+  --err-file "$SCRATCH_DIR/codex-stderr-r$ROUND.txt"
 ```
+
+The wrapper feeds the prompt over stdin itself, which is the same reason the raw form
+used `-` : with the diff inlined, a prompt passed as an argument blows past the OS
+argument-size limit ("Argument list too long" — found the first time this skill reviewed
+its own diff).
 
 Capture `thread_id` from the `thread.started` line; 10-minute ceiling
 (`timeout: 600000` via Claude Code's Bash tool). stderr goes to a **file**: a
@@ -267,8 +295,8 @@ python tools/codex_ro.py --model "$EXPOSURE_MODEL" --effort "$EXPOSURE_EFFORT" \
 ```
 
 (`EXPOSURE_MODEL`/`EXPOSURE_EFFORT` are the `model=`/`effort=` fields of
-`claudex_roles.py --spec exposure-review`. Without the wrapper: `codex exec -s
-read-only -m "$EXPOSURE_MODEL" -c model_reasoning_effort="$EXPOSURE_EFFORT" …`.)
+`claudex_roles.py --spec exposure-review`. There is no "without the wrapper" variant:
+this call is a review, and reviews go through `tools/codex_ro.py`.)
 Log it as `## Exposure pass — <model>/<effort>` + report verbatim, then dispositions
 as in Step 3. `EXPOSURE: SAFE` with zero findings and an empty `Checked:` line is an
 invalid review, exactly like a rubber-stamp acceptance pass. Rechecks after fixes
@@ -362,11 +390,35 @@ green with a footnote.
      cat "$SPEC_FILE" > "$SCRATCH_DIR/verify-input-r$ROUND.md"
      [ -n "$DOD_FILE" ] && cat "$DOD_FILE" >> "$SCRATCH_DIR/verify-input-r$ROUND.md"
      { echo; echo "=== DIFF ==="; git diff "$BASE_REF"...HEAD; } >> "$SCRATCH_DIR/verify-input-r$ROUND.md"
+     # Build --require-verdicts FROM the selected scope. Hard-coding all five
+     # rejected a perfectly good reply whenever the scope was smaller -- and the
+     # default scope IS smaller (dod,quality,security), so during a Codex outage
+     # the documented fallback path failed on every default run (audit 2026-08-30).
+     # `case`, not `declare -A`: macOS still ships bash 3.2, which has no
+     # associative arrays and would fail here with a syntax error.
+     REQUIRE=""
+     for s in $(echo "$SCOPE" | tr ',' ' '); do
+       case "$s" in
+         dod)      g="DOD:COMPLETE|INCOMPLETE" ;;
+         quality)  g="QUALITY:ACCEPTABLE|REVISE" ;;
+         security) g="SECURITY:PASS|FAIL" ;;
+         docs)     g="DOCS:COMPLETE|INCOMPLETE" ;;
+         tests)    g="TESTS:ADEQUATE|INSUFFICIENT" ;;
+         *) echo "unknown scope: $s" >&2; exit 2 ;;
+       esac
+       REQUIRE="${REQUIRE:+$REQUIRE,}$g"
+     done
+
      python scripts/fallback_review.py --chain --plan "$SCRATCH_DIR/verify-input-r$ROUND.md" \
        --system-file "$SCRATCH_DIR/verify-prompt-r$ROUND.txt" \
-       --require-verdicts "DOD:COMPLETE|INCOMPLETE,QUALITY:ACCEPTABLE|REVISE,SECURITY:PASS|FAIL,DOCS:COMPLETE|INCOMPLETE,TESTS:ADEQUATE|INSUFFICIENT" \
+       --require-verdicts "$REQUIRE" \
+       --append-log "$LOG_FILE" \
        --out "$SCRATCH_DIR/code-review-r$ROUND.txt"
      ```
+
+     `--append-log` is required, not optional: every fallback round is recorded,
+     valid or invalid (FALLBACK.md). And the verdict lines must CLOSE the reply —
+     the parser checks the last non-blank lines, not the whole text.
 
      The exposure pass falls back the same way with its own input file (the numbered
      exposed files + deployment config + diff) and `--require-verdicts

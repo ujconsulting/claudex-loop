@@ -20,22 +20,91 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import fallback_review  # noqa: E402
 
 
-class SchemeRuleTests(unittest.TestCase):
+class EgressEnvIsolation(unittest.TestCase):
+    """Both egress variables, every time.
+
+    setUp used to save only CLAUDEX_EGRESS_ALLOW while CLAUDEX_EGRESS_ALLOWLIST
+    stayed live, so a developer or CI box with a file allowlist configured got
+    different results from the host-list tests -- a suite that can pass or fail on
+    ambient environment is not measuring the code (audit 2026-08-30).
+    """
+
+    def setUp(self):
+        self._saved = {
+            name: os.environ.get(name)
+            for name in (fallback_review.EGRESS_ALLOW_ENV, fallback_review.EGRESS_FILE_ENV)
+        }
+        for name in self._saved:
+            os.environ.pop(name, None)
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+class SchemeRuleTests(EgressEnvIsolation):
     """Plain http may only ever reach the machine it started on."""
 
-    def test_https_to_a_remote_host_passes(self):
+    def test_https_to_an_allowlisted_remote_host_passes(self):
+        os.environ[fallback_review.EGRESS_ALLOW_ENV] = "openrouter.ai"
         fallback_review.check_egress("https://openrouter.ai/api/v1")
 
     def test_plain_http_to_a_remote_host_is_refused_without_a_key(self):
         # The regression this whole rule is about.
+        os.environ[fallback_review.EGRESS_ALLOW_ENV] = "evil.example"
         with self.assertRaises(fallback_review.EgressDenied) as caught:
             fallback_review.check_egress("http://evil.example/v1")
         self.assertIn("plain http", str(caught.exception))
 
     def test_plain_http_to_loopback_passes(self):
-        for host in ("127.0.0.1:1234", "localhost:1234", "host.docker.internal:1234"):
+        for host in ("127.0.0.1:1234", "localhost:1234"):
             with self.subTest(host=host):
                 fallback_review.check_egress(f"http://{host}/v1")
+
+    def test_host_docker_internal_is_not_a_loopback_name(self):
+        """It is an ordinary DNS name and is no longer in the set at all.
+
+        On Docker Desktop it points at the host ACROSS A BRIDGE. Keeping it in
+        LOOPBACK_HOSTS and merely verifying it by resolution was still wrong in
+        one place: _opener() keyed its proxy bypass on set membership, so this
+        name got its proxy stripped while not being local. (Audit 2026-08-30,
+        then CodeRabbit the same day.)
+        """
+        self.assertNotIn("host.docker.internal", fallback_review.LOOPBACK_HOSTS)
+        self.assertFalse(fallback_review._is_loopback_host("host.docker.internal"))
+        os.environ[fallback_review.EGRESS_ALLOW_ENV] = "host.docker.internal"
+        with self.assertRaises(fallback_review.EgressDenied) as caught:
+            fallback_review.check_egress("http://host.docker.internal:1234/v1")
+        self.assertIn("clear", str(caught.exception))
+
+    def test_the_proxy_bypass_uses_the_verified_answer_not_the_name(self):
+        """Set a proxy, so the assertion can actually fail.
+
+        The first version fell back to `or not os.environ.get("HTTP_PROXY")`,
+        which made it pass vacuously on any machine without a proxy configured --
+        i.e. every developer box. (CodeRabbit, 2026-08-30.)
+        """
+        proxy = "http://proxy.invalid:3128"
+        for name in ("http_proxy", "HTTP_PROXY"):
+            saved = os.environ.get(name)
+            os.environ[name] = proxy
+            self.addCleanup(
+                lambda n=name, v=saved: os.environ.__setitem__(n, v)
+                if v is not None
+                else os.environ.pop(n, None)
+            )
+        proxy_cls = fallback_review.urllib.request.ProxyHandler
+        handlers = [
+            h
+            for h in fallback_review._opener("http://host.docker.internal:1234/v1").handlers
+            if isinstance(h, proxy_cls)
+        ]
+        self.assertTrue(handlers, "a non-loopback host must not get the proxy stripped")
+        self.assertIn(proxy, str(handlers[0].proxies.values()))
 
     def test_a_non_http_scheme_is_refused(self):
         for url in ("file:///etc/passwd", "ftp://example.org/x", "gopher://example.org"):
@@ -48,20 +117,50 @@ class SchemeRuleTests(unittest.TestCase):
             fallback_review.check_egress("https:///v1")
 
 
-class HostAllowlistTests(unittest.TestCase):
-    def setUp(self):
-        self.previous = os.environ.get(fallback_review.EGRESS_ALLOW_ENV)
-        self.addCleanup(self._restore)
+class HostAllowlistTests(EgressEnvIsolation):
+    def test_unset_means_refusal_not_permission(self):
+        """Audit 2026-08-30, HIGH: absence of a policy was read as permission.
 
-    def _restore(self):
-        if self.previous is None:
-            os.environ.pop(fallback_review.EGRESS_ALLOW_ENV, None)
-        else:
-            os.environ[fallback_review.EGRESS_ALLOW_ENV] = self.previous
+        With no allowlist file and the variable unset, ANY https host was
+        accepted -- and the refusal message for a listed host even suggested
+        unsetting the variable "to drop the host restriction". A repo-supplied
+        `.env` could name an arbitrary provider and the plan went there.
+        """
+        with self.assertRaises(fallback_review.EgressDenied) as caught:
+            fallback_review.check_egress("https://anything.example/v1")
+        message = str(caught.exception)
+        self.assertIn("no egress allowlist", message)
+        self.assertIn(fallback_review.EGRESS_ALLOW_ENV, message, "say how to fix it")
 
-    def test_unset_means_no_host_restriction(self):
-        os.environ.pop(fallback_review.EGRESS_ALLOW_ENV, None)
-        fallback_review.check_egress("https://anything.example/v1")
+    def test_loopback_needs_no_allowlist_whichever_allowlist_exists(self):
+        """A rule that tightens as you configure more policy is a trap.
+
+        Loopback used to be free only while NOTHING was configured: adding
+        `openrouter.ai` to reach a remote reviewer then silently broke the local
+        LM Studio profile. Verified loopback bypasses every allowlist source.
+        (CodeRabbit, 2026-08-30.)
+        """
+        fallback_review.check_egress("http://127.0.0.1:1234/v1")
+
+        os.environ[fallback_review.EGRESS_ALLOW_ENV] = "openrouter.ai"
+        fallback_review.check_egress("http://127.0.0.1:1234/v1")
+        fallback_review.check_egress("https://localhost:1234/v1")
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            listed = Path(tmp) / "allowed_egress.yaml"
+            listed.write_text(
+                "version: 1\nhosts:\n  - host: openrouter.ai\n    schemes: [https]\n"
+                "    why: remote reviewer, loopback deliberately absent\n",
+                encoding="utf-8",
+            )
+            os.environ[fallback_review.EGRESS_FILE_ENV] = str(listed)
+            fallback_review.check_egress("http://127.0.0.1:1234/v1")
+
+    def test_a_remote_host_is_still_refused_when_an_allowlist_omits_it(self):
+        os.environ[fallback_review.EGRESS_ALLOW_ENV] = "openrouter.ai"
+        with self.assertRaises(fallback_review.EgressDenied):
+            fallback_review.check_egress("https://elsewhere.example/v1")
 
     def test_a_listed_host_passes(self):
         os.environ[fallback_review.EGRESS_ALLOW_ENV] = "openrouter.ai, api.openai.com"
@@ -164,7 +263,7 @@ class FileAllowlistTests(unittest.TestCase):
             fallback_review.check_egress("https://elsewhere.example/v1")
 
 
-class InlineKeyTests(unittest.TestCase):
+class InlineKeyTests(EgressEnvIsolation):
     """An inline key is refused, not warned about.
 
     Adopted from a sister repo's audit: a warning nobody reads is not
@@ -172,10 +271,13 @@ class InlineKeyTests(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.saved = {k: v for k, v in os.environ.items() if k.startswith("CLAUDEX_REVIEWER_T_")}
         self.addCleanup(self._restore)
         os.environ["CLAUDEX_REVIEWER_T_BASE_URL"] = "https://example.test/v1"
         os.environ["CLAUDEX_REVIEWER_T_MODEL"] = "m"
+        # profile() vets base_url through check_egress, which now fails closed.
+        os.environ[fallback_review.EGRESS_ALLOW_ENV] = "example.test"
 
     def _restore(self):
         for key in list(os.environ):

@@ -70,14 +70,18 @@ invalid review (no verdict line, or rubber-stamp suspicion). Never treat exit
 """
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
 from urllib.parse import urlsplit
 
 SYSTEM_PROMPT = (
@@ -194,10 +198,36 @@ def auth_headers(p):
     return headers
 
 
-# Hosts where plain http is harmless because the traffic never leaves the
-# machine. `host.docker.internal` belongs here: Docker Desktop maps it to the
-# host of the same box.
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "host.docker.internal"})
+# Names that MAY be loopback -- membership here is a shortcut, not the proof.
+# The proof is _resolves_to_loopback(), which asks the resolver.
+#
+# `host.docker.internal` is gone from this set. It is an ordinary DNS name: on
+# Docker Desktop it points at the host ACROSS A BRIDGE, and elsewhere it resolves
+# to whatever the resolver says -- so trusting the spelling let the plan travel in
+# the clear to somewhere that was not this machine (audit 2026-08-30, HIGH). The
+# first fix kept the name and verified it by resolution, which was still wrong in
+# one place: _opener() keyed its proxy bypass on membership here rather than on
+# the verified answer, so that name got its proxy stripped while not being local
+# at all (CodeRabbit, 2026-08-30). Anyone who really needs it names it in the
+# allowlist, like any other remote host.
+#
+# The same objection applies to `localhost` in a tampered hosts file, which is why
+# even these three are verified rather than trusted. Use _is_loopback_host().
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# Ceilings for the local-runtime CLI. Neither call had one until 2026-08-30, so a
+# hung `lms` blocked the entire chain past every configured reviewer timeout.
+LMS_TIMEOUT = 30
+LMS_LOAD_TIMEOUT = 600
+
+# The only /models failures that mean "this compat layer has no such route"
+# rather than "this provider is broken".
+COMPAT_TOLERATED_CODES = frozenset({404, 405})
+
+# The exact wording FALLBACK.md requires in every logged round heading. It names
+# the limitation the reader has to see: this reviewer got the plan text and
+# nothing else -- no repo, no tools.
+FALLBACK_LABEL = "fallback — plan-text only, no repo access"
 
 EGRESS_ALLOW_ENV = "CLAUDEX_EGRESS_ALLOW"
 EGRESS_FILE_ENV = "CLAUDEX_EGRESS_ALLOWLIST"
@@ -298,19 +328,62 @@ def load_allowlist(path):
     return allowed
 
 
+def _resolves_to_loopback(host):
+    """True only when EVERY address this name resolves to is a loopback address.
+
+    A name is not a location. `host.docker.internal` was trusted by spelling and
+    points across a bridge; `localhost` can be redirected in a hosts file. Asking
+    the resolver is the only version of this check that means anything, and
+    "every address" rather than "any" so a name with one loopback answer and one
+    public answer does not pass (audit 2026-08-30).
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError, OSError):
+        return False
+    addresses = {info[4][0] for info in infos}
+    if not addresses:
+        return False
+    for address in addresses:
+        try:
+            if not ipaddress.ip_address(address.split("%", 1)[0]).is_loopback:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
+def _is_loopback_host(host):
+    """The one loopback test. Name plausible AND resolver agrees.
+
+    Every caller uses this: check_egress for policy, _opener for the proxy
+    bypass, is_local for the profile. They disagreed once -- _opener trusted the
+    name alone -- and that is exactly how a bridge address got treated as local.
+    """
+    host = (host or "").lower()
+    return host in LOOPBACK_HOSTS and _resolves_to_loopback(host)
+
+
 def check_egress(url):
     """Refuse a destination before anything is sent to it.
 
-    Two rules, and the first one is the reason this exists:
+    Three rules now, and the middle one is new:
 
-    1. **Plain http only to loopback.** The check this replaced fired only when
-       an API key was set — so a keyless endpoint received the plan and the whole
-       review log in the clear, to any host. The protected content is the plan,
-       not the key. (Found by the audit in a sister repo, 2026-08-28.)
-    2. **Exact host match** against CLAUDEX_EGRESS_ALLOW when that is set — a
-       comma-separated list of hostnames. No wildcards and no suffix matching:
+    1. **Plain http only to VERIFIED loopback.** The check this replaced fired
+       only when an API key was set — so a keyless endpoint received the plan and
+       the whole review log in the clear, to any host. The protected content is
+       the plan, not the key. (Sister-repo audit, 2026-08-28.) And "loopback" is
+       now decided by the resolver, not by the hostname's spelling.
+    2. **A remote host needs an allowlist. Absence is refusal, not permission.**
+       This is the fix from 2026-08-30 (HIGH). With no allowlist file and
+       CLAUDEX_EGRESS_ALLOW unset, ANY https host used to be accepted, and the
+       error text even suggested unsetting the variable "to drop the host
+       restriction". A repo-supplied `.env` could therefore name an arbitrary
+       provider and the plan, the review log and whatever files the caller passed
+       went there. An allowlist that defaults to open is a comment.
+    3. **Exact host match** — no wildcards and no suffix matching:
        `api.openai.com.attacker.test` ends in an allowed name and would otherwise
-       slip through. Unset means no host restriction; the scheme rule still holds.
+       slip through.
 
     Raises EgressDenied. Never logs and continues — an allowlist you can ignore
     is not one.
@@ -323,6 +396,16 @@ def check_egress(url):
 
     if scheme not in ("http", "https"):
         raise EgressDenied(f"scheme '{scheme}' is not allowed for review traffic.")
+
+    local = _is_loopback_host(host)
+    if local:
+        # Verified loopback needs no allowlist, whichever allowlist exists.
+        # Previously it needed one as soon as ANY was configured -- so adding
+        # `openrouter.ai` to reach a remote reviewer silently broke the local LM
+        # Studio profile, while loopback stayed free for anyone who had
+        # configured nothing at all. A rule that tightens as you configure more
+        # policy is a trap. (CodeRabbit, 2026-08-30.)
+        return
 
     path, explicit = _allowlist_source()
     if path:
@@ -344,32 +427,81 @@ def check_egress(url):
                 f"(allowed: {', '.join(sorted(schemes))}).")
     else:
         raw_allow = os.environ.get(EGRESS_ALLOW_ENV, "").strip()
-        if raw_allow:
-            names = {h.strip().lower() for h in raw_allow.split(",") if h.strip()}
+        names = {h.strip().lower() for h in raw_allow.split(",") if h.strip()}
+        if names:
             if host not in names:
                 raise EgressDenied(
                     f"host '{host}' is not in {EGRESS_ALLOW_ENV} "
-                    f"({', '.join(sorted(names))}). Add it deliberately, or unset "
-                    "the variable to drop the host restriction.")
+                    f"({', '.join(sorted(names))}). Add it deliberately.")
+        elif not local:
+            raise EgressDenied(
+                f"no egress allowlist is configured, so '{host}' is refused. This "
+                f"fails CLOSED on purpose: the plan, the review log and any file "
+                f"you passed would go to that host.\n"
+                f"  Name it deliberately, either way:\n"
+                f"    {EGRESS_ALLOW_ENV}={host}\n"
+                f"  or a config/allowed_egress.yaml entry with a reason. Loopback "
+                f"endpoints need neither.")
 
     # The floor, checked last so a more specific message wins: cleartext never
     # leaves the machine, no matter what any allowlist says.
-    if scheme == "http" and host not in LOOPBACK_HOSTS:
+    if scheme == "http" and not local:
+        detail = (
+            f"'{host}' is a name this machine does not resolve to a loopback address"
+            if host in LOOPBACK_HOSTS
+            else f"the non-loopback host '{host}'"
+        )
         raise EgressDenied(
-            f"refusing plain http to the non-loopback host '{host}'. The plan and "
-            f"the review log would travel in the clear, whether or not a key goes "
-            f"with them. Use https.")
+            f"refusing plain http to {detail}. The plan and the review log would "
+            f"travel in the clear, whether or not a key goes with them. Use https.")
 
 
 def is_local(p):
-    host = urlsplit(p["base_url"]).hostname or ""
-    return host in LOOPBACK_HOSTS
+    return _is_loopback_host(urlsplit(p["base_url"]).hostname)
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow nothing. A redirect is a destination nobody checked.
+
+    check_egress() vets the URL we chose; urlopen's default handler then follows
+    30x hops without asking again, and Python re-sends the Authorization header
+    on a same-scheme redirect. An allowlisted provider could therefore bounce the
+    plan -- and the API key -- to a host that is not on the list (audit
+    2026-08-30, HIGH). No LLM endpoint here has any business redirecting, so this
+    refuses rather than re-validating: fewer moving parts, same guarantee.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise EgressDenied(
+            f"{req.full_url} answered {code} redirecting to {newurl}. Redirects are "
+            f"not followed: the new host was never checked against the allowlist, "
+            f"and the credentials would travel with the request. Point the profile "
+            f"straight at the endpoint that answers."
+        )
+
+
+def _opener(url):
+    """An opener that follows no redirect and proxies no loopback request.
+
+    Proxy environment (HTTP_PROXY/ALL_PROXY) is honoured by urllib for loopback
+    URLs too unless no_proxy happens to cover them, which would route a cleartext
+    `http://127.0.0.1` request through whatever that variable names -- with the
+    plan in it. Loopback traffic gets an empty ProxyHandler; remote traffic is
+    https-only anyway, so a proxy sees a CONNECT tunnel and nothing else.
+    """
+    handlers = [_RefuseRedirects()]
+    # _is_loopback_host, not membership in LOOPBACK_HOSTS: stripping the proxy
+    # for a name that merely LOOKS local is how a bridge address got treated as
+    # this machine. (CodeRabbit, 2026-08-30.)
+    if _is_loopback_host(urlsplit(url).hostname):
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers)
 
 
 def http_get_json(url, headers, timeout=15):
     check_egress(url)  # every request, not just the one the profile declared
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _opener(url).open(req, timeout=timeout) as resp:
         return json.load(resp)
 
 
@@ -401,16 +533,33 @@ def ensure_model_loaded(p):
             if (entry.get("loaded_context_length") or 0) >= context:
                 return True, f"{model} already loaded"
             # Loaded, but too small a window for a plan plus the log so far.
-            subprocess.run(["lms", "unload", model], capture_output=True)
+            try:
+                subprocess.run(
+                    ["lms", "unload", model], capture_output=True, timeout=LMS_TIMEOUT
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                return False, f"`lms unload {model}` did not finish: {exc}"
             break
     except (EgressDenied, AllowlistUnreadable):
         raise
     except (urllib.error.URLError, OSError, ValueError):
         pass  # no /api/v0 here; let the load attempt below be the verdict
 
-    result = subprocess.run(
-        ["lms", "load", model, "--context-length", str(context), "--yes"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # Bounded on purpose. Without a timeout a hung local runtime blocks preflight
+    # and with it the whole chain, however small the configured reviewer timeout
+    # is -- the one deadline the operator set does not reach this call (audit
+    # 2026-08-30, HIGH). Loading a large model is slow, so the ceiling is generous
+    # rather than tight; the point is that one exists.
+    try:
+        result = subprocess.run(
+            ["lms", "load", model, "--context-length", str(context), "--yes"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=LMS_LOAD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, (f"`lms load {model}` did not finish within {LMS_LOAD_TIMEOUT}s "
+                       f"— treating the runtime as unavailable rather than waiting.")
+    except OSError as exc:
+        return False, f"`lms load {model}` could not be started: {exc}"
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()[:300]
         return False, f"`lms load {model}` failed: {detail}"
@@ -443,8 +592,13 @@ def preflight(p):
             return False, f"auth rejected (HTTP {exc.code})"
         if exc.code in (402, 429):
             return False, f"quota/payment exhausted (HTTP {exc.code})"
-        # Other codes (404/405 …): some compat layers don't expose /models —
-        # reachable is good enough.
+        if exc.code not in COMPAT_TOLERATED_CODES:
+            # Everything else -- 500, 503, a gateway error -- means the provider is
+            # not healthy. This used to fall through to "reachable is good enough",
+            # which burned a review round against an endpoint that had already said
+            # it was broken (audit 2026-08-30).
+            return False, f"provider unhealthy (HTTP {exc.code})"
+        # 404/405 only: some compat layers genuinely do not expose /models.
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return False, f"unreachable ({getattr(exc, 'reason', exc)})"
 
@@ -472,6 +626,91 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+# Files whose contents must never be inlined into a prompt bound for a remote
+# model, whatever the caller asked for. --plan / --log / --system-file had no
+# restriction at all: `.env`, a key file or unredacted scanner output could be
+# selected and shipped (audit 2026-08-30, HIGH).
+# Matched against the file's STEM as well as its full name, so `secrets.yaml`,
+# `.env.production` and `credentials.json` are caught alongside bare `.env`.
+SECRET_NAME_RE = re.compile(
+    r"(^|[.\-_])(env|secrets?|credentials?|htpasswd|netrc|pgpass|keystore)($|[.\-_])"
+    r"|\.(pem|key|p12|pfx|jks|kdbx|asc|ppk)$"
+    r"|^(id_rsa|id_ed25519|id_ecdsa|\.npmrc|\.pypirc)",
+    re.IGNORECASE,
+)
+
+MAX_INPUT_BYTES = 4 * 1024 * 1024
+
+
+SCRATCH_DIR_ENV = "CLAUDEX_SCRATCH_DIR"
+
+
+def _confined_roots():
+    """Where a file that will be sent to a remote model may come from.
+
+    The repo, because that is the work. `<repo>/.claudex-tmp/` and an explicitly
+    named CLAUDEX_SCRATCH_DIR, because that is where the skills stage prompts.
+
+    ⛔ NOT the whole OS temp dir, which is what this used to allow. On Linux and
+    macOS that is `/tmp`: world-writable, and a path any local user can plant a
+    file in. The skills' own rule already says "⛔ Never /tmp. Prefer the harness
+    scratchpad; otherwise <repo>/.claudex-tmp/" -- this is that rule enforced
+    instead of merely written down. (CodeRabbit, 2026-08-30.)
+    """
+    repo = Path(_repo_root() or os.getcwd()).resolve()
+    roots = [repo, (repo / ".claudex-tmp")]
+    named = os.environ.get(SCRATCH_DIR_ENV, "").strip()
+    if named:
+        roots.append(Path(named).expanduser().resolve())
+    return roots
+
+
+def read_confined(path, label):
+    """Read a file the review will send onward -- or refuse, with the reason.
+
+    Three refusals, in the order that gives the most useful message:
+
+    1. outside the roots _confined_roots() allows -- the repo, `<repo>/.claudex-tmp/`
+       and an explicitly named CLAUDEX_SCRATCH_DIR. NOT the OS temp dir, which this
+       docstring claimed until CodeRabbit read it against the code (2026-08-30);
+    2. a name that reads as a credential store;
+    3. larger than MAX_INPUT_BYTES.
+
+    The size cap is not politeness -- an oversized input is read whole into memory
+    and then paid for at every provider in the chain.
+    """
+    resolved = Path(os.path.realpath(os.path.expanduser(str(path))))
+    roots = _confined_roots()
+    if not any(_is_within(resolved, root) for root in roots):
+        listed = ", ".join(str(r) for r in roots)
+        raise SystemExit(
+            f"{label}: {resolved} is outside the allowed roots ({listed}).\n"
+            f"  This file would be inlined into a prompt and sent to a remote model, "
+            f"so it has to come from the work, not from anywhere on disk.\n"
+            f"  Stage it in the repo, in <repo>/.claudex-tmp/, or in the directory "
+            f"named by CLAUDEX_SCRATCH_DIR.")
+    if any(SECRET_NAME_RE.search(part) for part in (resolved.name, resolved.stem)):
+        raise SystemExit(
+            f"{label}: refusing to inline {resolved.name} — that name reads as a "
+            f"credential file, and this content goes to a remote model.")
+    try:
+        size = resolved.stat().st_size
+    except OSError as exc:
+        raise SystemExit(f"{label}: cannot read {resolved}: {exc}") from exc
+    if size > MAX_INPUT_BYTES:
+        raise SystemExit(
+            f"{label}: {resolved} is {size} bytes, over the {MAX_INPUT_BYTES}-byte "
+            f"ceiling. Trim it — every provider in the chain would be billed for it.")
+    return read_text(resolved)
+
+
+def _is_within(child, root):
+    try:
+        return os.path.commonpath([str(child), str(root)]) == str(root)
+    except ValueError:
+        return False
+
+
 def read_text(path):
     with open(path, encoding="utf-8-sig", errors="replace") as fh:
         return fh.read()
@@ -481,14 +720,30 @@ def strip_thinking(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
-def count_findings(text):
-    """Count numbered findings (lines starting '1.' / '2)' etc.).
+# A finding says something. An outline entry ("1. Security", "2. Tests") does not,
+# and counting those is how a three-line summary used to satisfy the anti-rubber-
+# stamp floor -- the old comment called over-counting harmless, and it was not
+# (audit 2026-08-30). Length is a crude proxy for substance, but it is the one
+# that cannot be gamed by accident.
+FINDING_RE = re.compile(r"^[ \t]*\d{1,2}[.)]\s+(\S.*?)(?=\n[ \t]*\d{1,2}[.)]\s+\S|\Z)", re.M | re.S)
+MIN_FINDING_CHARS = 40
 
-    Every numbered line counts: multi-section reports restart numbering per
-    section, and de-duplicating by number would under-count them. The value
-    only feeds the rubber-stamp lower bound, so over-counting is harmless.
+
+def count_findings(text):
+    """Count numbered findings with enough substance to be one.
+
+    Each entry runs to the NEXT numbered line, not to its own line ending. Real
+    findings are multi-line -- an anchor, then the failure, then the fix -- and
+    measuring only the first line dropped every one whose opening line was short
+    ("1. **CRITICAL** -- `wrapper_guard.py:51`"). That undercounts, and the count
+    feeds the anti-rubber-stamp floor: a thorough review could be rejected as a
+    rubber stamp for formatting its findings the normal way. (CodeRabbit,
+    2026-08-30.)
+
+    Numbers are not de-duplicated: multi-section reports restart numbering per
+    section, so `1.` may legitimately appear several times.
     """
-    return len(re.findall(r"^\s*\d{1,2}[.)]\s+\S", text, flags=re.M))
+    return sum(1 for body in FINDING_RE.findall(text) if len(body.strip()) >= MIN_FINDING_CHARS)
 
 
 class ProviderError(Exception):
@@ -504,7 +759,9 @@ def run_review(p, args, plan_hash, user_content):
 
     Raises ProviderError on transport/HTTP failure so a chain can move on.
     """
-    system_prompt = read_text(args.system_file) if args.system_file else SYSTEM_PROMPT
+    system_prompt = (
+        read_confined(args.system_file, "--system-file") if args.system_file else SYSTEM_PROMPT
+    )
     payload = json.dumps({
         "model": p["model"],
         "messages": [
@@ -520,8 +777,15 @@ def run_review(p, args, plan_hash, user_content):
     check_egress(chat_url)  # the request that actually carries the plan
     req = urllib.request.Request(chat_url, data=payload, headers=auth_headers(p))
     try:
-        with urllib.request.urlopen(req, timeout=p["timeout"]) as resp:
+        with _opener(chat_url).open(req, timeout=p["timeout"]) as resp:
             body = json.load(resp)
+    except (EgressDenied, AllowlistUnreadable) as exc:
+        # _RefuseRedirects raises EgressDenied from inside urlopen. Uncaught it
+        # left run_review as a traceback instead of a recorded round, so the
+        # chain could neither move on nor log what happened -- while preflight()
+        # already handled the same two exceptions properly. Terminal: a provider
+        # that redirects will redirect again. (CodeRabbit, 2026-08-30.)
+        raise ProviderError(f"egress refused ({exc})", terminal=True) from exc
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:500]
         # Quota/auth errors are terminal for this provider; 5xx may be transient.
@@ -558,21 +822,44 @@ def run_review(p, args, plan_hash, user_content):
               f"# Status: {status}\n\n")
     output = header + critique + "\n"
     if args.out:
-        with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(output)
+        write_atomically(args.out, output)
         print(f"Review written: {args.out}")
     else:
         print(output)
     print(f"{status} | findings: {count_findings(critique)} | plan-sha256: {plan_hash} "
           f"| reviewer: {p['name']}")
-    if args.append_log:
-        label = "fallback" if code == 0 else "fallback — INVALID ATTEMPT, does not count as a round"
-        entry = (f"\n## Round {args.round_no} — {p['model']} (via {p['name']}, {label})\n\n"
-                 f"_Status: {status} · plan SHA256 {plan_hash}_\n\n{critique}\n")
-        with open(args.append_log, "a", encoding="utf-8", newline="\n") as fh:
-            fh.write(entry)
-        print(f"Round appended to {args.append_log}")
+    # FALLBACK.md: "Every fallback round is recorded as: ## Round <n> — <model>
+    # (via <reviewer>, fallback — plan-text only, no repo access)". Both halves of
+    # that rule were broken: the log was optional, and the heading dropped the
+    # limitation the rule exists to put in front of the reader (audit 2026-08-30).
+    label = FALLBACK_LABEL if code == 0 else f"{FALLBACK_LABEL}, INVALID ATTEMPT, does not count as a round"
+    entry = (f"\n## Round {args.round_no} — {p['model']} (via {p['name']}, {label})\n\n"
+             f"_Status: {status} · plan SHA256 {plan_hash}_\n\n{critique}\n")
+    with open(args.append_log, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(entry)
+    print(f"Round appended to {args.append_log}")
     return code
+
+
+def write_atomically(target, text):
+    """Replace the target only once the whole reply is on disk.
+
+    A failed round used to leave the PREVIOUS round's verdict sitting at --out,
+    so a reader who checked the file rather than the exit code saw a stale
+    approval for the current plan (audit 2026-08-30).
+    """
+    target = Path(target)
+    staging = target.with_name(target.name + ".claudex-part")
+    try:
+        # `newline` on write_text needs Python 3.10, which is the declared floor.
+        # It briefly was not: the floor said 3.8 while this call already used the
+        # keyword, so the scripts would have died with a TypeError on the version
+        # they promised. (CodeRabbit, 2026-08-30.)
+        staging.write_text(text, encoding="utf-8", newline="\n")
+        staging.replace(target)
+    finally:
+        if staging.exists():
+            staging.unlink()
 
 
 def validate(critique, args, p):
@@ -580,14 +867,24 @@ def validate(critique, args, p):
 
     Returns (exit_code, status_line): 0 with the verdict summary, or 3 with an
     'INVALID: …' reason. Markdown decoration around a verdict line is
-    tolerated (**VERDICT: X**, etc.); if a verdict appears several times, the
-    LAST occurrence counts.
+    tolerated (**VERDICT: X**, etc.).
+
+    The verdict must be the LAST non-blank line, which is what the system prompt
+    asks for ("End your reply with EXACTLY one line"). The parser used to accept
+    the last match anywhere in the reply, so a model could write `VERDICT:
+    APPROVED` mid-text and carry on -- the documented grammar was a suggestion
+    rather than a boundary (audit 2026-08-30). With several named verdicts the
+    requirement is that they occupy the closing lines, in any order.
     """
     DECOR = r"[\s*_`>#-]*"
+    lines = [line for line in critique.splitlines() if line.strip()]
+    # As many closing lines as there are verdicts to find, plus nothing else.
+    expected = len(args.require_verdicts.split(",")) if args.require_verdicts else 1
+    tail = "\n".join(lines[-expected:]) if lines else ""
 
     def last_verdict(name, values):
         rx = rf"^{DECOR}{re.escape(name)}:\s*({'|'.join(map(re.escape, values))})[\s*_`.!]*$"
-        found = re.findall(rx, critique, flags=re.MULTILINE | re.IGNORECASE)
+        found = re.findall(rx, tail, flags=re.MULTILINE | re.IGNORECASE)
         return found[-1].upper() if found else None
 
     findings = count_findings(critique)
@@ -636,11 +933,12 @@ def main():
     ap.add_argument("--round", type=int, default=1, dest="round_no")
     ap.add_argument("--out", help="write the critique here (default: stdout)")
     ap.add_argument("--append-log",
-                    help="append this round to the review log (e.g. PLAN-REVIEW-LOG.md) "
-                         "as '## Round <n> — <model> (via <reviewer>, fallback)' with the "
-                         "status line and the full critique — INVALID attempts are "
-                         "appended too, labeled as not counting. Findings never live "
-                         "only in a chat transcript.")
+                    help="REQUIRED for a review run. Appends this round to the review "
+                         "log (e.g. PLAN-REVIEW-LOG.md) as '## Round <n> — <model> "
+                         "(via <reviewer>, " + FALLBACK_LABEL + ")' with the status "
+                         "line and the full critique — INVALID attempts are appended "
+                         "too, labeled as not counting. Findings never live only in a "
+                         "chat transcript.")
     ap.add_argument("--system-file",
                     help="file whose content replaces the built-in plan-review "
                          "system prompt — lets other gates (e.g. codex-verify) "
@@ -690,6 +988,18 @@ def main():
 
     if not args.plan:
         ap.error("--plan is required (unless --list/--check)")
+    if not args.append_log:
+        # FALLBACK.md: "Findings never live only in the chat." The flag was
+        # optional until 2026-08-30, so the documented rule held only for whoever
+        # remembered to pass it.
+        ap.error("--append-log is required: every fallback round is recorded, "
+                 "including the invalid ones. Name the review log.")
+
+    # Clear a previous round's verdict BEFORE anything can fail. Otherwise a run
+    # that never reaches run_review() leaves a stale approval at --out for the
+    # current plan.
+    if args.out and os.path.exists(args.out):
+        os.unlink(args.out)
 
     names = reviewer_names()
     if args.chain:
@@ -703,16 +1013,19 @@ def main():
         return 2
 
     plan_hash = sha256_file(args.plan)
+    # read_confined, not read_text: everything joined here is inlined into a
+    # prompt bound for a remote model.
     user_parts = []
     if args.log:
         user_parts.append(
             "Review history so far (earlier findings and the planner's "
             "responses — check whether they are addressed, and find what is "
-            "new):\n=== BEGIN LOG ===\n" + read_text(args.log) + "\n=== END LOG ===\n")
+            "new):\n=== BEGIN LOG ===\n" + read_confined(args.log, "--log")
+            + "\n=== END LOG ===\n")
     user_parts.append(
         f"Review round {args.round_no}. The plan under review "
         f"(SHA256 {plan_hash[:16]}):\n=== BEGIN PLAN ===\n"
-        + read_text(args.plan) + "\n=== END PLAN ===")
+        + read_confined(args.plan, "--plan") + "\n=== END PLAN ===")
     user_content = "\n".join(user_parts)
 
     for name in candidates:
