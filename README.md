@@ -4,7 +4,7 @@
 
 ### Two AI models harden your plan before a line of code exists — then swap jobs to build it.
 
-[![Stars](https://img.shields.io/github/stars/chaseai-yt/claudex-loop?style=flat&color=e8590c)](https://github.com/chaseai-yt/claudex-loop/stargazers)
+[![Stars](https://img.shields.io/github/stars/ujconsulting/claudex-loop?style=flat&color=e8590c)](https://github.com/ujconsulting/claudex-loop/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-skill%20%2B%20plugin-d97757)](https://docs.anthropic.com/en/docs/claude-code)
 [![Codex](https://img.shields.io/badge/OpenAI_Codex-adversarial_reviewer-10a37f)](https://github.com/openai/codex)
@@ -26,25 +26,29 @@ flowchart LR
     A["🔍 RECON<br>codebase recon or<br>greenfield research"] --> L["📋 Assumptions Ledger<br>you confirm in one batch"]
     L --> B["🎯 INTERROGATE<br>load-bearing questions<br>one at a time"]
     B --> P["PLAN.md locked"]
-    P --> C["⚔️ REVIEW<br>Codex attacks in a<br>read-only sandbox"]
-    C -- REVISE --> R["Claude arbitrates<br>and revises"]
+    P --> C["⚔️ PLAN REVIEW<br>the adversary attacks it<br>in a read-only sandbox"]
+    C -- REVISE --> R["the producer arbitrates<br>and revises"]
     R -- same session --> C
     C -- APPROVED --> S["✍️ You sign off"]
     S -. optional .-> D["🔨 BUILD<br>one model writes"]
     D --> I["🔬 CROSS-INSPECT<br>the other model<br>grades the diff"]
-    I --> G["✅ You approve<br>the final diff"]
-    classDef claude fill:#d97757,stroke:#7a3a24,color:#fff
-    classDef codex fill:#10a37f,stroke:#0a6b54,color:#fff
+    I --> V["🧪 ACCEPTANCE GATE<br>dod · quality · security<br>+ docs · tests"]
+    V -. anything facing the network .-> X["🛡️ EXPOSURE PASS<br>own model, own effort<br>SAFE / UNSAFE"]
+    X --> G["✅ You approve<br>the final diff"]
+    V --> G
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
     classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
     classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
-    class A,B,R claude
-    class C,D codex
-    class I artifact
+    class A,B,R,D producer
+    class C,I,V,X adversary
     class L,S,G human
     class P artifact
 ```
 
-**You enter at four points only:** confirming the ledger, answering the interview, signing off the converged plan, and approving the final diff if you build. Codex is read-only throughout review and never touches a file.
+**You enter at four points only:** confirming the ledger, answering the interview, signing off the converged plan, and approving the final diff if you build. Every reviewing step is read-only and never touches a file.
+
+**Orange is whoever produces, green is whoever grades — not Claude and Codex.** The colours name *roles*, because in this fork the actor behind each one is configuration (see [The actor is configuration, not a name](#the-actor-is-configuration-not-a-name)). In the delegation arrangement the boxes swap models without the diagram changing. `audit`, `docs-backfill` and `setup` are deliberately absent: they are not steps in this loop, they run on their own — see [Beyond the plan](#beyond-the-plan-this-fork).
 
 ## The four phases
 
@@ -111,6 +115,33 @@ From the first end-to-end greenfield run (a solo-creator CRM):
 - **~6 wrong models** that would have shipped and corrupted data weeks later
 - **~7 missing subsystems**, including the homepage feature that had no backing data source
 - **What survived untouched:** every product decision from the interview. The review only ever attacked *how it would break* — the phases genuinely divide the labor
+
+### And then this fork turned the tools on themselves
+
+That run is upstream's evidence for the *plan* loop. This fork's own evidence is
+harsher, because `audit` was pointed at the repo that ships it — a repo whose entire
+product is controls:
+
+- **89 findings resolved** — 47 from the audit (7 read-only slices + 1 exposure session),
+  42 from four CodeRabbit passes over the fixes. Test suite **90 → 183**.
+- **Both headline controls could be walked around.** The `PreToolUse` guard let
+  `codex_ro.py${IFS}&&<anything>` through — bash splits control operators *before* it
+  expands parameters, so it ran as two commands while the token no longer ended in the
+  wrapper's name. And `--allow-path` let a call widen its own write confinement, turning
+  an approved "read-only review" into an arbitrary delete.
+- **The fix for the first one had the same hole in a different spelling.** A second
+  reviewer found `$(...)` and backticks doing the identical trick, because the
+  substitution check ran *after* the recognition those forms defeat.
+- **A third pass, from a consumer repo, found two more CRITICALs** in the wrapper on
+  2026-09-02 — and lifted a risk this audit had consciously accepted, correctly: the
+  acceptance covered env *prefixing* and missed env *inheritance*.
+
+Three independent passes over the same 500 lines, each finding what the previous one
+missed. That is the argument for the whole method, made against its own author.
+Everything is written up with its verification in
+[`docs/audit/2026-08-30-baseline.md`](./docs/audit/2026-08-30-baseline.md) — including
+the findings that were **rejected**, and where a reviewer's advice was deliberately not
+followed.
 
 ## Upgrading to 2.3.0 — one deliberate break
 
@@ -179,7 +210,7 @@ rather than at us. If the wrapper ever failed on a fresh machine, that was why.
 ### Option A — Plugin *(recommended: updates flow automatically)*
 
 ```
-/plugin marketplace add chaseai-yt/claudex-loop
+/plugin marketplace add ujconsulting/claudex-loop
 /plugin install claudex-loop@claudex-loop
 ```
 

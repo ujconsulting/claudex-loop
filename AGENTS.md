@@ -42,8 +42,32 @@ Zugriff auf die Diskussion, die zum Plan geführt hat. Endet mit
    Argument, das er akzeptiert, läuft **ohne** Rückfrage an den Menschen. Was kann ein
    Aufrufer damit erreichen, das er ohne Freigabe nicht dürfte?
 6. **Doku gegen Code.** Dieses Repo behauptet viel über sich selbst. Jede Behauptung in
-   `README.md`, `ROLES.md`, `FALLBACK.md`, `docs/betrieb.md` und in den Docstrings ist
-   prüfbar — und wenn sie nicht stimmt, ist das ein Befund mit Severity, kein Typo.
+   `README.md`, `README_DE.md`, `ROLES.md`, `FALLBACK.md`, `docs/betrieb.md` und in den
+   Docstrings ist prüfbar — und wenn sie nicht stimmt, ist das ein Befund mit Severity,
+   kein Typo.
+
+   **Drei Stellen in den READMEs veralten lautlos** und gehören bei jeder Änderung an
+   Ablauf, Skills oder Installation geprüft. Am 02.09.2026 waren alle drei gleichzeitig
+   falsch, und keine davon hätte einen Test rot gemacht:
+   - **Die Mermaid-Grafik unter `## Why`** beschrieb die vier Upstream-Phasen und hörte
+     genau dort auf, wo die Ergänzungen dieses Forks anfangen — kein Abnahme-Gate, kein
+     Exposure-Pass, und die Farben verdrahteten Claude und Codex in Kästen, deren ganzer
+     Zweck es ist, dass der Akteur Konfiguration ist. Eine bloß *unvollständige* Grafik
+     liest sich trotzdem wie das ganze Bild.
+   - **Die Receipts** waren upstreams Plan-Lauf auf einem Repo, das hier niemand gesehen
+     hat. Der eigene Beleg dieses Forks fehlte ganz.
+   - **⛔ Die Installationsbefehle** sagten `marketplace add chaseai-yt/claudex-loop`,
+     geerbt vom Fork-Punkt. Wer dieser README folgte, installierte das **Upstream**-Plugin:
+     kein Wrapper, kein Guard, nichts von der Härtung, die dieselbe README ausführlich
+     beschreibt. Das ist schlimmer als veraltete Doku — es ist ein Sicherheitsversprechen,
+     das der Leser nicht einlösen kann, ohne es merken zu können. `tests/test_readme_sync.py`
+     fällt darauf jetzt durch. Verweise auf Upstream-*Issues und -PRs* bleiben: das ist
+     Zuschreibung, keine Anweisung.
+
+   `README.md` und `README_DE.md` werden **zusammen** geändert. Die deutsche Fassung ist
+   ein vollständiger Spiegel, keine Zusammenfassung. Kommandos, Env-Variablen und die
+   Grafik werden wörtlich übernommen statt übersetzt — der Test vergleicht sie literal.
+   Die Prosa kann er nicht prüfen, die bleibt Handarbeit.
 7. **Portabilität.** Windows, macOS, Linux; Git Bash; Python 3.10 bis 3.13; PyYAML da
    oder nicht. Die Skripte werden in fremde Repos kopiert, wo nichts installiert wird.
 8. **Skill-Dokumente sind ausführbar.** Ein `bash`-Block in `skills/*/SKILL.md` ist kein

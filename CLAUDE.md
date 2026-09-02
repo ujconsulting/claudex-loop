@@ -34,6 +34,29 @@ automatically; read it before reviewing anything here.
 6. **A closed gap needs a test that was red first.** Every audit fix in this repo has
    one; match that.
 7. **Do not weaken a control to make a test pass.** Fix the test or the design.
+8. **Three things in the READMEs go stale silently. Check them on every change that
+   touches the flow, the skills, or the install.** All three were wrong at once on
+   2026-09-02, and none of them would have failed a test:
+   - **The mermaid diagram under `## Why`.** It described the four upstream phases and
+     stopped exactly where this fork's additions begin — no acceptance gate, no exposure
+     pass, and the colours hard-wired Claude and Codex into boxes whose whole point is
+     that the actor is configuration. A diagram that is merely *incomplete* still reads
+     as the full picture.
+   - **The receipts.** They were upstream's plan-loop run, on a repo nobody here has
+     seen. This fork's own evidence — the audit that found its two headline controls
+     walkable — was missing entirely.
+   - **⛔ The install commands.** They said `marketplace add chaseai-yt/claudex-loop`,
+     inherited from the fork point. Anyone following this README installed the
+     **upstream** plugin: no wrapper, no guard, none of the hardening the same README
+     then describes at length. That is worse than a stale doc — it is a security
+     promise the reader cannot collect on, and they had no way to notice.
+     `tests/test_readme_sync.py` now fails on it. Links to upstream *issues and PRs*
+     stay: those are attribution, not instructions.
+
+   **`README.md` and `README_DE.md` are edited together.** The German file is a full
+   mirror for German-speaking users, not a summary. Commands, env vars and the diagram
+   are copied verbatim rather than translated, and the test compares them literally —
+   prose it cannot check, so that part is on you.
 8. **Before this repo is ever published as a real public project** (not the current
    fork), in this order: **first** enable GitHub's private vulnerability reporting
    (Settings → Advanced Security), **then** add a `SECURITY.md` pointing at it with a
