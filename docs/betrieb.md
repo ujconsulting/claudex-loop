@@ -196,7 +196,10 @@ Binary in ein PATH-Verzeichnis vor der alten Installation verlinken, dann lässt
 *Nutzer* `sudo npm uninstall -g @openai/codex` laufen (braucht sein Passwort).
 ⛔ `~/.codex/` **nicht** löschen — `config.toml`, `auth.json` und die Sessions liegen dort
 und werden vom gebündelten Binary weiter genutzt. Der Wrapper erkennt und benennt diesen
-Fall; `CLAUDEX_CODEX_BIN` zeigt ihn notfalls direkt auf das richtige Binary.
+Fall. `CLAUDEX_CODEX_BIN` gibt es seit 2.3.0 nicht mehr (Audit 2026-09-02, CRITICAL: eine
+per Umgebung gesetzte Variable durfte auf einem unbeaufsichtigten, allowlisteten Aufruf
+nicht mehr bestimmen dürfen, welches Programm als „Codex" läuft) — den Symlink-Fix oben
+anwenden, dann findet die PATH-Suche das Bundle selbst.
 (Upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 
 **Immer aus dem Repo-Root starten.** Codex lädt von dort automatisch die `AGENTS.md` — der

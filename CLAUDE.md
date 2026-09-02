@@ -34,6 +34,15 @@ automatically; read it before reviewing anything here.
 6. **A closed gap needs a test that was red first.** Every audit fix in this repo has
    one; match that.
 7. **Do not weaken a control to make a test pass.** Fix the test or the design.
+8. **Before this repo is ever published as a real public project** (not the current
+   fork), in this order: **first** enable GitHub's private vulnerability reporting
+   (Settings → Advanced Security), **then** add a `SECURITY.md` pointing at it with a
+   reachable address. Never the other way round — a `SECURITY.md` that forbids public
+   issues while naming no working channel closes the only open door and replaces it
+   with nothing. This repo is the likely candidate for it: it enforces a read-only
+   sandbox and a taboo scope over what leaves the machine, so a bug here is a security
+   bug for whoever installed it. Full reasoning and the case it came from:
+   `D:\Dokumente\Projekte\CLAUDE.md`, section „Wenn ein eigenes Repo öffentlich wird".
 
 ## Before every commit
 

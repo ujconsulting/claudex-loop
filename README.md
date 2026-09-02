@@ -112,6 +112,34 @@ From the first end-to-end greenfield run (a solo-creator CRM):
 - **~7 missing subsystems**, including the homepage feature that had no backing data source
 - **What survived untouched:** every product decision from the interview. The review only ever attacked *how it would break* — the phases genuinely divide the labor
 
+## Upgrading to 2.3.0 — one deliberate break
+
+2.3.0 fixes two CRITICALs from a downstream audit of a consumer repo
+(2026-09-02): on Windows, `CLAUDEX_SCRATCH_DIR` could name ANY directory as a
+write root, because the wrapper has no cheap way to verify a Windows
+directory is actually private; and `CLAUDEX_CODEX_BIN` let an unattended
+call's environment replace the Codex executable with any existing file,
+which then received the prompt under no obligation to honour `-s read-only`.
+Also hardened: a write target can no longer be a Windows junction (a
+different reparse tag than a symlink, and one that needs no special
+privilege to create) or a file that already hard-links to other data.
+
+**One change will stop a run that used to work, on purpose:**
+
+- **`CLAUDEX_CODEX_BIN` is gone.** There is no environment escape hatch left
+  for a broken PATH; fix PATH (or, on macOS, let `bundled_codex()` find the
+  ChatGPT.app copy automatically — that path was never gated by the removed
+  variable).
+
+**Also worth knowing, though nothing breaks for a legitimate call:**
+`CLAUDEX_SCRATCH_DIR` still works on POSIX (a real per-ancestor privacy check
+runs there); on Windows it is now refused outright rather than trusted
+unverified — use the repo or its `.claudex-tmp/` subdirectory instead.
+Both fixes, their reasoning, and the residual gaps that remain (Windows ACL
+verification for the repo/temp-dir candidates; PATH resolution is still
+unpinned) are written out in `scripts/codex_ro.py`'s module docstring under
+"RESIDUAL GAPS".
+
 ## Upgrading to 2.2.0 — two deliberate breaks
 
 2.2.0 is the remediation of this repo's own first audit
@@ -253,7 +281,7 @@ With no `.env` profiles configured, nothing changes — Codex stays the only rev
 
 [`scripts/codex_ro.py`](./scripts/codex_ro.py) is the canonical wrapper (Windows and macOS, Python 3.10+). It pins `-s read-only` on `exec`, `-c sandbox_mode=read-only` on `resume`, and refuses with exit 2 any `-c` override touching `sandbox_mode`, `approval_policy`, `sandbox_permissions`, `sandbox_workspace_write`, `profile` or `mcp_servers` — the last two because a profile carries its own sandbox setting and Codex runs MCP servers as separate processes *outside* the sandbox.
 
-Path arguments are confined, and **write targets more tightly than reads**: the wrapper deletes `--out-file` and truncates `--err-file`, so an unbounded path argument would be a write primitive on a call the allowlist approved without a prompt. Reads may additionally use `--allow-path` / `CLAUDEX_ALLOWED_PATHS`; writes may not — a caller cannot widen its own confinement. Write targets must sit in the repo, in `<repo>/.claudex-tmp/`, in an explicit `CLAUDEX_SCRATCH_DIR`, or in the OS temp dir *when that is not world-writable* (it is per-user on Windows; `/tmp` on Linux is not, and is refused). A target that is a symlink, a directory, or the same file as another output is refused outright. `python -m unittest discover -s tests` covers the refusals; the sandbox behaviour itself is a measurement, recorded in the file's docstring.
+Path arguments are confined, and **write targets more tightly than reads**: the wrapper deletes `--out-file` and truncates `--err-file`, so an unbounded path argument would be a write primitive on a call the allowlist approved without a prompt. Reads may additionally use `--allow-path` / `CLAUDEX_ALLOWED_PATHS`; writes may not — a caller cannot widen its own confinement. Write targets must sit in the repo, in `<repo>/.claudex-tmp/`, or in the OS temp dir — POSIX additionally accepts an explicit `CLAUDEX_SCRATCH_DIR`, verified private through a real per-ancestor check; **on Windows that variable is refused outright as of 2.3.0** (audit 2026-09-02, CRITICAL), because Windows offers no cheap way to verify a directory is actually private, and the repo/`.claudex-tmp/`/temp-dir candidates are therefore *assumed* private there rather than proven so — a documented residual gap, not a guarantee. A target that is a symlink, a Windows junction, a directory, a file that already hard-links to other data, or the same file as another output is refused outright. `python -m unittest discover -s tests` covers the refusals; the sandbox behaviour itself is a measurement, recorded in the file's docstring.
 
 `setup` copies it to each repo as `tools/codex_ro.py`, because a permission rule has to name a stable path and the plugin directory carries a version hash. Copies drift — [`scripts/wrapper_drift.py`](./scripts/wrapper_drift.py) reports which ones have fallen behind and `--update` levels them.
 
