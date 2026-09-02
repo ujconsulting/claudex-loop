@@ -34,11 +34,45 @@ WHAT AN ACCEPTED CALL STILL CANNOT DO (audit 2026-08-30, two CRITICALs)
       arrive on the same unattended approval as the call, and --out-file is
       unlinked while --err-file is truncated. They now widen READS only; write
       targets stay in the repo and the OS temp dir, always.
-    - point a write target at a symlink, a directory or a device -- checked before
-      the unlink, and opened O_NOFOLLOW so the gap cannot be raced.
+    - point a write target at a symlink, a directory, a device or a Windows
+      junction (audit 2026-09-02: `Path.is_symlink()` alone missed junctions,
+      which need no special privilege to create -- see `_is_reparse_point`),
+      or at a name that already hard-links to other data (`_has_other_hardlinks`)
+      -- all checked before the unlink/open, which is O_NOFOLLOW on POSIX so
+      that gap cannot be raced there. Windows has no such flag; see the
+      residual gap noted for `open_for_write` below.
     - define or re-enable an MCP server. Codex runs those as separate processes
       OUTSIDE the sandbox, so `-c mcp_servers.*` is refused like the sandbox keys,
       and so is `-c profile=` (a profile carries its own sandbox_mode).
+    - name an arbitrary write directory via CLAUDEX_SCRATCH_DIR on Windows (audit
+      2026-09-02, CRITICAL). Write targets there are limited to the repo, its
+      `.claudex-tmp/`, and the OS temp dir -- fixed candidates the wrapper picks
+      itself, never one supplied through the environment.
+    - replace the Codex executable via CLAUDEX_CODEX_BIN (audit 2026-09-02,
+      CRITICAL). That override is gone; only PATH lookup and the fixed macOS
+      bundle path resolve which binary runs.
+
+⛔ RESIDUAL GAPS, stated rather than papered over (audit 2026-09-02):
+    - On Windows, the repo, `.claudex-tmp/` and the OS temp dir are still ASSUMED
+      private, not verified -- `_is_private_dir()` cannot read a directory's
+      ACL/DACL and returns True unconditionally there. A shared checkout or a
+      shared temp dir on Windows is not actually screened. Closing this needs
+      real Windows ACL/DACL inspection of every ancestor, which this wrapper
+      does not implement (see `_is_private_dir`'s docstring). Only the
+      environment-settable scratch dir was removed as a candidate, because that
+      one-line removal closes a real hole; a half-built ACL check would not.
+    - On Windows, the reparse-point/hard-link checks in `prepare_write_target()`
+      run, then the file is opened separately in `open_for_write()` -- there is
+      no O_NOFOLLOW there, so a second attacker with write access to the SAME
+      directory could still swap the leaf between the two calls. This is a
+      narrower window than before (it now needs a second attacker inside an
+      already-private-assumed directory, not just an env var), not a closed one.
+    - PATH-based Codex resolution is unpinned: whichever `codex`/`codex.cmd`
+      resolves first on PATH runs, and PATH itself can be attacker-influenced.
+      Removing CLAUDEX_CODEX_BIN closes the environment-override door but not
+      this one -- pinning PATH resolution needs a decision about what "the
+      trusted Codex install" even means on a given machine, which this fix does
+      not make for you.
 
 Exit codes:
     0    Codex ran and produced a non-empty answer
@@ -66,7 +100,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-WRAPPER_VERSION = "2.2.0"
+WRAPPER_VERSION = "2.3.0"
 
 DEFAULT_MODEL = "gpt-5.6-terra"
 EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
@@ -150,10 +184,23 @@ SCRATCH_DIR_ENV = "CLAUDEX_SCRATCH_DIR"
 def _is_private_dir(path: Path) -> bool:
     """True when this directory is not writable by other local users.
 
-    On Windows the POSIX mode bits are meaningless -- `os.stat` reports 0o777 for
-    everything -- but the per-user temp dir (`%LOCALAPPDATA%\\Temp`) is genuinely
-    private, so the answer there is yes without asking. On POSIX the question is
-    real, and `/tmp` (mode 1777) is exactly the case this exists to exclude.
+    On POSIX the question is real and answered for real: `/tmp` (mode 1777) is
+    exactly the case this exists to exclude, and the ancestor walk below catches
+    a private leaf under a world-writable parent too.
+
+    ⛔ On Windows this is NOT a check, it is an assumption: `os.stat` reports
+    0o777 for everything, so there is no cheap equivalent of the S_IWOTH test --
+    a real answer needs the ACL/DACL of every ancestor, which this function does
+    not read (audit 2026-09-02, CRITICAL; a prior version of this docstring
+    called the per-user temp dir "genuinely private", which is only usually
+    true and was exactly the false confidence the audit flagged). Because this
+    predicate cannot actually distinguish a private Windows directory from a
+    shared one, `allowed_roots()` below no longer feeds it a directory the
+    CALLER chose (CLAUDEX_SCRATCH_DIR) on Windows -- only the fixed candidates
+    the wrapper picks itself. Those fixed candidates (the repo, its
+    `.claudex-tmp/`, the OS temp dir) still pass through here unverified on
+    Windows, which is a deliberately documented residual gap, not a fix: see
+    "WHAT AN ACCEPTED CALL STILL CANNOT DO" in the module docstring.
     """
     if os.name == "nt":
         return True
@@ -200,25 +247,50 @@ def allowed_roots(extra: list[str], for_write: bool = False) -> list[Path]:
         # nobody else can write to has no race to lose. (2026-08-30.)
         candidates = [repo, (repo / ".claudex-tmp"), Path(tempfile.gettempdir()).resolve()]
         named = os.environ.get(SCRATCH_DIR_ENV, "").strip()
-        if named:
+        # ⛔ Audit 2026-09-02, CRITICAL: on Windows, _is_private_dir() cannot tell
+        # a genuinely private directory from a shared one -- os.stat() reports
+        # 0o777 for everything there and this wrapper does not read the ACL/DACL
+        # (see _is_private_dir's docstring). Before this fix, that unconditional
+        # "yes" was applied to EVERY candidate, including one named at runtime
+        # through CLAUDEX_SCRATCH_DIR. A caller able to set that variable on an
+        # unattended, allowlisted invocation -- e.g. via a repo's
+        # `.claude/settings.json` `env` block, not just a per-call shell prefix
+        # -- could therefore point it at a directory of their own choosing and
+        # have it accepted as a write root, where --out-file gets unlinked and
+        # --err-file truncated. So on Windows this opt-in is refused outright:
+        # a value the wrapper cannot verify is worth nothing here. On POSIX,
+        # _is_private_dir() performs a real ancestor stat() check below, so the
+        # opt-in stays -- accepting it there does not reopen the hole.
+        if named and os.name == "nt":
+            warn(
+                f"{SCRATCH_DIR_ENV} is ignored on Windows: this wrapper cannot verify "
+                "a directory named at runtime is actually private here (see "
+                "_is_private_dir's docstring), so it no longer trusts one as a write "
+                "root. Use the repo or its .claudex-tmp/ subdirectory instead."
+            )
+        elif named:
             candidates.append(Path(named).expanduser().resolve())
         # EVERY candidate is screened, not just the temp dir. A repo checked out
-        # under /tmp, or a CLAUDEX_SCRATCH_DIR pointed at a shared directory, is
-        # the same exposure as /tmp itself -- and the first version of this only
-        # asked the question of the temp dir. (CodeRabbit, 2026-08-30.)
+        # under /tmp is the same exposure as /tmp itself -- and the first version
+        # of this only asked the question of the temp dir. (CodeRabbit, 2026-08-30.)
         private = [d for d in candidates if _is_private_dir(d)]
         if not private:
             # Fail closed, but say WHY. An empty allowed list rendered as a
             # refusal listing nothing, which reads like a bug in the wrapper
             # rather than a property of the machine. (CodeRabbit, 2026-08-30.)
             rejected = "\n    ".join(str(d) for d in candidates)
+            hint = (
+                f"  {SCRATCH_DIR_ENV} is not accepted on Windows (see above); create "
+                "<repo>/.claudex-tmp/ or move the repo off a shared path."
+                if os.name == "nt"
+                else f"  Set {SCRATCH_DIR_ENV} to a directory only you can write to "
+                "(and whose parents likewise), or move the repo off a shared path."
+            )
             die(
                 "no usable write root: every candidate is writable by other local "
                 "users, so a target there could be swapped for a symlink between "
                 "the check and the open.\n"
-                f"  rejected:\n    {rejected}\n"
-                f"  Set {SCRATCH_DIR_ENV} to a directory only you can write to "
-                f"(and whose parents likewise), or move the repo off a shared path.",
+                f"  rejected:\n    {rejected}\n{hint}",
                 EXIT_REFUSED,
             )
         return private
@@ -229,23 +301,86 @@ def allowed_roots(extra: list[str], for_write: bool = False) -> list[Path]:
     return roots
 
 
+# FILE_ATTRIBUTE_REPARSE_POINT (Windows). Set on BOTH kinds of reparse point that
+# matter here: an NTFS symlink (which Path.is_symlink() already catches) and a
+# directory JUNCTION (which it does not -- verified 2026-09-02: `mklink /J` from
+# a plain, non-elevated account succeeds, and Path.is_symlink() on the result
+# returns False, while os.stat(path, follow_symlinks=False).st_file_attributes
+# has this bit set. Unlike an NTFS symlink, a junction needs NO special Windows
+# privilege to create, so "creating a symlink needs a privilege most accounts do
+# not have" -- this file's own former excuse for not checking further on Windows
+# -- was true for symlinks and false for junctions.
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """True for an NTFS symlink OR any other reparse point, notably a junction.
+
+    Audit 2026-09-02 (part of the CRITICAL "reparse point or hardlink" finding):
+    `Path.is_symlink()` alone lets a directory junction through, and a junction
+    aimed at someone else's directory is exactly as dangerous a write target as a
+    symlink -- --out-file gets deleted and --err-file gets truncated wherever the
+    leaf name resolves to. is_symlink() is checked first because it also holds on
+    POSIX, where st_file_attributes does not exist.
+    """
+    if path.is_symlink():
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        attrs = os.stat(path, follow_symlinks=False).st_file_attributes
+    except (OSError, AttributeError):
+        return False
+    return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _has_other_hardlinks(path: Path) -> bool:
+    """True when an EXISTING target shares its data with another name already.
+
+    Audit 2026-09-02, the other half of the same finding: a hard link is not a
+    reparse point at all -- it is a second directory entry for the SAME file
+    data, invisible to is_symlink() and to the reparse-point check above. For
+    --out-file this is harmless (main() unlinks the old name before recreating
+    it, which only ever removes ONE name and leaves shared data and other names
+    untouched); for --err-file and the event stream, which are opened directly
+    with O_TRUNC and no prior unlink, truncating a hard-linked name truncates
+    the SAME data the other name still points at -- silently corrupting a file
+    this wrapper was never told about. A freshly created output file has exactly
+    one name (nlink == 1); more than that means somebody else already has a
+    name for this data, which is refused rather than trusted.
+    """
+    try:
+        return path.exists() and os.stat(path, follow_symlinks=False).st_nlink > 1
+    except OSError:
+        return False
+
+
 def prepare_write_target(path: Path, label: str) -> None:
     """Refuse a write target that is anything but a plain file, present or absent.
 
-    The wrapper deletes --out-file and truncates --err-file. A symlink there aims
-    that at someone else's file; a directory or device aims it at something worse.
-    Checked before the unlink, and the open below is O_NOFOLLOW so the gap between
-    the two cannot be raced (audit 2026-08-30).
+    The wrapper deletes --out-file and truncates --err-file. A symlink or
+    junction there aims that at someone else's file; a directory or device aims
+    it at something worse; a hard-linked file shares its data with a name this
+    wrapper never saw. Checked before the unlink/open so the gap between the two
+    cannot be raced through the LEAF name (audit 2026-08-30, hardened 2026-09-02
+    for reparse points and hard links -- see _is_reparse_point / _has_other_hardlinks).
     """
-    if path.is_symlink():
+    if _is_reparse_point(path):
         die(
-            f"{label} is a symlink: {path}\n"
-            f"  Refusing: this file gets deleted and rewritten, and a symlink points "
-            f"that at something else. Name the real path.",
+            f"{label} is a symlink or reparse point (e.g. a Windows junction): {path}\n"
+            f"  Refusing: this file gets deleted and rewritten, and a symlink or "
+            f"junction points that at something else. Name the real path.",
             EXIT_REFUSED,
         )
     if path.exists() and not path.is_file():
         die(f"{label} exists and is not a regular file: {path}", EXIT_REFUSED)
+    if _has_other_hardlinks(path):
+        die(
+            f"{label} already has another name pointing at the same data: {path}\n"
+            f"  Refusing: truncating or deleting it here would touch that other name's "
+            f"content too, and this wrapper does not know what that name is.",
+            EXIT_REFUSED,
+        )
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -255,9 +390,16 @@ def prepare_write_target(path: Path, label: str) -> None:
 def open_for_write(path: Path, label: str):
     """Open a write target without following a link into it.
 
-    O_NOFOLLOW closes the window between prepare_write_target() and here. Windows
-    has no such flag; there, creating a symlink needs a privilege most accounts do
-    not have, so the earlier check carries that platform on its own.
+    O_NOFOLLOW closes the window between prepare_write_target() and here on
+    POSIX. Windows has no such flag, and no atomic guarantee replaces it here:
+    prepare_write_target()'s reparse-point and hard-link checks cover the LEAF
+    name at the moment they run, but a second attacker able to write to the
+    same directory could still swap that leaf between the check and this open.
+    That race needs a real fix (an open handle carried through, not a path
+    re-resolved) that this wrapper does not implement -- see "RESIDUAL GAPS" in
+    the module docstring. The existing write-root privacy check is what is
+    meant to keep a second such attacker out of the directory in the first
+    place; it is documented there as an assumption, not a proof, on Windows.
     """
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -409,13 +551,25 @@ def bundled_codex() -> str | None:
 
 
 def find_codex() -> str:
-    # CLAUDEX_CODEX_BIN wins, so a user whose PATH is wrong has one thing to set
-    # rather than a PATH to untangle.
-    override = os.environ.get("CLAUDEX_CODEX_BIN")
-    if override:
-        if not Path(override).expanduser().is_file():
-            die(f"CLAUDEX_CODEX_BIN points at no file: {override}", EXIT_NO_CODEX)
-        return str(Path(override).expanduser())
+    # ⛔ There used to be a CLAUDEX_CODEX_BIN override here: any existing file
+    # named through that variable was launched as "Codex", no further check.
+    # Audit 2026-09-02, CRITICAL: this wrapper is meant to be allowlisted for
+    # UNATTENDED calls (see the module docstring), which means its environment
+    # is not something a human reviews per call -- a caller able to influence
+    # it (a `.claude/settings.json` `env` block is enough; no shell prefix on
+    # the individual call is needed) could point CLAUDEX_CODEX_BIN at any
+    # existing program. That program then receives the prompt and runs with
+    # this wrapper's arguments as ITS argv, under no obligation to honour
+    # `-s read-only` -- the one guarantee this file exists to enforce would
+    # apply to a replaced binary in name only. Removing the override closes
+    # that door outright: which binary runs is now decided by PATH lookup and
+    # the fixed macOS bundle path below, neither of which a caller's
+    # environment variable can redirect through this wrapper.
+    #
+    # Known residual gap, not fixed here: PATH lookup itself is unpinned (see
+    # "RESIDUAL GAPS" in the module docstring). A user whose PATH is wrong and
+    # who is not on macOS has to fix PATH now; there is no environment escape
+    # hatch left, on purpose.
 
     # On Windows, `codex` on PATH is an EXTENSIONLESS shell shim from the npm
     # install; CreateProcess cannot run it ("not a valid Win32 application").
@@ -461,7 +615,9 @@ def diagnose_silent_death(executable: str, returncode: int) -> str:
                 f"    {bundled}",
                 f"  Fix: ln -sfn \"{bundled}\" ~/.local/bin/codex   (a PATH dir ahead of the stale one)",
                 "  then: sudo npm uninstall -g @openai/codex",
-                f"  Or point this wrapper straight at it: export CLAUDEX_CODEX_BIN=\"{bundled}\"",
+                "  (CLAUDEX_CODEX_BIN used to offer a shortcut around fixing PATH; it was",
+                "  removed 2026-09-02 -- an unattended, allowlisted wrapper cannot trust an",
+                "  environment variable to name its own executable. Fix PATH instead.)",
                 "  Do NOT delete ~/.codex/ -- config.toml, auth.json and the sessions live there",
                 "  and the bundled binary still uses them.",
             ]

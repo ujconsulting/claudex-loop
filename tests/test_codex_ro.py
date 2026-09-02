@@ -224,11 +224,58 @@ class WriteRootTests(unittest.TestCase):
         roots = codex_ro.allowed_roots([], for_write=True)
         self.assertTrue(any((r / ".git").exists() for r in roots))
 
-    def test_an_explicit_scratch_dir_is_a_write_root(self):
+    def test_an_explicit_scratch_dir_is_a_write_root_on_posix(self):
+        """On POSIX, _is_private_dir() performs a real ancestor stat() check --
+        so a caller-named scratch dir that genuinely is private stays usable.
+        """
+        if os.name == "nt":
+            self.skipTest("Windows has its own refusal test below; there the check is not real")
         previous = os.environ.get(codex_ro.SCRATCH_DIR_ENV)
         os.environ[codex_ro.SCRATCH_DIR_ENV] = str(self.extra)
         try:
             self.assertIn(self.extra, codex_ro.allowed_roots([], for_write=True))
+        finally:
+            if previous is None:
+                os.environ.pop(codex_ro.SCRATCH_DIR_ENV, None)
+            else:
+                os.environ[codex_ro.SCRATCH_DIR_ENV] = previous
+
+    def test_an_explicit_scratch_dir_is_refused_on_windows(self):
+        """Audit 2026-09-02, CRITICAL: on Windows, _is_private_dir() cannot
+        verify ANY directory (os.stat reports 0o777 for everything there), so
+        before this fix every candidate -- including one named at runtime --
+        was accepted as "private" without question. A caller able to set this
+        one environment variable on an unattended, allowlisted invocation (a
+        `.claude/settings.json` `env` block is enough; no shell prefix on the
+        individual call is needed) could point it at a directory of their own
+        choosing and have it accepted as a write root, where --out-file gets
+        unlinked and --err-file gets truncated.
+
+        Gegenprobe: the attacker-named directory (self.extra, a real,
+        genuinely-writable temp dir standing in for the attacker's own) is
+        rejected as a write root.
+        """
+        if os.name != "nt":
+            self.skipTest("this is the Windows-specific refusal; POSIX has a real privacy check")
+        previous = os.environ.get(codex_ro.SCRATCH_DIR_ENV)
+        os.environ[codex_ro.SCRATCH_DIR_ENV] = str(self.extra)
+        try:
+            self.assertNotIn(self.extra, codex_ro.allowed_roots([], for_write=True))
+        finally:
+            if previous is None:
+                os.environ.pop(codex_ro.SCRATCH_DIR_ENV, None)
+            else:
+                os.environ[codex_ro.SCRATCH_DIR_ENV] = previous
+
+    def test_the_repo_is_still_a_write_root_when_the_scratch_dir_is_refused(self):
+        """Positive control for the Windows refusal above: rejecting the named
+        scratch dir must not take the legitimate write roots down with it.
+        """
+        previous = os.environ.get(codex_ro.SCRATCH_DIR_ENV)
+        os.environ[codex_ro.SCRATCH_DIR_ENV] = str(self.extra)
+        try:
+            roots = codex_ro.allowed_roots([], for_write=True)
+            self.assertTrue(any((r / ".git").exists() for r in roots))
         finally:
             if previous is None:
                 os.environ.pop(codex_ro.SCRATCH_DIR_ENV, None)
@@ -270,6 +317,68 @@ class WriteTargetTests(unittest.TestCase):
             codex_ro.prepare_write_target(link, "--out-file")
         self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
         self.assertEqual(victim.read_text(encoding="utf-8"), "do not clobber me")
+
+    def test_a_windows_junction_is_refused(self):
+        """Audit 2026-09-02, CRITICAL (the other half of the "reparse point or
+        hard link" finding): a directory JUNCTION is a different reparse tag
+        than a symlink, `Path.is_symlink()` returns False for it, and --
+        unlike a symlink -- `mklink /J` needs no special Windows privilege.
+        Verified live 2026-09-02 from a plain, non-elevated account before
+        writing this fix. Gegenprobe: the junction is refused, and nothing
+        under the directory it points at is touched.
+        """
+        if os.name != "nt":
+            self.skipTest("junctions are a Windows/NTFS concept")
+        victim_dir = self.root / "victim_dir"
+        victim_dir.mkdir()
+        (victim_dir / "victim.txt").write_text("do not clobber me", encoding="utf-8")
+        junction = self.root / "verdict.txt"
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(victim_dir)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",  # cmd's console codepage is not reliably UTF-8/cp1252
+        )
+        if result.returncode != 0:
+            self.skipTest(f"this environment would not create a junction: {result.stderr}")
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.prepare_write_target(junction, "--out-file")
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertEqual(
+            (victim_dir / "victim.txt").read_text(encoding="utf-8"), "do not clobber me"
+        )
+
+    def test_a_hard_linked_target_is_refused(self):
+        """The other reparse-point-free half of the same finding: a hard link
+        is a second name for the SAME data, invisible to is_symlink() and to
+        the junction check above. --err-file and the event stream are opened
+        directly with O_TRUNC (no prior unlink) -- truncating a hard-linked
+        name truncates the data the other name still points at. Gegenprobe:
+        the hard-linked target is refused, and the victim's own name still
+        holds its content.
+        """
+        victim = self.root / "victim.txt"
+        victim.write_text("do not clobber me", encoding="utf-8")
+        hardlink = self.root / "verdict.txt"
+        try:
+            os.link(victim, hardlink)
+        except (OSError, NotImplementedError):
+            self.skipTest("this platform/filesystem would not create a hard link")
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.prepare_write_target(hardlink, "--err-file")
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do not clobber me")
+
+    def test_a_freshly_written_file_has_no_other_hardlinks(self):
+        """Positive control for test_a_hard_linked_target_is_refused: an
+        ordinary file this wrapper itself would produce (single name, just
+        written) must NOT be refused -- only a target that already shares its
+        data with another name is.
+        """
+        target = self.root / "verdict.txt"
+        target.write_text("previous round", encoding="utf-8")
+        codex_ro.prepare_write_target(target, "--out-file")  # must not raise
 
 
 class McpTests(unittest.TestCase):
@@ -409,27 +518,54 @@ class SilentDeathTests(unittest.TestCase):
         if sys.platform != "darwin":
             self.assertIsNone(codex_ro.bundled_codex())
 
-    def test_an_explicit_binary_override_is_honoured(self):
+    def _find_codex_or_skip(self):
+        try:
+            return codex_ro.find_codex()
+        except SystemExit:
+            self.skipTest("no codex installation on this machine to resolve either way")
+
+    def test_an_explicit_binary_override_no_longer_replaces_the_executable(self):
+        """Audit 2026-09-02, CRITICAL: CLAUDEX_CODEX_BIN used to let ANY
+        existing file run as "Codex", trusted with no further check. This
+        wrapper is meant to be allowlisted for UNATTENDED calls (see the
+        module docstring) -- its environment is not something a human reviews
+        per call, and setting this one variable once (e.g. in a repo's
+        `.claude/settings.json` `env` block) was enough; no shell prefix on
+        the individual call was needed. The replacement program then received
+        the prompt and ran under no obligation to honour `-s read-only`.
+
+        Gegenprobe: `fake`, a real file fully controlled by "the attacker",
+        is what a live exploit would point the variable at. The attack is
+        refused if find_codex() ignores it -- resolving exactly as it would
+        with no override at all (the positive control).
+        """
+        without_override = self._find_codex_or_skip()
         with tempfile.NamedTemporaryFile(suffix=".sh", delete=False) as handle:
             fake = handle.name
         self.addCleanup(lambda: os.path.exists(fake) and os.unlink(fake))
         previous = os.environ.get("CLAUDEX_CODEX_BIN")
         os.environ["CLAUDEX_CODEX_BIN"] = fake
         try:
-            self.assertEqual(os.path.realpath(codex_ro.find_codex()), os.path.realpath(fake))
+            with_override = codex_ro.find_codex()
         finally:
             if previous is None:
                 del os.environ["CLAUDEX_CODEX_BIN"]
             else:
                 os.environ["CLAUDEX_CODEX_BIN"] = previous
+        self.assertNotEqual(os.path.realpath(with_override), os.path.realpath(fake))
+        self.assertEqual(with_override, without_override)
 
-    def test_an_override_pointing_nowhere_is_refused(self):
+    def test_an_override_pointing_nowhere_no_longer_causes_a_refusal(self):
+        """The env var is inert now, so a dangling value must not even be
+        looked at -- resolution succeeds exactly as without it (positive
+        control), instead of the old EXIT_NO_CODEX for a missing override
+        target.
+        """
+        without_override = self._find_codex_or_skip()
         previous = os.environ.get("CLAUDEX_CODEX_BIN")
         os.environ["CLAUDEX_CODEX_BIN"] = str(Path(tempfile.gettempdir()) / "no-such-codex-binary")
         try:
-            with self.assertRaises(SystemExit) as caught:
-                codex_ro.find_codex()
-            self.assertEqual(caught.exception.code, codex_ro.EXIT_NO_CODEX)
+            self.assertEqual(codex_ro.find_codex(), without_override)
         finally:
             if previous is None:
                 del os.environ["CLAUDEX_CODEX_BIN"]
