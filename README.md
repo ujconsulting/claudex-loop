@@ -275,7 +275,12 @@ With no `.env` profiles configured, nothing changes — Codex stays the only rev
 
 **Review (Phases 0–2):** Codex runs **read-only every round** — `-s read-only` on the first call, `-c sandbox_mode="read-only"` on every resume (the `resume` subcommand doesn't accept `-s`, and without forcing read-only it would inherit your `config.toml` sandbox default, which may be `danger-full-access`). The skills handle this for you. No code is written until you approve the final plan.
 
-**`build` (Phase 3)** deliberately inverts this: Codex gets full write access — which is exactly why the skill gates it hard. Clean git tree before launch, Claude reads every line of the diff and runs the proof itself, fix rounds bounded, commits human-gated and Claude-authored. Resume calls need the long flag `--dangerously-bypass-approvals-and-sandbox` (resume has no `--yolo`) — and always resume by explicit `thread_id`, never `--last`.
+**`build` (Phase 3)** deliberately inverts this: Codex gets full write access — which is exactly why the skill gates it hard. Claude reads every line of the diff and runs the proof itself, fix rounds are bounded, commits are human-gated and Claude-authored. Resume calls need the long flag `--dangerously-bypass-approvals-and-sandbox` (resume has no `--yolo`) — and always resume by explicit `thread_id`, never `--last`.
+
+Two gates decide *where* it writes, both from [upstream PR #12](https://github.com/chaseai-yt/claudex-loop/pull/12):
+
+- **Codex's diff must be the only diff in the tree it builds in.** For the user's own uncommitted work that means commit or stash; for a parallel agent's live work it means a detached worktree, because stashing pulls work out from under a running session. Never "the subtree I care about is clean, so I'll launch anyway."
+- **A spec citing findings by absolute path escapes that worktree.** `D:\...\repo\src\foo.py:210` resolves to the *original* checkout, and a `--yolo` Codex edits it — the isolation is gone and nothing says so. The skill greps the spec for absolute paths and, when it finds any, names the forbidden prefixes literally in the prompt contract.
 
 ### The read-only wrapper — and why it isn't enough on its own
 
