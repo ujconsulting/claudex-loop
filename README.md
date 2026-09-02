@@ -336,8 +336,6 @@ Path arguments are confined, and **write targets more tightly than reads**: the 
 
 <div align="center">
 
-**Want to go deeper?** The **Claude Code Masterclass** and a community of builders shipping with agentic AI live inside [**Chase AI+**](https://www.skool.com/chase-ai/about)
-
 *MIT — see [LICENSE](./LICENSE)*
 
 </div>

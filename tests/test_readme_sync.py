@@ -90,6 +90,37 @@ class TranslationSyncTests(unittest.TestCase):
                     f"commands are copied verbatim, so this is drift, not translation",
                 )
 
+    def test_the_centring_divs_are_balanced_in_both(self):
+        """README_DE shipped with an unclosed <div> — GitHub then centres the rest.
+
+        Caught by eye, not by a test, which is why there is one now.
+        """
+        for path in (EN, DE):
+            with self.subTest(readme=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(
+                    text.count("<div"), text.count("</div>"),
+                    f"{path.name}: unbalanced <div> — everything after it renders centred",
+                )
+
+    def test_neither_readme_carries_promotional_links(self):
+        """Attribution stays, marketing does not. MIT compels the first, not the second.
+
+        The credits (Matt Pocock, Peter Steinberger, Chase AI) are attribution and
+        a licence obligation; the paid-community pitch that sat under them was
+        neither, and this fork does not carry it.
+        """
+        for path in (EN, DE):
+            with self.subTest(readme=path.name):
+                self.assertNotIn("skool.com", path.read_text(encoding="utf-8"))
+
+    def test_the_licence_pointer_and_attribution_survive(self):
+        for path in (EN, DE):
+            with self.subTest(readme=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("LICENSE", text, "the licence pointer is not optional")
+                self.assertIn("mattpocock", text, "MIT attribution must not be dropped")
+
     def test_both_carry_the_same_number_of_sections(self):
         count = lambda p: len(re.findall(r"^## ", p.read_text(encoding="utf-8"), re.M))
         self.assertEqual(

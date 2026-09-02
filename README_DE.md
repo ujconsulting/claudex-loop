@@ -288,6 +288,6 @@ Pfadargumente sind eingegrenzt, und **Schreibziele enger als Lesezugriffe**: Der
 
 <div align="center">
 
-**Tiefer einsteigen?** Die **Claude Code Masterclass** und eine Community von Entwicklern, die mit agentischer KI ausliefern, gibt es in [**Chase AI+**](https://www.skool.com/chase-ai/about)
-
 *MIT — siehe [LICENSE](./LICENSE)*
+
+</div>
