@@ -32,10 +32,11 @@ flowchart LR
     C -- APPROVED --> S["✍️ You sign off"]
     S -. optional .-> D["🔨 BUILD<br>one model writes"]
     D --> I["🔬 CROSS-INSPECT<br>the other model<br>grades the diff"]
-    I --> V["🧪 ACCEPTANCE GATE<br>dod · quality · security<br>+ docs · tests"]
-    V -. anything facing the network .-> X["🛡️ EXPOSURE PASS<br>own model, own effort<br>SAFE / UNSAFE"]
-    X --> G["✅ You approve<br>the final diff"]
+    I --> G["✅ You approve<br>the final diff"]
+    I -. optional gate .-> V["🧪 ACCEPTANCE GATE<br>dod · quality · security<br>+ docs · tests"]
+    V -. facing the network:<br>then it is required .-> X["🛡️ EXPOSURE PASS<br>own model, own effort<br>SAFE / UNSAFE"]
     V --> G
+    X --> G
     classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
     classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
     classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
@@ -48,7 +49,9 @@ flowchart LR
 
 **You enter at four points only:** confirming the ledger, answering the interview, signing off the converged plan, and approving the final diff if you build. Every reviewing step is read-only and never touches a file.
 
-**Orange is whoever produces, green is whoever grades — not Claude and Codex.** The colours name *roles*, because in this fork the actor behind each one is configuration (see [The actor is configuration, not a name](#the-actor-is-configuration-not-a-name)). In the delegation arrangement the boxes swap models without the diagram changing. `audit`, `docs-backfill` and `setup` are deliberately absent: they are not steps in this loop, they run on their own — see [Beyond the plan](#beyond-the-plan-this-fork).
+**Orange is whoever produces, green is whoever grades — not Claude and Codex.** The colours name *roles*, because in this fork the actor behind each one is configuration (see [The actor is configuration, not a name](#the-actor-is-configuration-not-a-name)). In the delegation arrangement the boxes swap models without the diagram changing.
+
+**Dotted edges are conditional.** Building is optional; so is the acceptance gate on the finished diff — *except* when the change faces the network, where it and its exposure pass are required and `EXPOSURE: UNSAFE` blocks the commit. Solid edges always happen. `audit`, `docs-backfill` and `setup` are deliberately absent: they are not steps in this loop at all — see [Beyond the plan](#beyond-the-plan-this-fork).
 
 ## The four phases
 
@@ -65,7 +68,7 @@ Two artifacts every run: `PLAN.md` (the *what*) and `PLAN-REVIEW-LOG.md` (the fu
 
 ## Beyond the plan (this fork)
 
-The four phases end when the code exists. These three pick up there — same doctrine, different artefact.
+Phase 3 closes with an optional acceptance gate on the finished diff. **These four skills are not part of that loop** — they run on their own, on artefacts the loop never sees.
 
 | Skill | Judges | Verdict |
 |---|---|---|
@@ -123,7 +126,8 @@ harsher, because `audit` was pointed at the repo that ships it — a repo whose 
 product is controls:
 
 - **89 findings resolved** — 47 from the audit (7 read-only slices + 1 exposure session),
-  42 from four CodeRabbit passes over the fixes. Test suite **90 → 183**.
+  42 from four passes by a *third* reviewer over the fixes — CodeRabbit here, but the
+  point is that it was neither of the two that produced them. Test suite **90 → 183**.
 - **Both headline controls could be walked around.** The `PreToolUse` guard let
   `codex_ro.py${IFS}&&<anything>` through — bash splits control operators *before* it
   expands parameters, so it ran as two commands while the token no longer ended in the
@@ -132,7 +136,7 @@ product is controls:
 - **The fix for the first one had the same hole in a different spelling.** A second
   reviewer found `$(...)` and backticks doing the identical trick, because the
   substitution check ran *after* the recognition those forms defeat.
-- **A third pass, from a consumer repo, found two more CRITICALs** in the wrapper on
+- **A fourth pass, from a consumer repo, found two more CRITICALs** in the wrapper on
   2026-09-02 — and lifted a risk this audit had consciously accepted, correctly: the
   acceptance covered env *prefixing* and missed env *inheritance*.
 
@@ -278,6 +282,7 @@ with everything in place.
 | `code-review` | `BASELINE_FILE` | newest `docs/audit/*-baseline.md` | Known debt from an `audit` run — raised again only where a change makes it worse |
 | `code-review` | `DOCSTRING_MIN` | `80` | Percent of new/changed public units that must be documented |
 | `code-review` | `EXPOSURE` | `auto` | Exposure pass for anything that faces the network — `no` is a logged claim, refused when the diff says otherwise |
+| `code-review` | `THIRD_REVIEWER` | `off` | **Optional** extra pass by a reviewer that is neither producer nor primary adversary (`coderabbit`). The gate is complete without one — off by default because not everyone has one |
 | `docs-backfill` | `TARGET` | *required* | What to document. Refuses to run unbounded |
 | `docs-backfill` | `BATCH` | `15` | Units per write-then-review cycle |
 | `audit` | `SLICES` | auto | Which parts to audit. The excluded remainder is reported, not hidden |

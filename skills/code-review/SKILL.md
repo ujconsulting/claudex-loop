@@ -52,6 +52,7 @@ Reference: `ROLES.md`.
 | `MAX_RECHECK` | `1` | Rechecks after accepted fixes (initial pass + N rechecks; the gate ALWAYS terminates). |
 | `BASELINE_FILE` | newest `docs/audit/*-baseline.md`, else none | Known pre-existing debt from an `audit` run. Everything listed there is NOT this change's fault: raise it again only where the change makes it worse or touches that code. Without this, every review of a legacy repo re-litigates the same findings and the real ones drown. |
 | `EXPOSURE` | `auto` | `auto` = classify the diff (Step 1, item 6); `yes` = run the exposure pass regardless; `no` = an explicit, logged claim that nothing in the diff faces the network. `no` is refused when the classification says otherwise. |
+| `THIRD_REVIEWER` | `off` | An **optional** extra pass by a reviewer that is neither the producer nor the primary adversary. `off` (default) = this gate is Codex-only and complete as it stands. `coderabbit` = additionally run the CodeRabbit CLI over the same diff and fold its findings into Step 3's arbitration. Anything else is refused rather than guessed at. |
 | `EXPOSURE_FILES` | from classification | Comma-list of the exposed files/components to hand the exposure pass in full. Pass it when the auto-list is wrong; the log records both. |
 
 | `SCRATCH_DIR` | harness scratchpad, else `<repo>/.claudex-tmp/` | Disposable staging for the assembled prompt, the `-o` capture and stderr. ⛔ Never `/tmp`. |
@@ -301,6 +302,35 @@ Log it as `## Exposure pass — <model>/<effort>` + report verbatim, then dispos
 as in Step 3. `EXPOSURE: SAFE` with zero findings and an empty `Checked:` line is an
 invalid review, exactly like a rubber-stamp acceptance pass. Rechecks after fixes
 resume this session, once per `MAX_RECHECK`.
+
+### Step 2c — Third reviewer (OFF unless asked for)
+
+Skip this entirely unless `THIRD_REVIEWER` names one. **Not everyone has one, and the
+gate is complete without it** — Codex plus the exposure pass is the designed shape, not a
+degraded one. This step exists because a reviewer that produced none of the findings
+sometimes sees what the other two cannot, and that is worth having as an option rather
+than a dependency.
+
+`THIRD_REVIEWER=coderabbit`:
+
+```bash
+coderabbit --version || echo "not installed — say so and continue without it"
+coderabbit auth status
+coderabbit review --agent --uncommitted --include-untracked --config CLAUDE.md AGENTS.md
+```
+
+- **Missing or unauthenticated is not a failure of this gate.** Report it in one line
+  ("third reviewer requested but unavailable: <reason>") and finish the review without
+  it. ⛔ Never silently drop it — a check that did not run is not a check that passed.
+- The login is interactive and refuses a non-TTY environment: the **user** runs
+  `coderabbit auth login` in their own terminal. Do not ask them for a token.
+- ⛔ **Run the secret scan first.** The CLI sends the diff to a remote API. `gitleaks dir
+  . --redact` over the tree, and do not proceed on a finding.
+- `--include-untracked` matters: without it, `--uncommitted` covers tracked edits only,
+  and brand-new files — usually the ones most worth reviewing — are silently skipped.
+- Findings go into Step 3's arbitration like any other, **verified against the code
+  first**. Expect false positives about intent; expect the count not to converge across
+  repeated passes. Severity is the signal, not volume.
 
 ### Step 3 — Arbitrate and fix (Claude has final say)
 

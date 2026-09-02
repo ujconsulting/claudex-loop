@@ -36,10 +36,11 @@ flowchart LR
     C -- APPROVED --> S["✍️ You sign off"]
     S -. optional .-> D["🔨 BUILD<br>one model writes"]
     D --> I["🔬 CROSS-INSPECT<br>the other model<br>grades the diff"]
-    I --> V["🧪 ACCEPTANCE GATE<br>dod · quality · security<br>+ docs · tests"]
-    V -. anything facing the network .-> X["🛡️ EXPOSURE PASS<br>own model, own effort<br>SAFE / UNSAFE"]
-    X --> G["✅ You approve<br>the final diff"]
+    I --> G["✅ You approve<br>the final diff"]
+    I -. optional gate .-> V["🧪 ACCEPTANCE GATE<br>dod · quality · security<br>+ docs · tests"]
+    V -. facing the network:<br>then it is required .-> X["🛡️ EXPOSURE PASS<br>own model, own effort<br>SAFE / UNSAFE"]
     V --> G
+    X --> G
     classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
     classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
     classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
@@ -54,7 +55,9 @@ flowchart LR
 
 **Du kommst an genau vier Stellen ins Spiel:** Annahmen-Ledger bestätigen, Interview beantworten, den konvergierten Plan abzeichnen und — falls gebaut wird — den finalen Diff freigeben. Jeder prüfende Schritt läuft read-only und fasst keine Datei an.
 
-**Orange ist, wer produziert, Grün ist, wer benotet — nicht Claude und Codex.** Die Farben benennen *Rollen*, denn in diesem Fork ist der Akteur dahinter Konfiguration (siehe [Der Akteur ist Konfiguration, kein Name](#der-akteur-ist-konfiguration-kein-name)). In der Delegations-Aufstellung tauschen die Kästen das Modell, ohne dass sich die Grafik ändert. `audit`, `docs-backfill` und `setup` fehlen absichtlich: sie sind keine Schritte dieser Schleife, sondern laufen für sich — siehe [Jenseits des Plans](#jenseits-des-plans-dieser-fork).
+**Orange ist, wer produziert, Grün ist, wer benotet — nicht Claude und Codex.** Die Farben benennen *Rollen*, denn in diesem Fork ist der Akteur dahinter Konfiguration (siehe [Der Akteur ist Konfiguration, kein Name](#der-akteur-ist-konfiguration-kein-name)). In der Delegations-Aufstellung tauschen die Kästen das Modell, ohne dass sich die Grafik ändert.
+
+**Gepunktete Kanten sind bedingt.** Das Bauen ist optional, ebenso das Abnahme-Gate auf dem fertigen Diff — *außer* wenn die Änderung zum Netz zeigt: dann sind es und sein Exposure-Pass Pflicht, und `EXPOSURE: UNSAFE` blockiert den Commit. Durchgezogene Kanten passieren immer. `audit`, `docs-backfill` und `setup` fehlen absichtlich: sie sind überhaupt keine Schritte dieser Schleife — siehe [Jenseits des Plans](#jenseits-des-plans-dieser-fork).
 
 ## Die vier Phasen
 
@@ -71,7 +74,7 @@ Zwei Artefakte pro Lauf: `PLAN.md` (das *Was*) und `PLAN-REVIEW-LOG.md` (die vol
 
 ## Jenseits des Plans (dieser Fork)
 
-Die vier Phasen enden, wenn der Code existiert. Diese vier setzen dort an — gleiche Doktrin, anderes Artefakt.
+Phase 3 endet mit einem optionalen Abnahme-Gate auf dem fertigen Diff. **Diese vier Skills gehören nicht zu dieser Schleife** — sie laufen für sich, auf Artefakten, die die Schleife nie sieht.
 
 | Skill | Beurteilt | Verdikt |
 |---|---|---|
@@ -129,7 +132,8 @@ härter, denn `audit` wurde auf das Repo gerichtet, das es ausliefert — ein Re
 gesamtes Produkt Kontrollen sind:
 
 - **89 Befunde behoben** — 47 aus dem Audit (7 read-only-Scheiben + 1 Exposure-Session),
-  42 aus vier CodeRabbit-Läufen über die Fixes. Testsuite **90 → 183**.
+  42 aus vier Läufen eines *dritten* Prüfers über die Fixes — hier CodeRabbit, aber der
+  Punkt ist, dass es keiner der beiden war, die sie erzeugt hatten. Testsuite **90 → 183**.
 - **Beide Vorzeige-Kontrollen ließen sich umgehen.** Der `PreToolUse`-Guard ließ
   `codex_ro.py${IFS}&&<beliebig>` durch — bash trennt Kontrolloperatoren, *bevor* es
   Parameter expandiert, das lief also als zwei Kommandos, während das Token nicht mehr
@@ -139,7 +143,7 @@ gesamtes Produkt Kontrollen sind:
 - **Der Fix für den ersten hatte dieselbe Lücke in anderer Schreibweise.** Ein zweiter
   Prüfer fand `$(...)` und Backticks beim identischen Trick, weil die
   Substitutionsprüfung *nach* der Erkennung lief, die genau diese Formen aushebeln.
-- **Ein dritter Durchgang aus einem Consumer-Repo fand am 02.09.2026 zwei weitere
+- **Ein vierter Durchgang aus einem Consumer-Repo fand am 02.09.2026 zwei weitere
   CRITICALs** im Wrapper — und hob ein Risiko auf, das dieses Audit bewusst akzeptiert
   hatte, zu Recht: die Annahme deckte env-*Präfixe* ab und übersah env-*Vererbung*.
 
@@ -233,6 +237,7 @@ Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles
 | `code-review` | `BASELINE_FILE` | neueste `docs/audit/*-baseline.md` | Bekannte Schulden aus einem `audit`-Lauf — nur dort erneut aufgeworfen, wo eine Änderung sie verschlimmert |
 | `code-review` | `DOCSTRING_MIN` | `80` | Prozent der neuen/geänderten öffentlichen Einheiten, die dokumentiert sein müssen |
 | `code-review` | `EXPOSURE` | `auto` | Exposure-Pass für alles, was zum Netz zeigt — `no` ist eine protokollierte Behauptung und wird abgelehnt, wenn der Diff etwas anderes sagt |
+| `code-review` | `THIRD_REVIEWER` | `off` | **Optionaler** Zusatzlauf durch einen Prüfer, der weder Produzent noch primärer Gegenspieler ist (`coderabbit`). Das Gate ist auch ohne vollständig — standardmäßig aus, weil das nicht jeder hat |
 | `docs-backfill` | `TARGET` | *Pflicht* | Was dokumentiert werden soll. Verweigert unbegrenzte Läufe |
 | `docs-backfill` | `BATCH` | `15` | Einheiten je Schreib-dann-Prüf-Zyklus |
 | `audit` | `SLICES` | auto | Welche Teile geprüft werden. Der ausgeschlossene Rest wird berichtet, nicht verschwiegen |
