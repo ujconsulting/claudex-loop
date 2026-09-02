@@ -90,8 +90,22 @@ need to find them after the run.
 ## Step 0 — Gates (before any Codex launch)
 
 1. **Spec gate.** `SPEC_FILE` must exist and read as a work order (goal, concrete steps, bounds). No spec → offer `/grill-me-codex` (interview first) or `/plan-review` (have a plan, want it stress-tested) instead. If the user insists on building from a rough idea, write the spec WITH them first — that's design, and design stays with Claude.
-2. **Clean-tree gate.** `git status -sb`. Dirty working tree → STOP and ask the user to commit or stash first. Non-negotiable: Codex writes with full access, and a dirty tree means its diff can't be isolated or cleanly reverted.
-3. Confirm scope in one line, then go. No round-by-round approvals; the human gate is at the end.
+2. **Clean-tree gate.** `git status -sb`. Codex writes with full access, so the build must start from a tree where **its diff is the only diff** — otherwise you cannot isolate what it did or revert it cleanly. That requirement is non-negotiable; how you satisfy it depends on whose the dirt is.
+   - **The user's own uncommitted work** → STOP and ask them to commit or stash.
+   - **Another session's live work** — a parallel agent, a long-running task, anything you did not put there → do **not** stash it; that takes work out from under a running session. Build in a detached worktree instead, which satisfies the gate properly:
+
+     ```bash
+     git worktree add --detach "$SCRATCH_DIR/build" HEAD
+     # An untracked SPEC_FILE does not exist in a fresh worktree — copy it in.
+     cp "$SPEC_FILE" "$SCRATCH_DIR/build/" 2>/dev/null || true
+     ```
+
+     Remove it with `git worktree remove` once the diff is merged or abandoned.
+   - Either way, **say which you chose and why before launching.** Never launch into a dirty tree on the reasoning that the subtree you care about happens to be clean.
+3. **Path-scope gate** — it only bites in a worktree, and it bites silently. If `SPEC_FILE` cites findings by absolute path (`D:\...\repo\src\foo.py:210`, `/Users/.../repo/src/foo.py:210`), those resolve to the **original** checkout, and a `--yolo` Codex will happily edit it — undoing the isolation you just set up. Grep the spec for absolute paths; if there are any, the prompt contract must say: resolve every such path relative to your own repo root, and never write outside the current working directory. **State the forbidden prefixes literally.**
+4. Confirm scope in one line, then go. No round-by-round approvals; the human gate is at the end.
+
+> Gates 2 and 3 come from [upstream PR #12](https://github.com/chaseai-yt/claudex-loop/pull/12) by @Dwodgaming, written up from a real run. Gate 3 is the one this repo's own audit should have caught and did not: the build step is the only place in the plugin with write access, so a spec that walks a `--yolo` session out of its worktree belongs in the same class as "the caller can widen its own confinement" (baseline A2).
 
 ## Step 1 — The build prompt (contract, via temp file)
 
@@ -133,11 +147,15 @@ codex exec --yolo --json -o "$SCRATCH_DIR/codex-build-r$ROUND.txt" - <"$P" \
 
 ## Step 3 — Verify (Claude, always, never delegated)
 
-Codex's report is advisory. Verify yourself:
+Codex's report is advisory — **and so is any QA, self-review or verification subagent it ran on its own work.** It reports PASS on builds that contain defects; expect that, and treat every claim in the report as a lead to check rather than a result. The whole reason the roles are split is that whoever built it never grades it, and that applies to Codex grading itself inside its own session.
+
+Verify yourself:
 
 1. `git status -sb` + read the FULL diff (`git diff`). Judge it like a contributor PR: correctness, spec fidelity, style match with surrounding code, nothing touched outside scope.
-2. Run `PROOF_CMD` yourself (or the focused tests for the changed area). Codex's pasted output doesn't count as proof.
-3. Append to `LOG_FILE` under `## Act 3 — Build`: `### Round <n> — Codex build` + its report summary + `### Claude's verdict` + what passed/failed review.
+2. **Trace every changed test back to a spec line.** A green suite proves the code does what its tests say; it does not prove the tests were asked for. The failure mode to hunt is **unrequested code paired with a test asserting it** — that combination reads as verified and sails through a proof run. List the tests the diff added, and for each name the spec item it covers. A test with no spec line behind it is the tell: either Codex solved a problem the spec had already settled differently, or it invented a requirement. Both are findings.
+3. Run `PROOF_CMD` yourself (or the focused tests for the changed area). Codex's pasted output doesn't count as proof.
+4. **Read the "Deviations" section as a claim, not a summary.** `Deviations: None` is common on builds that did deviate — a spec step that turns out impossible gets quietly resolved the right way and never reported. Where the diff diverges from the spec text, decide whether the spec or the code was wrong, and log which.
+5. Append to `LOG_FILE` under `## Act 3 — Build`: `### Round <n> — Codex build` + its report summary + `### Claude's verdict` + what passed/failed review.
 
 ## Step 4 — Fix loop (same session, bounded)
 
@@ -170,8 +188,8 @@ Present: 3-bullet summary of what was built, files-changed list, proof-test outp
 
 ## Hard rules
 
-- Clean tree before launch. Always. No exceptions.
-- Claude never skips the diff read. Codex claims are advisory until Claude has read the diff and run the proof.
+- Codex's diff is the only diff in the tree it builds in. Always. A detached worktree is how you get that when the dirt belongs to another session — not `git stash`.
+- Claude never skips the diff read. Every Codex claim is advisory until Claude has read the diff and run the proof, and that includes any QA or self-review Codex ran inside its own session.
 - Fix loop terminates at `MAX_FIX_ROUNDS` — then Claude takes over. No unbounded delegation ping-pong.
 - Commits, pushes, releases, GitHub mutations: Claude-side only, after the human gate. Codex never commits.
 - `LOG_FILE` is the deliverable — with Acts 1/2 it tells the whole story: grilled → reviewed → built → verified.

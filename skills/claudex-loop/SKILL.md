@@ -230,7 +230,13 @@ file is best-effort; inlining is not. Inline `CONTEXT.md`/ADRs the same way when
 exist, and interpolate the resolved `PLAN_FILE` **path** only as a label, so a
 non-default plan cannot be signed off on the strength of a review of `PLAN.md`.
 
-> You are an adversarial reviewer for an implementation plan. Be skeptical and specific — your job is to find what breaks, not to be agreeable. The plan is inlined below in full; review THAT text, and read any repo files you need for context (you are read-only). Identify concrete flaws: security holes, race conditions, missing edge cases, schema conflicts, wrong assumptions, observability gaps, simpler alternatives. For each, give a one-line fix. Do NOT modify any files. End your reply with EXACTLY one line: `VERDICT: APPROVED` if the plan is sound enough to implement, or `VERDICT: REVISE` if it still has material problems.
+> You are an adversarial reviewer for an implementation plan. Be skeptical and specific — your job is to find what breaks, not to be agreeable. The plan is inlined below in full; review THAT text, and read any repo files you need for context (you are read-only). Identify concrete flaws: security holes, race conditions, missing edge cases, schema conflicts, wrong assumptions, observability gaps, simpler alternatives. For each, give a one-line fix.
+>
+> The plan's own file list is a starting point, not the review scope. For every shared resource the plan touches — a file it rewrites, a table it writes, a queue, a lock, a cache — enumerate **every** writer of that resource in the repo, then say which ones the plan leaves unfixed. A defect class present in two of three writers is present in the third until you have opened it and shown otherwise. Name the files you did not open, so the gap is recorded rather than assumed empty.
+>
+> Where a code comment claims a guarantee, check that the code actually provides it. A comment describing the precise race it prevents, above code that does not prevent it, is the most reliable place to find a live bug.
+>
+> Do NOT modify any files. End your reply with EXACTLY one line: `VERDICT: APPROVED` if the plan is sound enough to implement, or `VERDICT: REVISE` if it still has material problems.
 >
 > `=== BEGIN PLAN (<PLAN_FILE>, sha256 <hash>) ===` … `=== END PLAN ===`
 
@@ -324,6 +330,7 @@ Full protocol: [FALLBACK.md](../../FALLBACK.md). The short form:
 ### Resolution (you sign off — final gate)
 - **APPROVED:** present the final `PLAN_FILE`, a 3-bullet summary of what the loop improved, and the round count. **Optional cold-read before sign-off:** the APPROVED came from the thread that negotiated the plan for N rounds — right for checking prior findings, but it can anchor the closing verdict. Offer one extra pass from a FRESH read-only session (same review prompt, plan inlined, no access to the argument) as a cheap anchoring control — the same fresh-eyes mechanism Phase 3 already uses. Its verdict is advisory: a fresh REVISE doesn't reopen the loop, it goes to the user as a flagged disagreement — and it is logged like any round (`## Cold-read — fresh session` + critique verbatim + Claude's per-finding disposition), never only mentioned in the chat. Then ask: *"Interrogated + survived N rounds of Codex. Implement it now — Codex builds it (`/build`), Claude builds it, or stop here?"* Code only on a yes.
 - **MAX_ROUNDS hit without APPROVED (deadlock):** do NOT fake convergence. List each unresolved point + Claude's counter-position; hand it to the user to break the tie. A flagged disagreement beats a false "approved."
+- **Either outcome, close with the residual risk: which files no round ever opened.** An `APPROVED` verdict covers the surface that was actually read, and rounds tend to keep re-reading the files the plan names. Diff the set of files opened across all rounds against the files touching the same shared state, and report the remainder as **unreviewed** rather than sound. ([upstream PR #12](https://github.com/chaseai-yt/claudex-loop/pull/12))
 
 ### PHASE 3 (optional) — BUILD (Codex ↔ Claude, roles flipped)
 
