@@ -12,6 +12,11 @@ docs/self-review/
 
 # Build-Metadaten aus `pip install .` — entsteht durch das setuptools-Backend
 # in pyproject.toml, gehoert nie ins Repo.
+#
+# Die Slashes vorn sind Pflicht: ein blosses `build/` matcht JEDES Verzeichnis
+# dieses Namens in jeder Tiefe — also auch `skills/build/`, den Build-Skill.
+# Dessen SKILL.md ist getrackt und war daher unberuehrt, aber jede NEUE Datei
+# darin waere stillschweigend ignoriert worden.
 *.egg-info/
-build/
-dist/
+/build/
+/dist/
