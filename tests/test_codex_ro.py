@@ -19,7 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -296,6 +296,87 @@ class WriteRootTests(unittest.TestCase):
                 os.environ.pop(codex_ro.SCRATCH_DIR_ENV, None)
             else:
                 os.environ[codex_ro.SCRATCH_DIR_ENV] = previous
+
+
+class PrivateDirRuleTests(unittest.TestCase):
+    """The sticky-bit rule, tested as a rule rather than as this machine's /tmp.
+
+    `os.stat` is stubbed so the POSIX branch runs on any host — including this
+    Windows workstation, where the real branch is unreachable and the CI failure
+    that prompted the fix could not be reproduced locally. (2026-09-03.)
+    """
+
+    ME = 4242
+    ROOT = 0
+
+    def _run(self, layout):
+        """layout: {path-string: (mode, uid)} for the leaf and every parent."""
+        import stat as _stat
+
+        real_stat, real_name, real_geteuid = os.stat, os.name, getattr(os, "geteuid", None)
+
+        class _St:
+            def __init__(self, mode, uid):
+                self.st_mode, self.st_uid = mode, uid
+
+        os.name = "posix"
+        os.geteuid = lambda: self.ME
+        os.stat = lambda p: _St(*layout[str(p)])
+        try:
+            return codex_ro._is_private_dir(PurePosixPath(next(iter(layout))))
+        finally:
+            os.stat, os.name = real_stat, real_name
+            if real_geteuid is None:
+                del os.geteuid
+            else:
+                os.geteuid = real_geteuid
+
+    def test_a_mkdtemp_style_dir_under_sticky_tmp_is_accepted(self):
+        """The case that broke every Linux runner. /tmp is 1777 — sticky."""
+        self.assertTrue(self._run({
+            "/tmp/scratch": (0o040700, self.ME),
+            "/tmp": (0o041777, self.ROOT),
+            "/": (0o040755, self.ROOT),
+        }))
+
+    def test_a_world_writable_parent_without_the_sticky_bit_is_refused(self):
+        """0777 and no sticky: anyone may rename our directory out from under us."""
+        self.assertFalse(self._run({
+            "/shared/scratch": (0o040700, self.ME),
+            "/shared": (0o040777, self.ROOT),
+            "/": (0o040755, self.ROOT),
+        }))
+
+    def test_a_sticky_parent_owned_by_someone_else_is_refused(self):
+        """Sticky protects entries from everyone EXCEPT the directory's owner."""
+        self.assertFalse(self._run({
+            "/theirs/scratch": (0o040700, self.ME),
+            "/theirs": (0o041777, 1337),
+            "/": (0o040755, self.ROOT),
+        }))
+
+    def test_a_leaf_owned_by_someone_else_is_refused(self):
+        self.assertFalse(self._run({
+            "/tmp/scratch": (0o040700, 1337),
+            "/tmp": (0o041777, self.ROOT),
+            "/": (0o040755, self.ROOT),
+        }))
+
+    def test_a_group_writable_leaf_is_refused(self):
+        self.assertFalse(self._run({
+            "/tmp/scratch": (0o040770, self.ME),
+            "/tmp": (0o041777, self.ROOT),
+            "/": (0o040755, self.ROOT),
+        }))
+
+    def test_an_ordinary_private_tree_is_accepted(self):
+        self.assertTrue(self._run({
+            "/home/me/work/repo": (0o040755, self.ME),
+            "/home/me/work": (0o040755, self.ME),
+            "/home/me": (0o040700, self.ME),
+            "/home": (0o040755, self.ROOT),
+            "/": (0o040755, self.ROOT),
+        }))
 
 
 class WriteTargetTests(unittest.TestCase):
