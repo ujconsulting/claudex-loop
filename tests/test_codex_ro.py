@@ -227,13 +227,28 @@ class WriteRootTests(unittest.TestCase):
     def test_an_explicit_scratch_dir_is_a_write_root_on_posix(self):
         """On POSIX, _is_private_dir() performs a real ancestor stat() check --
         so a caller-named scratch dir that genuinely is private stays usable.
+
+        The directory has to be created somewhere actually private, and
+        `tempfile` is not that on Linux: `gettempdir()` is `/tmp`, mode 1777, so
+        the ancestor walk refuses anything under it — correctly. This test used
+        to build its scratch dir there and failed on every Ubuntu runner while
+        passing on macOS, where `gettempdir()` is a per-user `/var/folders/…`.
+        The production code was right both times; the test's premise was not.
+        (CI, 2026-09-03.)
         """
         if os.name == "nt":
             self.skipTest("Windows has its own refusal test below; there the check is not real")
+        home = Path.home()
+        if not codex_ro._is_private_dir(home):
+            self.skipTest(f"{home} is not private on this machine — nothing to assert")
+        private = tempfile.TemporaryDirectory(dir=str(home))
+        self.addCleanup(private.cleanup)
+        scratch = Path(private.name).resolve()
+
         previous = os.environ.get(codex_ro.SCRATCH_DIR_ENV)
-        os.environ[codex_ro.SCRATCH_DIR_ENV] = str(self.extra)
+        os.environ[codex_ro.SCRATCH_DIR_ENV] = str(scratch)
         try:
-            self.assertIn(self.extra, codex_ro.allowed_roots([], for_write=True))
+            self.assertIn(scratch, codex_ro.allowed_roots([], for_write=True))
         finally:
             if previous is None:
                 os.environ.pop(codex_ro.SCRATCH_DIR_ENV, None)

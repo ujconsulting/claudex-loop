@@ -100,7 +100,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-WRAPPER_VERSION = "2.3.0"
+WRAPPER_VERSION = "2.3.1"
 
 DEFAULT_MODEL = "gpt-5.6-terra"
 EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
