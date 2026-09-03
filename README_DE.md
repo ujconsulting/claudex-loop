@@ -11,11 +11,12 @@
 
 *Der Plan, der fertig klingt, ist es meistens nicht. Im ersten echten Lauf von claudex-loop enthielt ein gründlich recherchierter, im Interview festgezurrter Plan immer noch **ein nicht baubares Subsystem und sechs Entwürfe, die Daten zerstört hätten** — ein rivalisierendes Modell fand alle, bevor Code existierte.*
 
+[English](README.md) | [Deutsch](README_DE.md)
+
 </div>
 
-> 🇬🇧 **This is the German translation.** The English original is [`README.md`](./README.md).
-> Both are maintained together; `tests/test_readme_sync.py` fails when the commands in
-> one drift from the other.
+> Beide Fassungen werden zusammen gepflegt; `tests/test_readme_sync.py` schlägt fehl,
+> sobald die Kommandos in einer der beiden abweichen.
 
 ---
 

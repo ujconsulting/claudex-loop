@@ -11,6 +11,8 @@
 
 *The plan that sounds finished usually isn't. In claudex-loop's first real run, a deeply-researched, interview-locked plan still contained **one unbuildable subsystem and six designs that would have corrupted data** — a rival model found all of them before any code existed.*
 
+[English](README.md) | [Deutsch](README_DE.md)
+
 </div>
 
 ---

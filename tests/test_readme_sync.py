@@ -43,8 +43,17 @@ class BothReadmesExist(unittest.TestCase):
     def test_the_german_translation_is_present(self):
         self.assertTrue(DE.is_file(), "README_DE.md is referenced by CLAUDE.md and must exist")
 
-    def test_the_german_file_points_at_the_english_original(self):
-        self.assertIn("README.md", DE.read_text(encoding="utf-8")[:1200])
+    def test_both_carry_the_same_language_switcher(self):
+        """Cross-linked in BOTH directions, or the translation is undiscoverable.
+
+        README.md linked nothing: a German reader landing there had no way to
+        find README_DE.md at all. Convention borrowed from upstream PR #6, which
+        adds Chinese and Japanese the same way. (2026-09-03.)
+        """
+        switcher = "[English](README.md) | [Deutsch](README_DE.md)"
+        for path in (EN, DE):
+            with self.subTest(readme=path.name):
+                self.assertIn(switcher, path.read_text(encoding="utf-8")[:2500])
 
 
 class InstallTargetTests(unittest.TestCase):
