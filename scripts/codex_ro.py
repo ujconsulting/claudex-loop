@@ -771,6 +771,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.timeout <= 0:
         die(f"--timeout must be positive: {args.timeout}", EXIT_REFUSED)
 
+    # 1b. Not in a git repo: say so HERE, not through Codex's error.
+    #
+    # Codex refuses with "Not inside a trusted directory and --skip-git-repo-check
+    # was not specified" -- and it does that BEFORE the model is reached, so there
+    # is no answer file and no thread.started line. That signature is identical to
+    # an expired token, which is what makes it expensive to diagnose (upstream
+    # issue #10, and upstream PR #15 which proposes passing the flag everywhere).
+    #
+    # ⛔ This wrapper does NOT offer that flag, deliberately. Under `-s read-only`
+    # it would be harmless; under the `--yolo` of the build step there is no
+    # sandbox at all, and the git-repo check is then the LAST boundary left. A
+    # flag an agent learns to reach for in one skill it will reach for in the
+    # other. So: fail early, name both real remedies, offer no third one.
+    if _repo_root(Path.cwd().resolve()) is None:
+        die(
+            f"not inside a git repository: {Path.cwd()}\n"
+            "  Codex would refuse here anyway, but with no answer file and no\n"
+            "  thread.started line -- indistinguishable from an auth failure.\n"
+            "  Fix: run from the repo root, or `git init` for genuine greenfield.\n"
+            "  This wrapper does not pass --skip-git-repo-check: that check is the\n"
+            "  only write boundary left once a build runs without a sandbox.",
+            EXIT_REFUSED,
+        )
+
     # 2. Paths -- resolved and confined before anything is created or deleted.
     #    Two root sets on purpose: --allow-path widens reads, never writes. See
     #    allowed_roots(); the caller may not widen its own confinement for the

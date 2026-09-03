@@ -38,11 +38,14 @@ Reference: `ROLES.md`.
   (upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 - Codex authenticated: a prior `codex login` (ChatGPT account is fine). If a run returns an auth/model error, surface it to the user — do not silently retry.
 - **Start every call from the repo root.** Outside a git repo Codex refuses with
-  `Not inside a trusted directory and --skip-git-repo-check was not specified`. The
-  guard is intentional — it scopes Codex's writable root to the repo — and ⛔ the flag
-  named in that message must never be passed. It is harmless here under `-s read-only`
-  but a real regression in `build`, which runs `--yolo`, and an agent that learns to
-  reach for it in one skill will reach for it in the other. Greenfield: `git init` first.
+  `Not inside a trusted directory and --skip-git-repo-check was not specified` — before
+  the model is reached, so with no verdict file and no `thread.started` line: the same
+  signature as an expired token. The guard is intentional and ⛔ the flag named in that
+  message must never be passed. It is harmless here under `-s read-only` but a real
+  regression in `build`, which runs `--yolo` — there is no sandbox there, so the git
+  check is the last write boundary standing — and an agent that learns to reach for it
+  in one skill will reach for it in the other. Greenfield: `git init` first; the wrapper
+  refuses early and names both remedies.
 - **The model comes from the role config, never from this skill.**
   `python scripts/claudex_roles.py --spec plan-review` prints the actor with its model
   and effort; pass those to the wrapper. This line used to say *"do NOT pin `-m` unless

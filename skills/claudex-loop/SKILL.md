@@ -183,10 +183,14 @@ Hand the locked plan to Codex for adversarial review. Mechanics verified end-to-
   (upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 - Codex authenticated (prior `codex login`; ChatGPT account is fine). On auth/model error, surface it — don't silently retry.
 - **Start every call from the repo root.** Outside a git repo Codex refuses with
-  `Not inside a trusted directory and --skip-git-repo-check was not specified`. That
-  guard scopes Codex's writable root to the repo. ⛔ Never pass the flag the message
-  names — pointless under `-s read-only`, dangerous in Phase 3, which runs `--yolo`.
-  Greenfield: `git init` first.
+  `Not inside a trusted directory and --skip-git-repo-check was not specified` — and it
+  does so *before the model is reached*, so there is no verdict file and no
+  `thread.started` line. That is the same signature as an expired token, which is what
+  makes it expensive to diagnose. ⛔ Never pass the flag the message names: pointless
+  under `-s read-only`, dangerous in Phase 3, which runs `--yolo` and therefore has no
+  sandbox left for the git check to back up. Greenfield: `git init` first. The wrapper
+  catches this case itself and says so (upstream [PR #15](https://github.com/chaseai-yt/claudex-loop/pull/15)
+  proposes the opposite; [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10) is why we don't).
 - Do NOT pin `-m`. Use the config default. Pinning `gpt-5.x-codex` variants 400s on ChatGPT-account auth.
 - **Echo the active model before Round 1** so the user can confirm: read the `model` line from `~/.codex/config.toml` (if absent, report "CLI default"). State it alongside the resolved tunables, e.g. `Reviewer model: CLI default (config unpinned) — codex-cli 0.149.1` (whatever `codex --version` actually reports; the number moves). If the user objects, stop and let them adjust config before burning a review round.
 

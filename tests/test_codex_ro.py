@@ -495,6 +495,29 @@ class RefusalExitCodeTests(unittest.TestCase):
     def test_a_non_positive_timeout_is_refused(self):
         self._refuses(["--prompt", "x", "--out-file", "o.txt", "--timeout", "0"])
 
+    def test_a_non_git_directory_is_refused_with_its_own_reason(self):
+        """Upstream PR #15 wants --skip-git-repo-check passed everywhere instead.
+
+        Same problem, different answer. Codex's own refusal arrives with no
+        answer file and no thread.started line — the exact signature of an
+        expired token — so the failure is worth naming here rather than being
+        inherited. The flag is not offered: under `-s read-only` it would be
+        harmless, but under the build step's `--yolo` there is no sandbox and
+        the git check is the last write boundary standing (upstream issue #10).
+        """
+        # setUp already chdir'd into a fresh temp dir, which is not a repo.
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.main(["--prompt", "x", "--out-file", "o.txt"])
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    def test_the_refusal_names_both_remedies_and_offers_no_third(self):
+        with _CapturedStderr() as captured:
+            with self.assertRaises(SystemExit):
+                codex_ro.main(["--prompt", "x", "--out-file", "o.txt"])
+        self.assertIn("git init", captured.text)
+        self.assertIn("repo root", captured.text)
+        self.assertIn("does not pass --skip-git-repo-check", captured.text)
+
     def test_nothing_is_created_on_the_refusal_path(self):
         with self.assertRaises(SystemExit):
             codex_ro.main(["--prompt", "x", "--out-file", "sub/o.txt", "--model", "bad model"])
