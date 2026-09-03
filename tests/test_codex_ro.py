@@ -641,8 +641,27 @@ class KillTreeTests(unittest.TestCase):
         self.assertIn("codex_ro:", captured.text)
         self.assertNotEqual(captured.text.strip(), "", "a failed kill must not be swallowed")
 
+    @staticmethod
+    def _spawn_detached(script):
+        """Spawn the way main() does — its own process group, like the real child.
+
+        Without this the child inherits pytest's process group, and kill_tree's
+        POSIX branch then SIGKILLs that whole group: the test runner, and on a
+        CI machine the runner agent. That is exactly what happened on
+        2026-09-03 — every POSIX job died as "the hosted runner lost
+        communication with the server" while Windows passed, because taskkill /T
+        is scoped to the tree. The test was wrong, and the production code now
+        refuses this case too.
+        """
+        platform_kwargs = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            if os.name == "nt"
+            else {"start_new_session": True}
+        )
+        return subprocess.Popen([sys.executable, "-c", script], **platform_kwargs)
+
     def test_a_successful_kill_stops_the_child(self):
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        proc = self._spawn_detached("import time; time.sleep(30)")
         try:
             codex_ro.kill_tree(proc)
             proc.wait(timeout=15)

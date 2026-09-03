@@ -655,8 +655,24 @@ def kill_tree(proc: subprocess.Popen) -> None:
         import signal
 
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            return
+            pgid = os.getpgid(proc.pid)
+            if pgid == os.getpgid(0):
+                # ⛔ The child shares OUR process group, so killpg would take this
+                # wrapper, the shell that launched it, and anything else in the
+                # group down with it. Demonstrated 2026-09-03: a test that spawned
+                # its child without start_new_session made every POSIX CI job die
+                # as "the hosted runner lost communication with the server" — the
+                # SIGKILL reached the runner agent. Windows was unaffected because
+                # taskkill /T is scoped to the process tree.
+                #
+                # main() always spawns with start_new_session=True, so this branch
+                # should be unreachable there. It exists because the consequence of
+                # being wrong is killing the caller, and that is too expensive to
+                # leave to an invariant nobody re-checks after a refactor.
+                warn("child shares this process group -- killing only the child.")
+            else:
+                os.killpg(pgid, signal.SIGKILL)
+                return
         except OSError as exc:
             warn(f"killpg failed: {exc}")
     try:
