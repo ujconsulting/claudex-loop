@@ -100,7 +100,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-WRAPPER_VERSION = "2.3.1"
+WRAPPER_VERSION = "2.3.2"
 
 DEFAULT_MODEL = "gpt-5.6-terra"
 EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
@@ -574,14 +574,47 @@ MACOS_BUNDLED_CODEX = (
 )
 
 
+# The Windows equivalent: the app ships the CLI under a PER-VERSION hash
+# directory, and several can sit side by side. Putting one on PATH by hand is
+# not a fix — the next update writes a new hash and the entry goes stale.
+WINDOWS_BUNDLED_CODEX_GLOB = "OpenAI/Codex/bin/*/codex.exe"
+
+
 def bundled_codex() -> str | None:
-    """The Codex that ships inside ChatGPT.app, if this is a Mac and it is there."""
-    if sys.platform != "darwin":
+    """The Codex that ships inside the desktop app, if this platform has one.
+
+    A fallback AFTER the PATH lookup, never a redirect: the path is fixed and
+    chosen by this wrapper, which is what separates it from the removed
+    CLAUDEX_CODEX_BIN. That variable let a CALLER's environment nominate any
+    file as "Codex" (audit 2026-09-02, CRITICAL); this cannot be pointed
+    anywhere.
+
+    Windows was missing from here until 2026-09-07, and 2.3.0 made that a hard
+    stop: with CLAUDEX_CODEX_BIN gone, a machine whose only Codex lives in the
+    app directory failed every review with EXIT_NO_CODEX while a perfectly good
+    CLI sat on disk, authenticated. Reported from a second workstation.
+    """
+    if sys.platform == "darwin":
+        for candidate in MACOS_BUNDLED_CODEX:
+            path = Path(candidate).expanduser()
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path)
         return None
-    for candidate in MACOS_BUNDLED_CODEX:
-        path = Path(candidate).expanduser()
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path)
+
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        if not base:
+            return None
+        # Newest first: several hash directories coexist after an update, and
+        # the stale one is still executable — picking it would run an old CLI
+        # with no sign that anything was chosen at all.
+        found = sorted(
+            (p for p in Path(base).glob(WINDOWS_BUNDLED_CODEX_GLOB) if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if found:
+            return str(found[0])
     return None
 
 
@@ -620,7 +653,19 @@ def find_codex() -> str:
     if bundled:
         return bundled
 
-    die(f"codex not found on PATH (tried: {', '.join(names)}).", EXIT_NO_CODEX)
+    where = "the desktop app's install directory"
+    if os.name == "nt":
+        where = f"%LOCALAPPDATA%\\{WINDOWS_BUNDLED_CODEX_GLOB.replace('/', chr(92))}"
+    elif sys.platform == "darwin":
+        where = MACOS_BUNDLED_CODEX[0]
+    die(
+        f"codex not found on PATH (tried: {', '.join(names)}), and not in {where}.\n"
+        f"  Install it: npm install -g @openai/codex@latest\n"
+        f"  There is deliberately no environment override to point this elsewhere —\n"
+        f"  CLAUDEX_CODEX_BIN was removed in 2.3.0 because it let an unattended\n"
+        f"  call nominate any file as 'Codex' (audit 2026-09-02, CRITICAL).",
+        EXIT_NO_CODEX,
+    )
     raise AssertionError("unreachable")
 
 

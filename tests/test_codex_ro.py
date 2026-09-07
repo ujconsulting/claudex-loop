@@ -633,9 +633,53 @@ class SilentDeathTests(unittest.TestCase):
     def test_the_binary_that_failed_is_named(self):
         self.assertIn("/opt/weird/codex", codex_ro.diagnose_silent_death("/opt/weird/codex", 1))
 
-    def test_bundled_lookup_is_darwin_only(self):
-        if sys.platform != "darwin":
-            self.assertIsNone(codex_ro.bundled_codex())
+    def test_the_windows_app_install_is_discovered_under_its_hash_directory(self):
+        """2.3.0 stranded any Windows box whose only Codex lives in the app dir.
+
+        The macOS bundle fallback existed; Windows had none, and removing
+        CLAUDEX_CODEX_BIN in 2.3.0 turned that gap into a hard stop —
+        EXIT_NO_CODEX on every review while an authenticated CLI sat on disk.
+        Reported from a second workstation, 2026-09-07. The hash directory
+        changes per version, so putting it on PATH by hand is not a fix.
+        """
+        if os.name != "nt":
+            self.skipTest("the Windows branch needs a Windows path layout")
+        with tempfile.TemporaryDirectory() as base:
+            older = Path(base) / "OpenAI" / "Codex" / "bin" / "aaa111"
+            newer = Path(base) / "OpenAI" / "Codex" / "bin" / "bbb222"
+            for d in (older, newer):
+                d.mkdir(parents=True)
+                (d / "codex.exe").write_text("", encoding="utf-8")
+            os.utime(older / "codex.exe", (1_000_000, 1_000_000))
+            os.utime(newer / "codex.exe", (2_000_000, 2_000_000))
+
+            previous = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = base
+            try:
+                found = codex_ro.bundled_codex()
+            finally:
+                if previous is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = previous
+
+            self.assertIsNotNone(found, "the app install must be found")
+            self.assertIn("bbb222", found, "several versions coexist — take the newest")
+
+    def test_no_bundle_means_no_guess(self):
+        """Absent an install, this returns None rather than inventing a path."""
+        if os.name != "nt":
+            self.skipTest("the Windows branch needs a Windows path layout")
+        with tempfile.TemporaryDirectory() as empty:
+            previous = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = empty
+            try:
+                self.assertIsNone(codex_ro.bundled_codex())
+            finally:
+                if previous is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = previous
 
     def _find_codex_or_skip(self):
         try:
