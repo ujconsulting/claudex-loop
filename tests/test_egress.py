@@ -19,6 +19,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import fallback_review  # noqa: E402
 
+try:
+    import yaml as _yaml  # noqa: F401
+
+    HAS_YAML = True
+except ImportError:  # the tests-without-pyyaml CI job, and any stdlib-only repo
+    HAS_YAML = False
+
+# A FILE allowlist needs a parser. Without one the loader fails CLOSED, which is
+# the documented contract and is covered by the stubbed-parser test below — but
+# these four assert successful parsing, so they have nothing to say in that world.
+# They asserted it anyway until the tests-without-pyyaml job was added and ran
+# them for the first time (CI, 2026-09-03).
+needs_yaml = unittest.skipUnless(HAS_YAML, "no YAML parser: the loader fails closed instead")
+
 
 class EgressEnvIsolation(unittest.TestCase):
     """Both egress variables, every time.
@@ -213,15 +227,18 @@ class FileAllowlistTests(unittest.TestCase):
         else:
             os.environ[fallback_review.EGRESS_FILE_ENV] = self.saved
 
+    @needs_yaml
     def test_a_listed_host_with_a_listed_scheme_passes(self):
         fallback_review.check_egress("https://openrouter.ai/api/v1")
         fallback_review.check_egress("http://127.0.0.1:1234/v1")
 
+    @needs_yaml
     def test_an_unlisted_host_is_refused_even_over_https(self):
         with self.assertRaises(fallback_review.EgressDenied) as caught:
             fallback_review.check_egress("https://elsewhere.example/v1")
         self.assertIn("not in the egress allowlist", str(caught.exception))
 
+    @needs_yaml
     def test_a_scheme_the_entry_does_not_list_is_refused(self):
         with self.assertRaises(fallback_review.EgressDenied) as caught:
             fallback_review.check_egress("http://openrouter.ai/api/v1")
@@ -256,6 +273,7 @@ class FileAllowlistTests(unittest.TestCase):
         finally:
             fallback_review._yaml_module = original
 
+    @needs_yaml
     def test_the_file_wins_over_the_env_list(self):
         os.environ[fallback_review.EGRESS_ALLOW_ENV] = "elsewhere.example"
         self.addCleanup(lambda: os.environ.pop(fallback_review.EGRESS_ALLOW_ENV, None))
