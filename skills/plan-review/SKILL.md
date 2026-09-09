@@ -40,12 +40,13 @@ Reference: `ROLES.md`.
 - **Start every call from the repo root.** Outside a git repo Codex refuses with
   `Not inside a trusted directory and --skip-git-repo-check was not specified` — before
   the model is reached, so with no verdict file and no `thread.started` line: the same
-  signature as an expired token. The guard is intentional and ⛔ the flag named in that
-  message must never be passed. It is harmless here under `-s read-only` but a real
-  regression in `build`, which runs `--yolo` — there is no sandbox there, so the git
-  check is the last write boundary standing — and an agent that learns to reach for it
-  in one skill will reach for it in the other. Greenfield: `git init` first; the wrapper
-  refuses early and names both remedies.
+  signature as an expired token. The wrapper passes the flag that message names and
+  warns rather than refusing: it gates a startup **trust** check and does not widen the
+  sandbox. Measured on [upstream PR #15](https://github.com/chaseai-yt/claudex-loop/pull/15),
+  reproduced here on codex-cli 0.149.1 — read-only in a non-git directory exits 1
+  without the flag and 0 with it, and the sandbox roots are unchanged either way. This
+  skill claimed the opposite until 2026-09-09, on reasoning inherited from upstream
+  issue #10 and never measured. `build` still wants a repo, for diff isolation.
 - **The model comes from the role config, never from this skill.**
   `python scripts/claudex_roles.py --spec plan-review` prints the actor with its model
   and effort; pass those to the wrapper. This line used to say *"do NOT pin `-m` unless

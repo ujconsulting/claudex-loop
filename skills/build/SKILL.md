@@ -40,12 +40,18 @@ Reference: `ROLES.md`.
 - **Echo the active model at kickoff** so the user can confirm: read the `model` line from `~/.codex/config.toml` (absent = "CLI default"); state it with the resolved tunables. If the user objects, stop before launching the build.
 - **Codex has a native image-generation tool** in `codex exec` sessions (ChatGPT-account backed, no API key; verified 2026-07-08 — it saved a generated PNG to disk headless). Specs may therefore include "generate these image assets yourself" steps: name exact file paths, dimensions, and style in the prompt contract.
 - Run from the target repo's root (both `exec` and `resume` then need no `-C`; `resume` doesn't support `-C` anyway).
-- **The repo root is not a convenience, it is the sandbox boundary.** Outside a git
-  repo Codex refuses: `Not inside a trusted directory and --skip-git-repo-check was
-  not specified`. That guard is what scopes Codex's writable root to the repo. ⛔
-  **Never pass `--skip-git-repo-check`** — under `-s read-only` it is merely pointless,
-  but this skill runs `--yolo`, where removing the boundary means Codex may write
-  anywhere. Genuine greenfield: `git init` first, then start.
+- **This skill needs a git repo — but for diff isolation, not as a sandbox boundary.**
+  Without git there is no baseline to diff against, nothing to revert, and no way to
+  show what Codex changed. That reason stands on its own. Greenfield: `git init` first.
+
+  ⛔ **Correction (2026-09-09).** This bullet used to claim the startup trust check
+  "scopes Codex's writable root to the repo", and forbade `--skip-git-repo-check` on
+  that basis. @mraol08831 measured it on [upstream PR #15](https://github.com/chaseai-yt/claudex-loop/pull/15)
+  and falsified it: `workspace-write` reports its roots as `[cwd, /tmp, $TMPDIR]` —
+  cwd, not the repo root — with and without the flag alike, and under `--yolo` the
+  trust gate is not enforced at all. The flag gates a startup **trust** check; it does
+  not widen the sandbox. The claim came from upstream issue #10 and was repeated here
+  without measuring, which is the exact failure this repo's own rules warn about.
 
 ## Tunables (read from args, else default)
 

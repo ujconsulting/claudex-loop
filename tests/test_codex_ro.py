@@ -591,28 +591,21 @@ class RefusalExitCodeTests(unittest.TestCase):
     def test_a_non_positive_timeout_is_refused(self):
         self._refuses(["--prompt", "x", "--out-file", "o.txt", "--timeout", "0"])
 
-    def test_a_non_git_directory_is_refused_with_its_own_reason(self):
-        """Upstream PR #15 wants --skip-git-repo-check passed everywhere instead.
+    def test_the_flag_that_gates_the_trust_check_is_always_passed(self):
+        """CORRECTION 2026-09-09: this repo refused non-git directories instead.
 
-        Same problem, different answer. Codex's own refusal arrives with no
-        answer file and no thread.started line — the exact signature of an
-        expired token — so the failure is worth naming here rather than being
-        inherited. The flag is not offered: under `-s read-only` it would be
-        harmless, but under the build step's `--yolo` there is no sandbox and
-        the git check is the last write boundary standing (upstream issue #10).
+        The reasoning — that the trust check scopes Codex's writable root to the
+        repo — came from upstream issue #10 and was repeated here without ever
+        being measured. @mraol08831 measured it and falsified it: the sandbox
+        roots are [cwd, /tmp, $TMPDIR] with and without the flag alike. Refusing
+        bought no safety and cost every review outside a repo.
         """
-        # setUp already chdir'd into a fresh temp dir, which is not a repo.
-        with self.assertRaises(SystemExit) as caught:
-            codex_ro.main(["--prompt", "x", "--out-file", "o.txt"])
-        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
-
-    def test_the_refusal_names_both_remedies_and_offers_no_third(self):
-        with _CapturedStderr() as captured:
-            with self.assertRaises(SystemExit):
-                codex_ro.main(["--prompt", "x", "--out-file", "o.txt"])
-        self.assertIn("git init", captured.text)
-        self.assertIn("repo root", captured.text)
-        self.assertIn("does not pass --skip-git-repo-check", captured.text)
+        argv = codex_ro.build_argv(
+            codex_ro.parse_args(["--prompt", "x", "--out-file", "o.txt"]), Path("o.txt")
+        )
+        self.assertIn("--skip-git-repo-check", argv)
+        self.assertIn("-s", argv, "the sandbox pin is what the flag does NOT touch")
+        self.assertEqual(argv[argv.index("-s") + 1], "read-only")
 
     def test_nothing_is_created_on_the_refusal_path(self):
         with self.assertRaises(SystemExit):

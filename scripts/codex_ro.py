@@ -547,6 +547,11 @@ def build_argv(args: argparse.Namespace, out_file: Path) -> list[str]:
     else:
         # exec: -s beats any trailing -c sandbox_mode (measured, see module docstring).
         argv += ["-s", "read-only"]
+    # Gates a startup TRUST check, not the sandbox — measured on upstream PR #15
+    # and reproduced here. Passing it always keeps a non-repo review working; the
+    # sandbox is pinned by `-s read-only` / `-c sandbox_mode`, which this flag
+    # does not touch.
+    argv += ["--skip-git-repo-check"]
     argv += ["-m", args.model, "-c", f"model_reasoning_effort={args.effort}"]
     # Only servers this installation has: an override for an absent one makes Codex
     # reject its entire config. Whatever the caller asked for, this is the filter.
@@ -867,28 +872,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.timeout <= 0:
         die(f"--timeout must be positive: {args.timeout}", EXIT_REFUSED)
 
-    # 1b. Not in a git repo: say so HERE, not through Codex's error.
+    # 1b. Outside a git repo: warn, do not refuse.
     #
-    # Codex refuses with "Not inside a trusted directory and --skip-git-repo-check
-    # was not specified" -- and it does that BEFORE the model is reached, so there
-    # is no answer file and no thread.started line. That signature is identical to
-    # an expired token, which is what makes it expensive to diagnose (upstream
-    # issue #10, and upstream PR #15 which proposes passing the flag everywhere).
+    # ⛔ CORRECTION (2026-09-09). This used to die here, on the reasoning --
+    # inherited from upstream issue #10 and repeated by this repo without ever
+    # measuring it -- that the trust check "scopes Codex's writable root to the
+    # repo". @mraol08831 measured it on upstream PR #15 and falsified that:
+    # `workspace-write` reports its roots as [cwd, /tmp, $TMPDIR], where cwd is
+    # the working directory and NOT the repo root, with and without the flag
+    # alike. There is no git-derived writable root for it to remove. The flag
+    # gates a startup TRUST check; it does not widen the sandbox.
     #
-    # ⛔ This wrapper does NOT offer that flag, deliberately. Under `-s read-only`
-    # it would be harmless; under the `--yolo` of the build step there is no
-    # sandbox at all, and the git-repo check is then the LAST boundary left. A
-    # flag an agent learns to reach for in one skill it will reach for in the
-    # other. So: fail early, name both real remedies, offer no third one.
+    # Reproduced here on codex-cli 0.149.1: in a non-git directory, read-only
+    # without the flag exits 1 ("Not inside a trusted directory"), with the flag
+    # exits 0. So refusing bought no safety and cost every non-repo review.
+    #
+    # What survives is the diagnostic: the refusal arrives BEFORE the model, with
+    # no answer file and no thread.started line -- the exact signature of an
+    # expired token. Saying which it is, is worth a line.
     if _repo_root(Path.cwd().resolve()) is None:
-        die(
+        warn(
             f"not inside a git repository: {Path.cwd()}\n"
-            "  Codex would refuse here anyway, but with no answer file and no\n"
-            "  thread.started line -- indistinguishable from an auth failure.\n"
-            "  Fix: run from the repo root, or `git init` for genuine greenfield.\n"
-            "  This wrapper does not pass --skip-git-repo-check: that check is the\n"
-            "  only write boundary left once a build runs without a sandbox.",
-            EXIT_REFUSED,
+            "  Proceeding with --skip-git-repo-check. Path confinement still applies,\n"
+            "  anchored at this directory instead of a repo root -- so double-check\n"
+            "  that this is where you meant to run."
         )
 
     # 2. Paths -- resolved and confined before anything is created or deleted.
