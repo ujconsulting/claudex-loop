@@ -147,6 +147,13 @@ Maintain `ROUND` (start 1) and `THREAD_ID` (empty until round 1 returns).
 >
 > `=== BEGIN PLAN (<PLAN_FILE>, sha256 <hash>) ===` … `=== END PLAN ===`
 
+⛔ **Hash the bytes you inline — read the file ONCE.** Hashing `PLAN_FILE` and then
+reading it again for the prompt are two reads, and anything that writes the plan between
+them (you, an editor autosave, a parallel session) makes the label certify a text the
+reviewer never saw. Read once into a variable, hash that variable, inline that variable.
+The shape is upstream [PR #21](https://github.com/chaseai-yt/claudex-loop/pull/21), where
+the same double read let an unapproved revision become the dispatched work order.
+
 The scope paragraph is from [upstream PR #12](https://github.com/chaseai-yt/claudex-loop/pull/12) by @Dwodgaming, and it closes an inconsistency in this repo: `audit` has demanded a coverage note ("not examined: …") from the start and calls silence about scope a false completeness claim — while the plan review demanded nothing of the kind. Same doctrine, enforced in one place and not the other. On the run it came from, two of three writers to one file were reviewed and fixed; the third was never opened and held the same defect.
 
 ⛔ **Inline the plan; never tell Codex to read `PLAN.md`.** Two separate defects lived in

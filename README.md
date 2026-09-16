@@ -141,6 +141,21 @@ product is controls:
 - **A fourth pass, from a consumer repo, found two more CRITICALs** in the wrapper on
   2026-09-02 — and lifted a risk this audit had consciously accepted, correctly: the
   acceptance covered env *prefixing* and missed env *inheritance*.
+- **And the worst one was not a hole at all: for three weeks the reviewer read nothing
+  and said so nowhere.** On Windows, `codex exec` without `[windows] sandbox` in the
+  config selects no sandbox backend and refuses *every* shell call — reads included —
+  while still exiting 0 with a fluent answer written from the prompt alone. This repo's
+  own `docs/betrieb.md` had recorded the symptom on day one and misattributed it to an
+  untracked `PLAN.md`; the workaround it prescribed (inline the plan text) made plan
+  review work and thereby hid that no repo file was ever opened. It surfaced on
+  2026-09-16 in a consumer repo, after **five rounds** of plan-text-only review that
+  every check had passed. Measured, corrected, and turned into a control: the wrapper
+  pins the backend and exits 3 on a run that executed nothing.
+
+  The lesson is not the bug. A control that fails **loudly** is a nuisance; one that
+  fails **silently while reporting success** is worse than its absence, because it
+  spends the trust it has not earned. Everything above this line was found by someone
+  looking; this one had to be found by something watching.
 
 Three independent passes over the same 500 lines, each finding what the previous one
 missed. That is the argument for the whole method, made against its own author.

@@ -252,6 +252,13 @@ non-default plan cannot be signed off on the strength of a review of `PLAN.md`.
 >
 > `=== BEGIN PLAN (<PLAN_FILE>, sha256 <hash>) ===` … `=== END PLAN ===`
 
+⛔ **Hash the bytes you inline — read the file ONCE.** Hashing `PLAN_FILE` and then
+reading it again for the prompt are two reads, and anything that writes the plan between
+them (you, an editor autosave, a parallel session) makes the label certify a text the
+reviewer never saw. Read once into a variable, hash that variable, inline that variable.
+The shape is upstream [PR #21](https://github.com/chaseai-yt/claudex-loop/pull/21), where
+the same double read let an unapproved revision become the dispatched work order.
+
 (On greenfield there are no repo files — Codex reviews `PLAN.md` and its `## Assumptions` section on their own merits; the assumption sources give it something concrete to attack.)
 
 ### Round 1 — fresh session (capture `thread_id`)

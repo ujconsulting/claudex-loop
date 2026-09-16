@@ -147,6 +147,23 @@ gesamtes Produkt Kontrollen sind:
 - **Ein vierter Durchgang aus einem Consumer-Repo fand am 02.09.2026 zwei weitere
   CRITICALs** im Wrapper — und hob ein Risiko auf, das dieses Audit bewusst akzeptiert
   hatte, zu Recht: die Annahme deckte env-*Präfixe* ab und übersah env-*Vererbung*.
+- **Und der schlimmste Fund war gar keine Lücke: drei Wochen lang las der Gutachter
+  nichts und sagte es nirgends.** Unter Windows wählt `codex exec` ohne
+  `[windows] sandbox` in der Config kein Sandbox-Backend aus und weist *jeden*
+  Shell-Aufruf ab — Lesen eingeschlossen —, beendet sich dabei aber mit 0 und liefert
+  eine flüssige Antwort, geschrieben allein aus dem Prompt. Die eigene
+  `docs/betrieb.md` dieses Repos hatte das Symptom am ersten Tag protokolliert und
+  einer untrackten `PLAN.md` zugeschrieben; die dort empfohlene Abhilfe (Plantext
+  inline) brachte das Plan-Review zum Laufen und verdeckte damit, dass nie eine
+  Repo-Datei geöffnet wurde. Aufgefallen ist es am 16.09.2026 in einem Consumer-Repo,
+  nach **fünf Runden** reiner Plantext-Reviews, die jede Prüfung bestanden hatten.
+  Gemessen, korrigiert und in eine Kontrolle überführt: der Wrapper nagelt das Backend
+  fest und endet mit 3, wenn ein Lauf keinen einzigen Befehl ausführen konnte.
+
+  Die Lehre ist nicht der Bug. Eine Kontrolle, die **laut** scheitert, ist lästig; eine,
+  die **still scheitert und dabei Erfolg meldet**, ist schlimmer als keine — sie gibt
+  Vertrauen aus, das sie nicht verdient hat. Alles über dieser Zeile hat jemand
+  gefunden, der hingesehen hat; dieses hier musste etwas finden, das zusieht.
 
 Drei unabhängige Durchgänge über dieselben 500 Zeilen, jeder fand, was der vorige
 übersehen hatte. Das ist das Argument für die ganze Methode, vorgetragen gegen ihren
