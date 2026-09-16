@@ -81,6 +81,9 @@ Exit codes:
     2    refused: bad arguments, a path outside the allowed roots, a write target
          that is not a plain file, a file that cannot be read or opened, or a
          config override that would touch the sandbox
+    3    blind: Codex answered without being able to run a single command, so the
+         answer was written from the prompt alone. Looks healthy from outside --
+         exit 0, a thread_id, a full answer file -- and is not a review
     124  timeout -- treat as a failure, do not blindly retry
     127  codex executable not found
     else Codex's own exit code
@@ -100,7 +103,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-WRAPPER_VERSION = "2.3.2"
+WRAPPER_VERSION = "2.4.0"
 
 DEFAULT_MODEL = "gpt-5.6-terra"
 EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
@@ -137,7 +140,33 @@ FORBIDDEN_CONFIG_KEYS = (
     # The wrapper owns MCP, not the caller: `-c mcp_servers.x.command=...` defines
     # a server that runs outside the sandbox this wrapper exists to pin.
     "mcp_servers",
+    # Picks WHICH Windows sandbox backend enforces the read-only pin (see
+    # WINDOWS_SANDBOX below). Neither accepted value turns enforcement off, but the
+    # two behave differently, and a caller swapping the backend under a wrapper
+    # whose whole promise is that pin is the same category of change as swapping
+    # sandbox_mode itself.
+    "windows",
 )
+
+# ⛔ Without this key, `codex exec` on Windows refuses EVERY shell command --
+# including a plain read -- with `rejected: blocked by policy`, while still
+# exiting 0 and answering from the prompt alone. A reviewer that read nothing
+# thus returns a confident verdict. Measured here on codex-cli 0.149.1;
+# upstream openai/codex#42172 dates the regression to 0.147.0 and #44839/#43633
+# report the same signature.
+#
+# Two backends exist, `elevated` and `unelevated`; there is no "off". Measured
+# on 0.149.1, reading a file and attempting a write in each:
+#
+#   backend      cwd on D:            cwd under %TEMP%
+#   elevated     reads, write denied  FAILS (CreateProcessWithLogonW 267)
+#   unelevated   reads, write denied  reads, write denied
+#
+# `elevated` runs the command as another user, which cannot reach a working
+# directory inside the calling user's profile -- and the harness scratchpad
+# lives exactly there. `unelevated` works in both places and refuses the write
+# in both, so it is the one that gets pinned.
+WINDOWS_SANDBOX = "unelevated"
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 RESUME_RE = re.compile(r"^[0-9a-fA-F-]{8,}$")
@@ -145,6 +174,10 @@ THREAD_RE = re.compile(r'"thread_id"\s*:\s*"([^"]+)"')
 
 EXIT_EMPTY = 1
 EXIT_REFUSED = 2
+# The reviewer ran, answered, and never read anything -- see blind_run(). Its own
+# code because it is not an error of the caller (2) and not an empty answer (1):
+# it is a full answer that must not be recorded as a review.
+EXIT_BLIND = 3
 EXIT_TIMEOUT = 124
 EXIT_NO_CODEX = 127
 
@@ -552,6 +585,11 @@ def build_argv(args: argparse.Namespace, out_file: Path) -> list[str]:
     # sandbox is pinned by `-s read-only` / `-c sandbox_mode`, which this flag
     # does not touch.
     argv += ["--skip-git-repo-check"]
+    # Selects the backend that ENFORCES the pin above. Windows only: the key does
+    # not exist on the other platforms, and naming it there makes Codex reject its
+    # whole config. See WINDOWS_SANDBOX for the measurements behind the value.
+    if os.name == "nt":
+        argv += ["-c", f'windows.sandbox="{WINDOWS_SANDBOX}"']
     argv += ["-m", args.model, "-c", f"model_reasoning_effort={args.effort}"]
     # Only servers this installation has: an override for an absent one makes Codex
     # reject its entire config. Whatever the caller asked for, this is the filter.
@@ -764,6 +802,56 @@ def kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
     except OSError as exc:
         warn(f"fallback kill failed, a codex process may still be running: {exc}")
+
+
+# Codex logs every shell attempt to stderr: a refusal as an `exec_command failed`
+# line carrying the reason, a success as `succeeded in <ms>`. Both strings come
+# from Codex's own logging and could change; the tests pin them, and the failure
+# direction of a change is a warning that stops firing -- not a false refusal.
+SANDBOX_REFUSAL_RE = re.compile(
+    r"rejected: blocked by policy|CreateProcessWithLogonW failed", re.IGNORECASE)
+COMMAND_SUCCEEDED_RE = re.compile(r"\bsucceeded in \d+\s*ms", re.IGNORECASE)
+
+
+def blind_run(err_file: Path) -> str | None:
+    """Reason why this run read nothing at all, or None if it could run commands.
+
+    ⛔ THE FAILURE THIS CATCHES IS SILENT. When the sandbox backend refuses every
+    command, Codex still exits 0 and still writes a fluent answer -- produced from
+    the prompt alone, by a model that never opened a file. The answer file is not
+    empty, so none of the checks above fire, and the caller records a verdict from
+    a reviewer that reviewed nothing. That is the worst possible outcome for a
+    review tool: not a missing answer, but a confident one with nothing behind it.
+
+    The rule is deliberately "refusals AND no successes", not "any refusal". A
+    model that reaches for one illegal command, gets told no, and then does the
+    job properly has produced a real review; failing that run would make the
+    wrapper block normal work, and a control that blocks normal work gets
+    switched off. Only a run where NOTHING executed is blind.
+    """
+    if not err_file.exists():
+        return None
+    try:
+        text = err_file.read_text(encoding="utf-8", errors="replace")[-200_000:]
+    except OSError:
+        return None
+    refusals = len(SANDBOX_REFUSAL_RE.findall(text))
+    if not refusals or COMMAND_SUCCEEDED_RE.search(text):
+        return None
+    hinweis = (
+        f"  On Windows this is openai/codex#42172: without `[windows] sandbox` "
+        f"no backend is selected and every command is refused. This wrapper "
+        f"pins `windows.sandbox=\"{WINDOWS_SANDBOX}\"` -- if you see this anyway, "
+        f"the Codex build no longer accepts it.\n"
+        if os.name == "nt" else
+        "  The sandbox refused to start any process. Check the platform's "
+        "sandbox helper (Landlock on Linux, seatbelt on macOS).\n"
+    )
+    return (
+        f"the reviewer could not run a single command ({refusals} refused, none "
+        f"succeeded) -- it answered WITHOUT reading anything, and that answer is "
+        f"not a review.\n" + hinweis + f"  Details: {err_file}"
+    )
 
 
 def read_thread_id(stream_file: Path) -> str | None:
@@ -993,6 +1081,14 @@ def main(argv: list[str] | None = None) -> int:
     thread_id = read_thread_id(stream_file)
     if thread_id:
         print(f"THREAD_ID={thread_id}")
+
+    # Before anything is reported as an answer: did the reviewer get to read?
+    # This check comes FIRST because the run it catches looks entirely healthy --
+    # exit 0, a thread_id, a full answer file.
+    blind = blind_run(err_file)
+    if blind:
+        warn(blind)
+        return EXIT_BLIND
 
     if not out_file.exists() or out_file.stat().st_size == 0:
         stderr_bytes = err_file.stat().st_size if err_file.exists() else 0

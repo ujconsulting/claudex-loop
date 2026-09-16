@@ -150,9 +150,13 @@ Maintain `ROUND` (start 1) and `THREAD_ID` (empty until round 1 returns).
 The scope paragraph is from [upstream PR #12](https://github.com/chaseai-yt/claudex-loop/pull/12) by @Dwodgaming, and it closes an inconsistency in this repo: `audit` has demanded a coverage note ("not examined: …") from the start and calls silence about scope a false completeness claim — while the plan review demanded nothing of the kind. Same doctrine, enforced in one place and not the other. On the run it came from, two of three writers to one file were reviewed and fixed; the third was never opened and held the same defect.
 
 ⛔ **Inline the plan; never tell Codex to read `PLAN.md`.** Two separate defects lived in
-this one line until 2026-08-30. First, `docs/betrieb.md` records that a fresh plan is
-usually still untracked and Codex's file reads come back `rejected: blocked by policy` —
-it then reviews the surrounding code and returns a confident verdict on something else.
+this one line until 2026-08-30. First, a plan read from disk is a plan the review is not
+bound to: inlining carries the text and its hash, and works whether or not the file is
+saved. (The reason originally given here — that a fresh plan is untracked and that is why
+reads come back `rejected: blocked by policy` — was **wrong**, and wrong in a way that hid
+a much larger fault for three weeks. On Windows that message means no sandbox backend was
+selected at all and **no** shell call runs, repo files included. Measured 2026-09-16;
+`docs/betrieb.md` §4 carries the correction and `codex_ro.py` 2.4.0 the fix.)
 Second, `PLAN_FILE` is advertised as configurable above while this prompt hard-coded
 `PLAN.md`, so a run with a non-default plan got a verdict on a different (possibly
 stale) file and the user signed off believing otherwise. Inline the resolved file's

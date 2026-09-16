@@ -613,6 +613,106 @@ class RefusalExitCodeTests(unittest.TestCase):
         self.assertFalse((self.cwd / "sub").exists(), "the output directory must not be created")
 
 
+class WindowsSandboxBackendTests(unittest.TestCase):
+    """The pin needs a backend, and on Windows no backend is selected by default.
+
+    Measured 2026-09-16 on codex-cli 0.149.1: with no `[windows] sandbox` key,
+    `codex exec -s read-only` refuses EVERY command -- a plain file read included
+    -- with `rejected: blocked by policy`, and still exits 0 with a fluent answer.
+    Same signature as openai/codex#42172, #44839, #43633. `-s workspace-write`
+    was refused identically, so this is not a read-only defect: no sandbox mode
+    worked at all. With `windows.sandbox="unelevated"` the read succeeded and the
+    write attempt was still denied.
+    """
+
+    @staticmethod
+    def _argv():
+        return codex_ro.build_argv(
+            codex_ro.parse_args(["--prompt", "x", "--out-file", "o.txt"]), Path("o.txt")
+        )
+
+    def test_the_backend_is_named_on_windows_and_only_there(self):
+        argv = self._argv()
+        gesetzt = [a for a in argv if a.startswith("windows.sandbox=")]
+        if os.name == "nt":
+            self.assertEqual(gesetzt, [f'windows.sandbox="{codex_ro.WINDOWS_SANDBOX}"'])
+        else:
+            self.assertEqual(
+                gesetzt, [],
+                "the key does not exist off Windows, and naming it makes Codex "
+                "refuse its entire config",
+            )
+
+    def test_the_pinned_backend_is_the_one_that_works_everywhere(self):
+        """`elevated` runs the command as another user and cannot reach a working
+        directory inside the caller's profile -- which is where the harness
+        scratchpad lives. Measured: it failed there with CreateProcessWithLogonW
+        267 while `unelevated` read and refused the write in both locations."""
+        self.assertEqual(codex_ro.WINDOWS_SANDBOX, "unelevated")
+
+    def test_a_caller_cannot_swap_the_backend(self):
+        for versuch in ('windows.sandbox="elevated"', "windows.sandbox=x", "windows=1"):
+            with self.subTest(override=versuch):
+                with self.assertRaises(SystemExit) as caught:
+                    codex_ro.check_config_overrides([versuch])
+                self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+
+class BlindRunTests(unittest.TestCase):
+    """A reviewer that could not run one command still writes a confident answer.
+
+    This is the failure the sandbox bug produces, and it is invisible from
+    outside: exit 0, a valid thread_id, a full answer file. Every existing check
+    passes it through. The run is worthless and must not be reported as a review.
+    """
+
+    REFUSAL = (
+        'ERROR codex_core::tools::router: error=exec_command failed for '
+        '`"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command "Get-Content ziel.txt"`: '
+        'CreateProcess { message: "Rejected(\\"... rejected: blocked by policy\\")" }'
+    )
+    ERFOLG = 'exec "pwsh.exe" -Command "Get-Content ziel.txt"\n succeeded in 1335ms:\nINHALT'
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.err = self.dir / "stderr.txt"
+
+    def _blind(self, text):
+        self.err.write_text(text, encoding="utf-8")
+        return codex_ro.blind_run(self.err)
+
+    def test_every_command_refused_is_a_blind_run(self):
+        grund = self._blind(self.REFUSAL + "\n" + self.REFUSAL)
+        self.assertIsNotNone(grund)
+        self.assertIn("without reading anything", grund.lower().replace("  ", " "))
+
+    def test_the_elevated_backends_own_failure_counts_too(self):
+        """The second signature: the backend IS selected but cannot start the
+        process (CreateProcessWithLogonW 267). Different message, same blindness."""
+        self.assertIsNotNone(self._blind(
+            'exec_command failed for `pwsh.exe`: CreateProcessWithLogonW failed: 267'))
+
+    def test_one_refusal_among_successes_is_not_a_blind_run(self):
+        """⛔ The direction that matters more. A model that reaches for one illegal
+        command, is told no, and then does the job has produced a real review.
+        Failing that run would make the wrapper block normal work -- and a control
+        that blocks normal work gets switched off and then protects nothing."""
+        self.assertIsNone(self._blind(self.REFUSAL + "\n" + self.ERFOLG))
+        self.assertIsNone(self._blind(self.ERFOLG + "\n" + self.REFUSAL))
+
+    def test_an_ordinary_run_is_silent(self):
+        self.assertIsNone(self._blind(self.ERFOLG))
+        self.assertIsNone(self._blind(""))
+        self.assertIsNone(self._blind("some unrelated warning about MCP\n"))
+
+    def test_a_missing_stderr_file_is_not_an_accusation(self):
+        self.assertIsNone(codex_ro.blind_run(self.dir / "gibtsnicht.txt"))
+
+    def test_the_reason_names_the_file_to_look_in(self):
+        grund = self._blind(self.REFUSAL)
+        self.assertIn(str(self.err), grund)
+
+
 class SilentDeathTests(unittest.TestCase):
     """Upstream issue #10.1: a killed binary must not be reported as an auth failure."""
 

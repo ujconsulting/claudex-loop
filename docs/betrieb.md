@@ -165,12 +165,28 @@ Klartext-Token steht, gehört es in den Vault (`codex mcp add --bearer-token-env
 
 ## 4. Zwei Lehren aus dem ersten echten Lauf (26.08.2026)
 
-**1. Codex sieht `PLAN.md` nicht zuverlässig — Plantext inline in den Prompt.** Im ersten
-Lauf wurden *alle* Shell-Aufrufe von Codex mit `rejected: blocked by policy` abgewiesen,
-und die frisch angelegte `PLAN.md` war noch untracked. Ergebnis: Codex reviewte den
-Code-Kontext, aber **nicht den Plan** — und sagte das immerhin dazu. Eine ganze Runde für
-halbe Arbeit. Repo-Dateien liest Codex weiterhin selbst; nur auf die eigene, oft untrackte
-Plandatei ist kein Verlass.
+**1. Plantext inline in den Prompt — die Begründung dafür war allerdings falsch.** Im
+ersten Lauf wurden *alle* Shell-Aufrufe von Codex mit `rejected: blocked by policy`
+abgewiesen. Hier stand daraufhin, die frisch angelegte, noch untrackte `PLAN.md` sei der
+Grund, und der Nachsatz „Repo-Dateien liest Codex weiterhin selbst" war schlicht nicht
+wahr.
+
+⛔ **Korrektur 16.09.2026, gemessen.** Der Grund war ein anderer und viel größerer: unter
+Windows wählt `codex exec` ohne `[windows] sandbox` in der Config **gar kein**
+Sandbox-Backend aus und weist damit **jeden** Shell-Aufruf ab — Lesen eingeschlossen, in
+`read-only` wie in `workspace-write` gleichermaßen (nachgemessen auf codex-cli 0.149.1;
+upstream `openai/codex#42172`, `#44839`, `#43633`). Mit `git` hatte das nie etwas zu tun.
+
+Die Empfehlung bleibt trotzdem richtig, nur aus anderem Grund: Inlining bindet das Review
+an einen Hash und macht es unabhängig davon, ob die Plandatei überhaupt gespeichert ist.
+Der Schaden lag anderswo — das Inlining ließ das Plan-Review funktionieren und **verdeckte
+damit, dass Codex drei Wochen lang keine einzige Repo-Datei lesen konnte**. Genau so trat
+es am 16.09.2026 in `s100-scripte` wieder auf: Funde erst ab Runde 2, sichtbar nur dort,
+wo Quelltext von Hand in den Prompt kopiert worden war.
+
+Der Wrapper setzt das Backend seit **2.4.0** selbst (`windows.sandbox="unelevated"`) und
+bricht mit Exit 3 ab, wenn ein Lauf keinen einzigen Befehl ausführen konnte — ein
+Reviewer, der nichts lesen konnte, liefert sonst ein zuversichtliches Urteil über nichts.
 
 **2. `MAX_ROUNDS` zu erreichen ist kein Misserfolg.** Der erste Lauf endete formal ohne
 `APPROVED`, war aber konvergiert: 11 → 9 → 5 → 5 → 1 Funde, ab Runde 2 kein einziger

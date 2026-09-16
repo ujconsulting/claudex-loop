@@ -227,11 +227,18 @@ and gitignore it in the same step. Quote the path — on Windows it usually cont
 
 ### The review prompt (sent each round)
 
-⛔ **Inline the plan text; do not tell Codex to read `PLAN_FILE`.** `docs/betrieb.md`
-records why from the first real run: a freshly written plan is usually still untracked,
-Codex's shell calls came back `rejected: blocked by policy`, and it reviewed the
-surrounding code instead of the plan — then returned a confident verdict. Reading the
-file is best-effort; inlining is not. Inline `CONTEXT.md`/ADRs the same way when they
+⛔ **Inline the plan text; do not tell Codex to read `PLAN_FILE`.** Inlining binds the
+review to a hash and does not depend on the plan being saved, let alone committed.
+
+⛔ **Do not read the old reason for this rule as a description of the failure.** It said
+the plan was untracked, so `rejected: blocked by policy` was expected and repo files were
+still readable. Measured 2026-09-16: false on both counts. On Windows, `codex exec`
+without `[windows] sandbox` in the config selects **no sandbox backend at all** and
+refuses **every** shell call, reads included, in `read-only` and `workspace-write` alike
+(codex-cli 0.149.1; upstream `openai/codex#42172`). Inlining the plan made the review
+work and thereby hid that the reviewer could not open a single repo file — it answered
+from the prompt alone and sounded certain. `codex_ro.py` 2.4.0 pins the backend and exits
+3 on a run that executed nothing. Inline `CONTEXT.md`/ADRs the same way when they
 exist, and interpolate the resolved `PLAN_FILE` **path** only as a label, so a
 non-default plan cannot be signed off on the strength of a review of `PLAN.md`.
 
