@@ -81,6 +81,68 @@ class InstallTargetTests(unittest.TestCase):
         self.assertIn(f"github.com/{UPSTREAM}/", EN.read_text(encoding="utf-8"))
 
 
+class ExpectWorkdirDocumentationTests(unittest.TestCase):
+    """--expect-workdir (wrapper 2.5.0): an ASSERTION, not a selector.
+
+    docs/audit/2026-09-11-scope.md §5 / E-1: the flag compares the wrapper's actual cwd against an
+    absolute DIR and can only refuse (exit 2) — it never sets where Codex runs.
+    A translator could drop the whole paragraph and every other sync test
+    here would stay green (no mermaid/bash/yaml drift, same section count),
+    so this class checks presence directly, anchor by anchor, in both files.
+    The anchors are exactly the fragments this repo's own convention keeps
+    verbatim across languages: the flag name, the two-word contrast that
+    prevents the "it selects the cwd" misreading, and the wrapper's own
+    header-line format, which is a literal string, not prose.
+    """
+
+    ANCHOR_FLAG = "--expect-workdir"
+    ANCHOR_ASSERTION = "ASSERTION, not a SELECTOR"
+    ANCHOR_REFUSE_ONLY = "can only refuse"
+    ANCHOR_DEFAULT = "unset, behaviour as in 2.4.0"
+    ANCHOR_HEADER = "#   cwd:"
+
+    def test_both_readmes_name_the_flag(self):
+        for path in (EN, DE):
+            with self.subTest(readme=path.name):
+                self.assertIn(self.ANCHOR_FLAG, path.read_text(encoding="utf-8"))
+
+    def test_both_readmes_call_it_an_assertion_not_a_selector(self):
+        for path in (EN, DE):
+            with self.subTest(readme=path.name):
+                self.assertIn(self.ANCHOR_ASSERTION, path.read_text(encoding="utf-8"))
+
+    def test_both_readmes_say_it_can_only_refuse(self):
+        for path in (EN, DE):
+            with self.subTest(readme=path.name):
+                self.assertIn(self.ANCHOR_REFUSE_ONLY, path.read_text(encoding="utf-8"))
+
+    def test_both_readmes_state_the_default_is_unset(self):
+        for path in (EN, DE):
+            with self.subTest(readme=path.name):
+                self.assertIn(self.ANCHOR_DEFAULT, path.read_text(encoding="utf-8"))
+
+    def test_both_readmes_show_the_cwd_header_line(self):
+        for path in (EN, DE):
+            with self.subTest(readme=path.name):
+                self.assertIn(self.ANCHOR_HEADER, path.read_text(encoding="utf-8"))
+
+    def test_the_expect_workdir_example_invocation_is_identical(self):
+        """The example command is copied, not translated — same rule as any other."""
+
+        def block_with_flag(path):
+            for body in blocks(path, "bash"):
+                if self.ANCHOR_FLAG in body:
+                    return body
+            return None
+
+        en_block, de_block = block_with_flag(EN), block_with_flag(DE)
+        self.assertIsNotNone(en_block, "README.md has no bash example using --expect-workdir")
+        self.assertEqual(
+            en_block, de_block,
+            "the --expect-workdir example invocation drifted between the two READMEs",
+        )
+
+
 class TranslationSyncTests(unittest.TestCase):
     """Commands and the diagram are copied, not translated — so they must match."""
 

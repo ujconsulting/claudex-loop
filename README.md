@@ -32,10 +32,11 @@ flowchart LR
     C -- REVISE --> R["the producer arbitrates<br>and revises"]
     R -- same session --> C
     C -- APPROVED --> S["✍️ You sign off"]
+    C -. MAX_ROUNDS:<br>you break the tie .-> S
     S -. optional .-> D["🔨 BUILD<br>one model writes"]
     D --> I["🔬 CROSS-INSPECT<br>the other model<br>grades the diff"]
     I --> G["✅ You approve<br>the final diff"]
-    I -. optional gate .-> V["🧪 ACCEPTANCE GATE<br>dod · quality · security<br>+ docs · tests"]
+    I -. default on,<br>a skip is logged .-> V["🧪 ACCEPTANCE GATE<br>dod · quality · security<br>+ docs · tests"]
     V -. facing the network:<br>then it is required .-> X["🛡️ EXPOSURE PASS<br>own model, own effort<br>SAFE / UNSAFE"]
     V --> G
     X --> G
@@ -53,7 +54,7 @@ flowchart LR
 
 **Orange is whoever produces, green is whoever grades — not Claude and Codex.** The colours name *roles*, because in this fork the actor behind each one is configuration (see [The actor is configuration, not a name](#the-actor-is-configuration-not-a-name)). In the delegation arrangement the boxes swap models without the diagram changing.
 
-**Dotted edges are conditional.** Building is optional; so is the acceptance gate on the finished diff — *except* when the change faces the network, where it and its exposure pass are required and `EXPOSURE: UNSAFE` blocks the commit. Solid edges always happen. `audit`, `docs-backfill` and `setup` are deliberately absent: they are not steps in this loop at all — see [Beyond the plan](#beyond-the-plan-this-fork).
+**Dotted edges are conditional.** Building is optional. The acceptance gate on the finished diff is **on by default** — it may be skipped (opt-out, or the Codex quota is out and no fallback is chosen), but only with a logged reason; when the change faces the network, it and its exposure pass are required and `EXPOSURE: UNSAFE` blocks the commit. A plan that ended at `MAX_ROUNDS` reaches the same path once you break the tie. Every resolved plan carries a `claudex-gate: pending` marker, so a build in a *later* session still knows the gate is owed. Solid edges always happen. `audit`, `docs-backfill` and `setup` are deliberately absent: they are not steps in this loop at all — see [Beyond the plan](#beyond-the-plan-this-fork).
 
 ## The four phases
 
@@ -70,7 +71,7 @@ Two artifacts every run: `PLAN.md` (the *what*) and `PLAN-REVIEW-LOG.md` (the fu
 
 ## Beyond the plan (this fork)
 
-Phase 3 closes with an optional acceptance gate on the finished diff. **These four skills are not part of that loop** — they run on their own, on artefacts the loop never sees.
+Phase 3 closes with the acceptance gate on the finished diff — on by default, skippable only with a logged reason. **These four skills are not part of that loop** — they run on their own, on artefacts the loop never sees.
 
 | Skill | Judges | Verdict |
 |---|---|---|
@@ -156,6 +157,14 @@ product is controls:
   fails **silently while reporting success** is worse than its absence, because it
   spends the trust it has not earned. Everything above this line was found by someone
   looking; this one had to be found by something watching.
+- **A plan to close this exact blind spot went five rounds without approval.** The
+  `--expect-workdir` design above is what came out: round 1 found a CRITICAL that
+  inverted it — a selector flag, not an assertion, arriving unattended on the same
+  prefix-matched allowlist entry as everything else the wrapper allows; round 3 found
+  a fail-open the author introduced while fixing round 2 — `os.path.realpath("")`
+  equals the cwd, so an unset `$TARGET` would have confirmed itself. `MAX_ROUNDS` was
+  reached without `VERDICT: APPROVED`; the owner resolved it by explicit decision, and
+  the closing `code-review` gate is owed like any other plan that ends that way.
 
 Three independent passes over the same 500 lines, each finding what the previous one
 missed. That is the argument for the whole method, made against its own author.
@@ -268,7 +277,9 @@ one:
 - **`hooks/`** — the `PreToolUse` guard. The setup instructions recommend an allowlist
   entry for the wrapper, and *the guard is the only thing keeping a matched command from
   carrying a second one along on the same approval.* An install with the allowlist and
-  without the hook is worse than no install at all.
+  without the hook is worse than no install at all. Next to it, `gate_reminder.py`: at
+  `git commit` it mentions every `PLAN.md` whose closing gate is still `pending` — once
+  per session, a reminder only, it never blocks.
 
 A plugin install wires `hooks/hooks.json` up on its own; a manual copy cannot, because
 there is no per-user path Claude Code reads hooks from for loose skills. Rather than
@@ -344,6 +355,24 @@ Two gates decide *where* it writes, both from [upstream PR #12](https://github.c
 **And a reviewer that could not read is not a reviewer.** That failure is silent — exit 0, a valid `thread_id`, a full answer file — so every ordinary check passes it through and a verdict gets recorded for a review of nothing. The wrapper now reads its own stderr and exits **3** when a run had shell refusals and not one successful command. Deliberately not "any refusal": a model that reaches for one illegal command, is told no, and then does the job has produced a real review, and a control that blocks normal work gets switched off.
 
 Path arguments are confined, and **write targets more tightly than reads**: the wrapper deletes `--out-file` and truncates `--err-file`, so an unbounded path argument would be a write primitive on a call the allowlist approved without a prompt. Reads may additionally use `--allow-path` / `CLAUDEX_ALLOWED_PATHS`; writes may not — a caller cannot widen its own confinement. Write targets must sit in the repo, in `<repo>/.claudex-tmp/`, or in the OS temp dir — POSIX additionally accepts an explicit `CLAUDEX_SCRATCH_DIR`. Each candidate is screened up its whole ancestry, and **the screen is the sticky bit, not world-writability**: `/tmp` is `drwxrwxrwt`, and the sticky bit is precisely the rule that only an entry's owner may rename or unlink it — which is what makes `mkdtemp` trustworthy there. So a private directory under `/tmp` passes; a world-writable parent *without* the sticky bit does not, nor does a sticky one owned by someone else, who could still remove our entries. A first version screened on world-writability alone: it locked out every harness scratchpad on Linux while accepting the identical layout on macOS, where `gettempdir()` happens to return a per-user path. Only CI showed that (2026-09-03). **On Windows `CLAUDEX_SCRATCH_DIR` is refused outright as of 2.3.0** (audit 2026-09-02, CRITICAL), because Windows offers no cheap equivalent of that test, and the repo/`.claudex-tmp/`/temp-dir candidates are therefore *assumed* private there rather than proven so — a documented residual gap, not a guarantee. A target that is a symlink, a Windows junction, a directory, a file that already hard-links to other data, or the same file as another output is refused outright. `python -m unittest discover -s tests` covers the refusals; the sandbox behaviour itself is a measurement, recorded in the file's docstring.
+
+**`--expect-workdir DIR`: the scope is asserted, never selected.** The working directory decides more than what gets reviewed — it decides which `AGENTS.md` Codex loads into the prompt unasked, so it is itself an egress parameter, and until 2.5.0 nothing displayed it. Incident 2026-09-11: eight review rounds ran with the wrapper's cwd in a production documentation repo instead of the intended throwaway one, and nothing said so. `DIR` must be an **absolute** path; the wrapper compares it against its own working directory and refuses — exit 2 — on any difference, before Codex is located, before any file is created, and before the previous round's verdict file is deleted. It is an **ASSERTION, not a SELECTOR**: it can only refuse, it never changes where Codex runs (default: unset, behaviour as in 2.4.0). Every other spelling of the same place is refused on purpose — a symlink or junction alias, an 8.3 short name, a `subst`/mapped-drive alias, a working directory itself reached through a link. The value is compared **as typed**: case and slash direction (Windows) and one trailing separator are the only tolerance, so `<cwd>\sub\..`, a trailing dot or space and a drive-rooted `\repo` are refused like any alias (the first build ran the value through `abspath()` and accepted all of them — found by the closing review gate, not by the tests). A relative value, `.`, an empty value, or any UNC/device path (`\\srv\share`, `//srv/share`, `\\?\…`) is refused before the filesystem is touched at all. A mapped network drive is not recognised as a network path — an accepted residual risk. The wrapper's header now always names the directory it actually ran in:
+
+```
+# codex read-only | exec (new) | gpt-5.6-terra/high | timeout 600s | wrapper 2.5.0
+#   cwd: D:\…\throwaway-repo   (git repo)
+```
+
+The only supported way to point a review at a chosen repo is a session **started** in that directory — a `cd` mid-session does not persist between tool calls, and the guard denies the one call that would combine both (measured, see [`docs/audit/2026-09-11-scope.md`](./docs/audit/2026-09-11-scope.md)). The skills take `target=<absolute path>` for this and ask when it is missing, never deriving it from `$PWD`; `--expect-workdir "$TARGET"` is the net under that discipline, not a replacement for it:
+
+```bash
+python tools/codex_ro.py --expect-workdir "$TARGET" \
+  --model "$MODEL" --effort "$EFFORT" \
+  --prompt-file "$SCRATCH_DIR/review-prompt-r$ROUND.txt" \
+  --out-file "$SCRATCH_DIR/codex-verdict-r$ROUND.txt"
+```
+
+A first design, `--workdir DIR` — a selector that would have set the child's cwd — was rejected as CRITICAL in plan review: the allowlist entry is a *prefix* rule, so the flag would have arrived unattended and handed any caller a way to choose which project's instructions leave the machine. The inversion to an assertion removed exactly that.
 
 `setup` copies it to each repo as `tools/codex_ro.py`, because a permission rule has to name a stable path and the plugin directory carries a version hash. Copies drift — [`scripts/wrapper_drift.py`](./scripts/wrapper_drift.py) reports which ones have fallen behind and `--update` levels them.
 

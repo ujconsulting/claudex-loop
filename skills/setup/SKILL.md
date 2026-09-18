@@ -192,6 +192,14 @@ Der Scope gehört an **zwei** Stellen: in `AGENTS.md` (Codex liest sie automatis
 in die `CLAUDE.md` (damit Claude ihn im Review-Prompt wiederholt). Nicht darauf
 vertrauen, dass Codex von selbst wegschaut.
 
+⛔ **Tabu-Einträge pfadneutral/kategorisch formulieren — nie mit einem echten
+Kunden-, Personen- oder Hostnamen.** Im Vorfall, der diese Regel auslöste, stand
+in der `AGENTS.md` eines Zielprojekts ein realer Kundenpfad als Tabu-Eintrag —
+und `AGENTS.md` lädt Codex CLI automatisch in jeden Prompt. Die Liste, die
+Exponierung verhindern soll, war damit selbst der exponierte Posten. Richtig:
+„Kundenverzeichnisse unterhalb `…/kunden/*`" statt eines konkreten Kundennamens;
+„Maschinen-/Hostnamen der Betriebs-Doku" statt eines konkreten Hostnamens.
+
 ### 4. Prüfkatalog schreiben — projektspezifisch, nicht generisch
 
 Der Reviewer-Abschnitt in `AGENTS.md` (Vorbild: `s100-scripte`) beginnt mit der Rolle:
@@ -277,6 +285,39 @@ Schreibzugriff **wortlos**. Dann den Nutzer um Freigabe bitten, statt den Eintra
 stillschweigend wegzulassen. Die Datei enthält MCP-Header mit Klartext-Token — gezielt
 patchen, nichts davon ins Log oder in eine Antwort kopieren.
 
+<!-- claudex-target:begin -->
+### Review target (`target=`)
+
+The skill argument `target=<absolute path>` (same `key=value` grammar as
+`scope=` / `SPEC_FILE=`) names the directory under review. If it is missing,
+ASK the human for it. ⛔ Never derive it from `$PWD`, `$(pwd)`, `.`, the
+harness's working directory, or the output of any command — a value the
+session derives from itself confirms itself, which is the incident this
+exists for.
+
+Precondition: the session must have been STARTED in exactly this directory.
+A `cd` does not persist between tool calls, and a `cd … &&` in front of the
+wrapper call is denied by the guard — reviewing some other repo from here is
+not supported; start a session there instead.
+
+Show the value to the human BEFORE the first wrapper call:
+
+```bash
+# TARGET is the literal value of the skill argument target= -- substituted by whoever
+# runs this block. Copied unchanged it fails closed: the wrapper refuses a non-absolute value.
+TARGET='<target= argument>'
+echo "Review scope: $TARGET"
+```
+
+The wrapper refuses with exit 2 when `$TARGET` is not the working directory —
+that is a STOP: tell the human, do not retry with a different value. A
+different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
+mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
+the flag yet. Update it from the plugin
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+and rerun. ⛔ Never drop the flag to make the error go away.
+<!-- claudex-target:end -->
+
 ### 10. Verifizieren (Pflicht, kein „müsste jetzt gehen")
 
 Der Ping läuft über den Wrapper — wie jeder andere Codex-Aufruf auch. `docs/betrieb.md`
@@ -286,7 +327,7 @@ Verifikationsschritt eine Konfiguration, die im echten Betrieb gar nicht verwend
 
 ```bash
 printf 'Antworte nur mit: PING-OK\n' > "$SCRATCH_DIR/ping.txt"
-python tools/codex_ro.py --effort low --timeout 120 \
+python tools/codex_ro.py --expect-workdir "$TARGET" --effort low --timeout 120 \
   --prompt-file "$SCRATCH_DIR/ping.txt" \
   --out-file "$SCRATCH_DIR/ping-out.txt" \
   --err-file "$SCRATCH_DIR/ping-err.txt"

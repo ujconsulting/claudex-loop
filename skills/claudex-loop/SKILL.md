@@ -225,6 +225,39 @@ and gitignore it in the same step. Quote the path — on Windows it usually cont
 **A round is not complete until its output is copied into `LOG_FILE`.**
 (upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 
+<!-- claudex-target:begin -->
+### Review target (`target=`)
+
+The skill argument `target=<absolute path>` (same `key=value` grammar as
+`scope=` / `SPEC_FILE=`) names the directory under review. If it is missing,
+ASK the human for it. ⛔ Never derive it from `$PWD`, `$(pwd)`, `.`, the
+harness's working directory, or the output of any command — a value the
+session derives from itself confirms itself, which is the incident this
+exists for.
+
+Precondition: the session must have been STARTED in exactly this directory.
+A `cd` does not persist between tool calls, and a `cd … &&` in front of the
+wrapper call is denied by the guard — reviewing some other repo from here is
+not supported; start a session there instead.
+
+Show the value to the human BEFORE the first wrapper call:
+
+```bash
+# TARGET is the literal value of the skill argument target= -- substituted by whoever
+# runs this block. Copied unchanged it fails closed: the wrapper refuses a non-absolute value.
+TARGET='<target= argument>'
+echo "Review scope: $TARGET"
+```
+
+The wrapper refuses with exit 2 when `$TARGET` is not the working directory —
+that is a STOP: tell the human, do not retry with a different value. A
+different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
+mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
+the flag yet. Update it from the plugin
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+and rerun. ⛔ Never drop the flag to make the error go away.
+<!-- claudex-target:end -->
+
 ### The review prompt (sent each round)
 
 ⛔ **Inline the plan text; do not tell Codex to read `PLAN_FILE`.** Inlining binds the
@@ -273,7 +306,7 @@ SPEC=$(python scripts/claudex_roles.py --spec plan-review) || exit 2
 MODEL=$(echo "$SPEC" | sed -n 's/.*model=\([^ ]*\).*/\1/p')
 EFFORT=$(echo "$SPEC" | sed -n 's/.*effort=\([^ ]*\).*/\1/p')
 
-python tools/codex_ro.py --model "$MODEL" --effort "$EFFORT" \
+python tools/codex_ro.py --expect-workdir "$TARGET" --model "$MODEL" --effort "$EFFORT" \
   --prompt-file "$SCRATCH_DIR/review-prompt.txt" \
   --out-file "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" \
   --err-file "$SCRATCH_DIR/codex-stderr-r$ROUND.txt"
@@ -304,7 +337,7 @@ inlined again, per the rule below), then:
 
 ```bash
 ROUND=$((ROUND + 1))
-python tools/codex_ro.py --resume "$THREAD_ID" --model "$MODEL" --effort "$EFFORT" \
+python tools/codex_ro.py --expect-workdir "$TARGET" --resume "$THREAD_ID" --model "$MODEL" --effort "$EFFORT" \
   --prompt-file "$SCRATCH_DIR/review-prompt-r$ROUND.txt" \
   --out-file "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" \
   --err-file "$SCRATCH_DIR/codex-stderr-r$ROUND.txt"
@@ -333,6 +366,11 @@ forever at ~0% CPU under a non-interactive driver without it.
      file, and STOP to tell the user. An empty verdict file on exit 0 is the documented
      auth/quota signature (see FALLBACK.md) — treat the FIRST one as a possible stumble
      worth one retry, and the second as terminal.
+   - **Wrapper exit 3 is an INVALID ROUND as well** — whatever the verdict file says. It
+     means the reviewer's shell was refused every command and it read no file (Windows
+     without a sandbox backend, wrapper ≥ 2.4.0); the verdict was written from the prompt
+     alone. Log `## Round <n> — INVALID (exit 3, reviewer read nothing)` and do not count
+     it as an approval.
 3. If round > `MAX_ROUNDS` → break to Resolution (deadlock).
 
 ### If Codex dies mid-loop (quota, credits, outage) — degrade, don't dead-end
@@ -348,7 +386,28 @@ Full protocol: [FALLBACK.md](../../FALLBACK.md). The short form:
 
 ### Resolution (you sign off — final gate)
 - **APPROVED:** present the final `PLAN_FILE`, a 3-bullet summary of what the loop improved, and the round count. **Optional cold-read before sign-off:** the APPROVED came from the thread that negotiated the plan for N rounds — right for checking prior findings, but it can anchor the closing verdict. Offer one extra pass from a FRESH read-only session (same review prompt, plan inlined, no access to the argument) as a cheap anchoring control — the same fresh-eyes mechanism Phase 3 already uses. Its verdict is advisory: a fresh REVISE doesn't reopen the loop, it goes to the user as a flagged disagreement — and it is logged like any round (`## Cold-read — fresh session` + critique verbatim + Claude's per-finding disposition), never only mentioned in the chat. Then ask: *"Interrogated + survived N rounds of Codex. Implement it now — Codex builds it (`/build`), Claude builds it, or stop here?"* Code only on a yes.
-- **MAX_ROUNDS hit without APPROVED (deadlock):** do NOT fake convergence. List each unresolved point + Claude's counter-position; hand it to the user to break the tie. A flagged disagreement beats a false "approved."
+- **MAX_ROUNDS hit without APPROVED (deadlock):** do NOT fake convergence. List each unresolved point + Claude's counter-position; hand it to the user to break the tie. A flagged disagreement beats a false "approved." **If the user breaks the tie and decides to build, the build takes the same path as after APPROVED** — Phase 3, the post-build cross-inspection and the closing gate. A plan that ended in deadlock needs the gate more, not less.
+- **Either outcome — write the gate anchor into `PLAN_FILE`.** Append this section as the plan's last one, verbatim apart from the two paths:
+
+  ```markdown
+  ## Closing gate (after the build)
+
+  <!-- claudex-gate: pending -->
+
+  Whoever builds this plan — this session or a later one — owes the closing gate before
+  the work counts as done: the post-build cross-inspection and
+  `/claudex-loop:code-review SPEC_FILE=<PLAN_FILE> LOG_FILE=<LOG_FILE> scope=dod,quality,security`.
+  Afterwards set the marker to `claudex-gate: done`. If the gate cannot run (Codex quota
+  out and no fallback, or the user declines), log `## Closing gate skipped — <reason>` in
+  `LOG_FILE` and set `claudex-gate: skipped`. Skipping is allowed; skipping silently is not.
+  ```
+
+  **Why it lives in the plan and not only here:** measured 2026-09-18 across every log in the
+  largest user repo — the gate had never run once. Every recent run ended at `MAX_ROUNDS`,
+  that branch had no path to the gate, and the build happened days later in a session that
+  never loaded this skill. The plan travels to that session; this text does not. The
+  plugin's `gate_reminder` hook reads the marker at `git commit` and reminds — it never
+  blocks, because the gate costs quota and quota runs out.
 - **Either outcome, close with the residual risk: which files no round ever opened.** An `APPROVED` verdict covers the surface that was actually read, and rounds tend to keep re-reading the files the plan names. Diff the set of files opened across all rounds against the files touching the same shared state, and report the remainder as **unreviewed** rather than sound. ([upstream PR #12](https://github.com/chaseai-yt/claudex-loop/pull/12))
 
 ### PHASE 3 (optional) — BUILD (Codex ↔ Claude, roles flipped)
@@ -365,9 +424,11 @@ The doctrine is *whoever made the thing never checks the thing* — that applies
 
 Opt-out: `inspect=off` at invocation or the user declining at Resolution. Skipping silently is not allowed — the log must show either the inspection or the explicit opt-out. (Cost: one ~2-5 min Codex invocation at the end of the build; forgetting to ask for review is exactly the failure mode this default exists to prevent.)
 
-### Optional second gate — acceptance review (`code-review`)
+### Closing gate — acceptance review (`code-review`), default on
 
-After the cross-inspection (whichever model built), offer the **`code-review`** skill as a parameterizable acceptance gate on top: a fresh read-only Codex session judges the finished work on `dod` (everything implemented, Definition of Done met), `quality` (readability, clean code, documentation) and `security` — each with its own verdict line, findings arbitrated by Claude, appended to the same `LOG_FILE`. Scope is selectable (`scope=dod,quality,security`); invoke with `SPEC_FILE=<PLAN_FILE>` and the same `LOG_FILE` so one artifact tells the whole story. Offer it, don't force it — the user opts in per run (high-stakes builds are the natural case).
+After the cross-inspection (whichever model built), run the **`code-review`** skill as the acceptance gate: a fresh read-only Codex session judges the finished work on `dod` (everything implemented, Definition of Done met), `quality` (readability, clean code, documentation) and `security` — each with its own verdict line, findings arbitrated by Claude, appended to the same `LOG_FILE`. Invoke with `SPEC_FILE=<PLAN_FILE>`, the same `LOG_FILE` and `scope=dod,quality,security` (add `docs,tests` when behaviour changed).
+
+**Default on, never a blocker.** It runs unless the user opts out for this run, or it cannot run: check `python scripts/codex_usage.py` first; with the quota out, the user picks wait / fallback reviewer / skip ([FALLBACK.md](../../FALLBACK.md)). A skip is logged as `## Closing gate skipped — <reason>` and the plan's marker set to `claudex-gate: skipped`; after a run it is set to `claudex-gate: done`. What is not allowed is ending the build without either. (Until 2026-09-18 this said "offer it, don't force it" — and across every recorded run it was never offered once.)
 
 **One exception: a change that faces the network.** If the built diff touches routes, authentication, sessions, webhooks, `ports:`, proxy/tunnel or DNS config, `code-review` is **required** before the human gate, and its exposure pass runs with it — a separate session on the `exposure-review` role (own model and effort, `python scripts/claudex_roles.py --spec exposure-review`) that judges only the exposed components with verdict `EXPOSURE: SAFE/UNSAFE`. `UNSAFE` blocks the commit. Say at the gate whether the pass ran; an exposed change without it is presented as *not reviewed*, not as done.
 
@@ -380,6 +441,7 @@ After the cross-inspection (whichever model built), offer the **`code-review`** 
 - The loop ALWAYS terminates at `MAX_ROUNDS`.
 - Claude is final arbiter on every REVISE — incorporate good critiques, reject bad ones *with a logged reason*. Don't cave to everything (defeats the cross-model check) and don't ignore it (defeats the point).
 - Code only after the user's final sign-off.
+- **Every resolved plan carries the gate anchor** (`claudex-gate: pending` + the closing-gate section, see Resolution), and a finished build flips it to `done` or `skipped` — never leaves it pending.
 - `LOG_FILE` is the deliverable — keep the whole argument. **Findings ledger rule:** every reviewer output — Phase 2 rounds, a fallback round (valid or an INVALID attempt, labeled as such), an optional cold-read, the post-build inspection, any recheck, and every `code-review` pass — is appended to `LOG_FILE` **verbatim, at the moment it arrives**, followed by Claude's per-finding disposition (accepted → what changed / rejected → why). Nothing about a review lives only in the chat transcript; if it isn't in the log, it didn't happen. `scripts/fallback_review.py --append-log <LOG_FILE>` does this mechanically for fallback rounds.
 - `CONTEXT.md` stays a glossary only — never implementation details.
 

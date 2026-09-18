@@ -52,6 +52,53 @@ WHAT AN ACCEPTED CALL STILL CANNOT DO (audit 2026-08-30, two CRITICALs)
       CRITICAL). That override is gone; only PATH lookup and the fixed macOS
       bundle path resolve which binary runs.
 
+WHY --expect-workdir IS AN ASSERTION, NOT A SELECTOR (2026-09-18, docs/audit/2026-09-11-scope.md §5,
+after Codex rejected an earlier `--workdir DIR` selector as CRITICAL in round 1
+of that plan's review)
+    The cwd this wrapper runs in is not merely "where relative paths resolve" --
+    it decides which AGENTS.md Codex auto-loads into the prompt, unasked. That
+    makes cwd an EGRESS parameter, not just a scope choice. And because this
+    wrapper's own permission allowlist matches only a command PREFIX
+    (`Bash(python tools/codex_ro.py*)`), a `--workdir DIR` selector that set
+    `Popen(cwd=DIR)` would arrive completely unattended -- exactly the shape of
+    mistake this wrapper exists to prevent (the 2026-09-11 incident: eight
+    review rounds ran with cwd in a production docs repo instead of the
+    intended throwaway one, and Codex silently ingested that repo's AGENTS.md).
+    `--expect-workdir DIR` inverts that: it can only ever REFUSE, never
+    redirect. A caller cannot reach anywhere with it that it could not already
+    reach by starting the session there (measured: a `cd` only holds for the
+    single tool call that issues it, and the one call that would `cd` AND
+    invoke the wrapper is refused by hooks/wrapper_guard.py).
+
+    Order of the check (pinned by tests, see T20): capture cwd once; refuse
+    lexically with NO filesystem access (empty/whitespace, control characters,
+    a UNC/device prefix after normalising backslashes to forward slashes,
+    anything not `os.path.isabs`); a plain string comparison of the value AS
+    TYPED, `normcase(DIR) == normcase(cwd)` give or take one trailing separator
+    -- no abspath()/normpath(), which would accept `<cwd>/sub/..` or a trailing
+    dot (closing gate, 2026-09-18) -- and no prefix match; the cwd's own alias-freedom,
+    `normcase(realpath(cwd)) == normcase(cwd)`; and only then, as a belt,
+    `os.path.samefile(cwd, DIR)`. There is no fallback of any kind:
+    `os.path.realpath("")` and `os.path.realpath("missing/..")` both equal the
+    current directory, which would have let an empty or malformed value
+    silently confirm itself -- an earlier draft of this plan proposed exactly
+    that fallback and it was measured and dropped (see check_expected_workdir).
+
+    Costs accepted rather than chased:
+      - an 8.3 short name for the expectation does not match the long cwd --
+        realpath() is applied only to cwd itself, never to the expectation
+      - a symlink, junction, `subst` drive or mapped-network-drive ALIAS of
+        the cwd is refused, both as the expectation (caught by the plain
+        string comparison -- an alias is a different string) and, where the
+        platform's own getcwd()/chdir() leave it observable, as the cwd
+        itself (caught by the alias-freedom check)
+      - on macOS, a case-variant path to the same directory is refused --
+        the string comparison is normcase()'d for Windows, not case-folded
+        for every platform
+      - a mapped network drive (`Z:\repo` on an SMB share) is not detected as
+        a network path; it passes the lexical UNC check and reaches
+        samefile(), the same accepted residual risk as allowed_roots() above
+
 ⛔ RESIDUAL GAPS, stated rather than papered over (audit 2026-09-02):
     - On Windows, the repo, `.claudex-tmp/` and the OS temp dir are still ASSUMED
       private, not verified -- `_is_private_dir()` cannot read a directory's
@@ -103,7 +150,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-WRAPPER_VERSION = "2.4.0"
+WRAPPER_VERSION = "2.5.0"
 
 DEFAULT_MODEL = "gpt-5.6-terra"
 EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
@@ -211,6 +258,193 @@ def _repo_root(start: Path) -> Path | None:
     return None
 
 
+# --- --expect-workdir (wrapper 2.5.0) --------------------------------------------
+# See the module docstring, "WHY --expect-workdir IS AN ASSERTION, NOT A
+# SELECTOR", for the incident and the reasoning. What follows is only the
+# mechanics; the order is the control (T20) and is not to be reshuffled.
+
+
+def capture_cwd() -> str:
+    """Read the process's cwd exactly ONCE, so every later use of "the cwd" --
+    the --expect-workdir check, the header, _repo_root(), allowed_roots() --
+    agrees with what was actually checked. Before this, main() called
+    Path.cwd() three separate times; a directory deleted or unmounted between
+    the first and a later call would re-open the exact TOCTOU gap
+    --expect-workdir exists to close (T24).
+    """
+    try:
+        return os.getcwd()
+    except OSError:
+        die(
+            "<cwd unavailable>: the current working directory could not be "
+            "determined.",
+            EXIT_REFUSED,
+        )
+        raise AssertionError("unreachable")
+
+
+def _escape_path_for_message(raw: str) -> str:
+    """Render a path for an error message with every non-printable character
+    escaped as \\xNN (byte range) or \\uNNNN (beyond it), and everything else
+    -- including "Büro", "café", any ordinary non-ASCII letter -- left alone.
+
+    `raw.encode("unicode_escape")` was rejected as the whole-string shortcut:
+    it also mangles every non-ASCII *printable* character, which would have
+    turned a perfectly normal "D:\\...\\Büro\\..." path into noise in the one
+    place (an error message) where a human most needs to read it. Only
+    characters that could smuggle a fake log line into stderr -- the control
+    characters T14/T20 refuse as input in the first place -- need hiding, and
+    this is also why the message can safely show the raw value even for a
+    --expect-workdir that was refused for containing one.
+    """
+    out = []
+    for ch in raw:
+        if ch.isprintable():
+            out.append(ch)
+        elif ord(ch) <= 0xFF:
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            out.append(f"\\u{ord(ch):04x}")
+    return "".join(out)
+
+
+def _mismatch_refused(raw: str, cwd: str) -> None:
+    """The one message shape every "these do not match" refusal uses. Only the
+    two paths, escaped -- never a filesystem exception's own text (T17), which
+    would hand an unattended caller a free oracle into this machine's errors.
+    """
+    die(
+        "--expect-workdir does not match the actual working directory; "
+        "refusing rather than guess which one is right.\n"
+        f"  expected: {_escape_path_for_message(raw)}\n"
+        f"  actual:   {_escape_path_for_message(cwd)}",
+        EXIT_REFUSED,
+    )
+
+
+def _as_typed(path: str) -> str:
+    """The comparison key for --expect-workdir: normcase() and at most ONE
+    trailing separator removed. Deliberately NOT abspath()/normpath() -- those
+    collapse `..`, `.`, doubled separators and (on Windows) trailing dots and
+    spaces, which turns "names this path" into "names something that reduces
+    to it". See step 2 of check_expected_workdir().
+    """
+    key = os.path.normcase(path)
+    return key[:-1] if key.endswith(os.sep) else key
+
+
+def check_expected_workdir(raw: str, cwd: str) -> None:
+    """Refuse unless `raw` (--expect-workdir) and `cwd` name the same,
+    alias-free place. An ASSERTION, never a selector -- see the module
+    docstring. `cwd` is expected to already be capture_cwd()'s result; this
+    function never calls os.getcwd() itself.
+
+    Order (T20 pins it -- samefile() must be provably unreached for anything
+    refused before it reaches that line):
+      1. lexical refusals, no filesystem access at all
+      2. a plain string comparison (no prefix match)
+      3. the cwd's own alias-freedom (realpath() is applied ONLY to cwd here,
+         never to `raw` -- resolving the expectation would defeat the very
+         alias check step 2 already performs on it)
+      4. samefile() as a belt, reached only once 2 and 3 already agree
+
+    No fallback of any kind (measured, not assumed): os.path.realpath("") and
+    os.path.realpath("missing/..") both equal the current directory, so a
+    fallback that resolved an unresolvable expectation would have let an
+    empty or malformed value silently confirm itself -- a control that is
+    worse than none, because it manufactures confidence instead of refusing.
+    """
+    # 1. Lexical -- deliberately BEFORE any os.path call that could touch the
+    #    filesystem for `raw`. An unset $TARGET expands to empty; that must
+    #    refuse here, not reach samefile() and produce some OS-specific error.
+    if not raw or not raw.strip():
+        die(
+            "--expect-workdir is empty or whitespace; refusing rather than "
+            "guessing the intended scope.",
+            EXIT_REFUSED,
+        )
+    if any(not ch.isprintable() for ch in raw):
+        die(
+            "--expect-workdir contains a non-printable character; refusing "
+            "rather than risk it forging a log line: "
+            f"{_escape_path_for_message(raw)}",
+            EXIT_REFUSED,
+        )
+    # `\` -> `/` before the UNC/device check so \\srv, //srv, \\?\ and \\.\
+    # are all caught by one test, on every platform -- POSIX included, where
+    # it is stricter than necessary but never wrong.
+    if raw.replace("\\", "/").startswith("//"):
+        die(
+            "--expect-workdir is a UNC or device path, not a plain absolute "
+            f"directory: {_escape_path_for_message(raw)}",
+            EXIT_REFUSED,
+        )
+    if not os.path.isabs(raw):
+        die(
+            "--expect-workdir must be an absolute path -- this also catches "
+            "'.', './', '.\\', './.' and 'missing/..' in one rule: "
+            f"{_escape_path_for_message(raw)}",
+            EXIT_REFUSED,
+        )
+
+    # 2. Identity by STRING, not by what the filesystem resolves either side
+    #    to. No prefix match: a subdirectory or the parent of cwd is not cwd.
+    #
+    #    ⛔ The value is compared AS TYPED. Until the closing gate (code-review,
+    #    2026-09-18) this line ran it through os.path.abspath() first -- and
+    #    abspath() is a normaliser: `<cwd>\sub\..`, `<cwd>\.`, a trailing dot or
+    #    space and the drive-rooted `\repo` (which ntpath.isabs() accepts up to
+    #    Python 3.12) all collapsed to the cwd and were ACCEPTED. The only
+    #    tolerance left is normcase() -- case and slash direction, Windows only
+    #    -- and one trailing separator. os.getcwd() already returns the fully
+    #    qualified, normalised form, so anything else is a different string.
+    if _as_typed(raw) != _as_typed(cwd):
+        _mismatch_refused(raw, cwd)
+
+    # 3. cwd must be its own real path -- a symlink/junction/subst alias that
+    #    happens to normalise to the same STRING as a resolved cwd cannot
+    #    exist (resolving `raw` is exactly what step 2 deliberately does not
+    #    do), but cwd reaching this point via an alias is still possible on
+    #    platforms whose getcwd()/chdir() do not canonicalise it away. Only
+    #    cwd is ever resolved here -- never `raw` -- so this cannot become an
+    #    oracle for the expectation.
+    try:
+        cwd_real = os.path.normcase(os.path.realpath(cwd))
+    except OSError:
+        die(
+            "the working directory could not be resolved to its real path; "
+            "refusing rather than trust a possible alias.",
+            EXIT_REFUSED,
+        )
+        raise AssertionError("unreachable")
+    if cwd_real != os.path.normcase(cwd):
+        die(
+            "the working directory is reached through a link, junction or "
+            "other alias, not its real path. Start the session at the real "
+            f"path instead: {_escape_path_for_message(cwd)}",
+            EXIT_REFUSED,
+        )
+
+    # 4. Belt. Reached only once 2 and 3 already agree -- called through the
+    #    module attribute (os.path.samefile) so a test can patch it and prove
+    #    it is never reached for anything refused above (T20).
+    try:
+        identical = os.path.samefile(cwd, raw)
+    except (OSError, ValueError):
+        die(
+            "the working directory could not be confirmed identical to "
+            "--expect-workdir even though the two paths compare equal as "
+            "strings; refusing rather than trust a filesystem check that "
+            "failed.\n"
+            f"  expected: {_escape_path_for_message(raw)}\n"
+            f"  actual:   {_escape_path_for_message(cwd)}",
+            EXIT_REFUSED,
+        )
+        raise AssertionError("unreachable")
+    if not identical:
+        _mismatch_refused(raw, cwd)
+
+
 SCRATCH_DIR_ENV = "CLAUDEX_SCRATCH_DIR"
 
 
@@ -286,7 +520,9 @@ def _is_private_dir(path: Path) -> bool:
     return True
 
 
-def allowed_roots(extra: list[str], for_write: bool = False) -> list[Path]:
+def allowed_roots(
+    extra: list[str], for_write: bool = False, cwd: Path | None = None
+) -> list[Path]:
     """Roots a path argument may point into: the repo, the OS temp dir, opt-ins.
 
     The repo, because that is the work. The temp dir, because prompt and verdict
@@ -300,8 +536,17 @@ def allowed_roots(extra: list[str], for_write: bool = False) -> list[Path]:
     approved as a "read-only review". A caller may not widen its own confinement
     for writes. Reads keep the opt-in: pointing the wrapper at a prompt file
     somewhere else grants nothing the caller could not do with `cat`.
+
+    `cwd` (2.5.0, docs/audit/2026-09-11-scope.md §5/E-2): `None` keeps the previous `Path.cwd()`
+    behaviour, for every caller that does not care where the value came from.
+    main() instead passes the SAME cwd it already captured once via
+    capture_cwd() and checked against --expect-workdir, so this function never
+    calls Path.cwd() a second time during a run. The root POLICY here is
+    unchanged -- only the source of "the cwd" is now a parameter. The
+    --expect-workdir VALUE itself must never reach this function (T18); only
+    the already-verified cwd does.
     """
-    cwd = Path.cwd().resolve()
+    cwd = (cwd if cwd is not None else Path.cwd()).resolve()
     repo = (_repo_root(cwd) or cwd).resolve()
     roots = [repo, Path(tempfile.gettempdir()).resolve()]
     if for_write:
@@ -536,8 +781,17 @@ def resolve_in_roots(raw: str, roots: list[Path], label: str, widenable: bool = 
 
     `widenable=False` for write targets: --allow-path does not reach them, so
     suggesting it would send the reader after a fix that cannot work.
+
+    A RELATIVE `raw` makes realpath() consult the current directory itself
+    (os.getcwd() internally); if that directory has vanished since
+    capture_cwd() ran -- T24 -- that raises OSError here, and this is refused
+    like any other unresolvable path rather than left to become a traceback.
     """
-    path = Path(os.path.realpath(Path(raw).expanduser()))
+    try:
+        path = Path(os.path.realpath(Path(raw).expanduser()))
+    except OSError:
+        die(f"{label}: the current directory is no longer accessible: {raw}", EXIT_REFUSED)
+        raise AssertionError("unreachable")
     if not any(_within(path, root) for root in roots):
         listed = "\n    ".join(str(r) for r in roots)
         advice = (
@@ -912,6 +1166,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="NAMES",
         help="comma-separated MCP servers to switch off; default from CLAUDEX_DISABLE_MCP",
     )
+    parser.add_argument(
+        "--expect-workdir",
+        metavar="DIR",
+        help="assert the actual cwd is exactly this absolute path; refuses on any "
+        "mismatch, alias (symlink/junction) or ambiguity -- it can ONLY cause a "
+        "refusal, never select or change where anything runs. See the module "
+        "docstring for why there is no --workdir that would set the child's cwd.",
+    )
     parser.add_argument("--version", action="version", version=f"codex_ro.py {WRAPPER_VERSION}")
     args = parser.parse_args(argv)
 
@@ -960,6 +1222,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.timeout <= 0:
         die(f"--timeout must be positive: {args.timeout}", EXIT_REFUSED)
 
+    # 1c. Capture the cwd ONCE, for every run, flag or not (docs/audit/2026-09-11-scope.md §5/E-1).
+    #     Everything below that used to call Path.cwd()/os.getcwd() again --
+    #     the non-repo warning, allowed_roots(), the header -- now reuses this
+    #     same string instead, so a directory deleted or unmounted mid-run
+    #     cannot make one part of this function disagree with another (T24).
+    cwd = capture_cwd()
+    # ⛔ `is not None`, never truthiness. An unset $TARGET expands to "", and ""
+    #    is falsy: `if args.expect_workdir:` skipped the whole assertion for
+    #    exactly the input it most needs to refuse, so the flag confirmed itself
+    #    by vanishing. Caught reading the diff (2026-09-18), not by the unit
+    #    tests -- check_expected_workdir("") refused all along.
+    if args.expect_workdir is not None:
+        check_expected_workdir(args.expect_workdir, cwd)
+    try:
+        resolved_cwd = Path(cwd).resolve()
+    except OSError:
+        # Same "no traceback, ever" contract as capture_cwd() and
+        # check_expected_workdir() above: Path.resolve() consults the
+        # filesystem again (and, on some platforms, os.getcwd() itself --
+        # see resolve_in_roots()'s docstring), so a cwd that vanishes in the
+        # narrow window right after capture_cwd() returned must land here,
+        # not in an uncaught exception (T24).
+        die(
+            f"the working directory could not be resolved: {_escape_path_for_message(cwd)}",
+            EXIT_REFUSED,
+        )
+        raise AssertionError("unreachable")
+
     # 1b. Outside a git repo: warn, do not refuse.
     #
     # ⛔ CORRECTION (2026-09-09). This used to die here, on the reasoning --
@@ -978,9 +1268,10 @@ def main(argv: list[str] | None = None) -> int:
     # What survives is the diagnostic: the refusal arrives BEFORE the model, with
     # no answer file and no thread.started line -- the exact signature of an
     # expired token. Saying which it is, is worth a line.
-    if _repo_root(Path.cwd().resolve()) is None:
+    repo_root = _repo_root(resolved_cwd)
+    if repo_root is None:
         warn(
-            f"not inside a git repository: {Path.cwd()}\n"
+            f"not inside a git repository: {cwd}\n"
             "  Proceeding with --skip-git-repo-check. Path confinement still applies,\n"
             "  anchored at this directory instead of a repo root -- so double-check\n"
             "  that this is where you meant to run."
@@ -989,9 +1280,11 @@ def main(argv: list[str] | None = None) -> int:
     # 2. Paths -- resolved and confined before anything is created or deleted.
     #    Two root sets on purpose: --allow-path widens reads, never writes. See
     #    allowed_roots(); the caller may not widen its own confinement for the
-    #    files this wrapper deletes and truncates.
-    read_roots = allowed_roots(args.allow_path)
-    write_roots = allowed_roots([], for_write=True)
+    #    files this wrapper deletes and truncates. `cwd=resolved_cwd` on both
+    #    calls: the source of "the cwd" is the one captured above, not a fresh
+    #    Path.cwd() -- and --expect-workdir's own value never reaches here.
+    read_roots = allowed_roots(args.allow_path, cwd=resolved_cwd)
+    write_roots = allowed_roots([], for_write=True, cwd=resolved_cwd)
     if args.allow_path or os.environ.get("CLAUDEX_ALLOWED_PATHS", "").strip():
         warn("--allow-path / CLAUDEX_ALLOWED_PATHS widen --prompt-file only, not the write targets.")
     out_file = resolve_in_roots(args.out_file, write_roots, "--out-file", widenable=False)
@@ -1041,6 +1334,13 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"# codex read-only | {mode} | {args.model}/{args.effort} "
         f"| timeout {args.timeout}s | wrapper {WRAPPER_VERSION}"
+    )
+    # The cheapest part of docs/audit/2026-09-11-scope.md §5 and the one that would have made the
+    # 2026-09-11 incident visible: which directory Codex is about to inherit,
+    # always -- flag or not. Escaped like every other rendering of `cwd`.
+    print(
+        f"#   cwd: {_escape_path_for_message(cwd)}   "
+        f"({'git repo' if repo_root is not None else 'no git repo'})"
     )
 
     # 4. Run. stdout (the --json event stream) and stderr go straight to files, so

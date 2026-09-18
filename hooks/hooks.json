@@ -1,5 +1,5 @@
 {
-  "description": "claudex-loop — keeps an allowlisted read-only Codex wrapper call from carrying a second command along on the same approval",
+  "description": "claudex-loop — keeps an allowlisted read-only Codex wrapper call from carrying a second command along on the same approval; reminds (never blocks) at git commit when a plan's closing gate is still pending",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,6 +8,10 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/claudex-python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/wrapper_guard.py\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/claudex-python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/gate_reminder.py\""
           }
         ]
       }

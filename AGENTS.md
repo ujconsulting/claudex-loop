@@ -72,6 +72,13 @@ Zugriff auf die Diskussion, die zum Plan geführt hat. Endet mit
    oder nicht. Die Skripte werden in fremde Repos kopiert, wo nichts installiert wird.
 8. **Skill-Dokumente sind ausführbar.** Ein `bash`-Block in `skills/*/SKILL.md` ist kein
    Beispiel, sondern die Anweisung. Er wird wie Code gelesen.
+9. **Tabu-Scope-Einträge sind pfadneutral.** Weder in diesem `AGENTS.md` noch in einer
+   von `setup` erzeugten `AGENTS.md` eines Zielprojekts darf der Tabu-Scope einen echten
+   Kunden-, Personen- oder Hostnamen nennen — nur kategorisch („Kundenverzeichnisse
+   unterhalb `…/kunden/*`"). Anlass: Im Vorfall vom 11.09.2026 stand ein realer
+   Kundenpfad in genau der Liste, die Exponierung verhindern soll — die Liste war damit
+   selbst der exponierte Posten. Ein echter Name in einem Tabu-Scope ist ein Befund,
+   keine akzeptable Formulierung.
 
 ### Tabu-Scope
 
@@ -113,6 +120,15 @@ Die Config wird **nur aus dem Repo-Root** gelesen (oder `~/.claude/claudex.yaml`
   Ping und Resume eingeschlossen. Einzige Ausnahme: der Build-Schritt in
   `skills/build/SKILL.md`, der schreiben *soll*; sie ist dort begründet. Ein
   Vertragstest (`tests/test_skill_contracts.py`) hält das nach.
+- Seit 2.5.0 trägt jeder Aufruf zusätzlich `--expect-workdir "$TARGET"`; `$TARGET`
+  kommt vom Menschen über das Skill-Argument `target=`, nie aus `$PWD`, `$(pwd)` oder
+  `.`. Das Flag ist eine **Zusicherung, kein Selektor** — es vergleicht `$TARGET` mit
+  dem tatsächlichen cwd des Wrappers und verweigert (Exit 2) bei jeder Abweichung; es
+  setzt nie, wo Codex läuft. Der Wrapper bekommt **nie** einen cwd-Selektor. Eine
+  Änderung, die `Popen(cwd=…)`, `os.chdir()` oder ein `--workdir`-artiges Flag in den
+  Wrapper einführt, ist **CRITICAL** — genau der Entwurf, den Runde 1 des eigenen
+  Plan-Reviews aus diesem Grund verworfen hat (`allowed_roots()` ist eine Prefix-Regel,
+  das Flag käme unbeaufsichtigt an).
 - Modell und Effort kommen aus `claudex_roles.py --spec <rolle>`, nie aus dem Skill.
 - Prompts über `--prompt-file`, nie über `--prompt` mit Kommandosubstitution.
 - Ablage: Scratch-Verzeichnis des Harness, sonst `<repo>/.claudex-tmp/`. **Nie `/tmp`.**

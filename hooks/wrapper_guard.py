@@ -212,6 +212,16 @@ def analyse(command: str) -> "str | None":
     Returns None when the command does not run the wrapper, or runs it alone.
     Every branch asks "is it INVOKED here" first; merely naming the wrapper --
     in a grep pattern, a heredoc, a commit message -- is not this guard's business.
+
+    ⚠️ That holds only for a command that TOKENISES. One with unbalanced quotes
+    falls back to a per-line check below and is denied as soon as one line looks
+    like an invocation -- or, where that line does not tokenise either, merely
+    contains a bare wrapper path. So a heredoc that only QUOTES a wrapper call can be
+    refused, e.g. prose with typographic quotes or a lone apostrophe. Measured
+    2026-09-11, while writing the review log about this very guard. It is the
+    fail-closed side and stays (accepted availability risk G-1,
+    docs/audit/2026-09-11-scope.md); until 2026-09-18 this docstring promised
+    otherwise. Way out: write such text through a file, not a heredoc.
     """
     tokens = _tokenise(command)
     if tokens is None:

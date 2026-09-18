@@ -51,6 +51,39 @@ prints its model and effort; pass them to the wrapper, never pick them here.
 
 Echo the resolved values and the slice list before the first call.
 
+<!-- claudex-target:begin -->
+### Review target (`target=`)
+
+The skill argument `target=<absolute path>` (same `key=value` grammar as
+`scope=` / `SPEC_FILE=`) names the directory under review. If it is missing,
+ASK the human for it. ⛔ Never derive it from `$PWD`, `$(pwd)`, `.`, the
+harness's working directory, or the output of any command — a value the
+session derives from itself confirms itself, which is the incident this
+exists for.
+
+Precondition: the session must have been STARTED in exactly this directory.
+A `cd` does not persist between tool calls, and a `cd … &&` in front of the
+wrapper call is denied by the guard — reviewing some other repo from here is
+not supported; start a session there instead.
+
+Show the value to the human BEFORE the first wrapper call:
+
+```bash
+# TARGET is the literal value of the skill argument target= -- substituted by whoever
+# runs this block. Copied unchanged it fails closed: the wrapper refuses a non-absolute value.
+TARGET='<target= argument>'
+echo "Review scope: $TARGET"
+```
+
+The wrapper refuses with exit 2 when `$TARGET` is not the working directory —
+that is a STOP: tell the human, do not retry with a different value. A
+different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
+mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
+the flag yet. Update it from the plugin
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+and rerun. ⛔ Never drop the flag to make the error go away.
+<!-- claudex-target:end -->
+
 ## Flow
 
 ### Step 1 — Slice the repo, and say what you are NOT auditing
@@ -227,7 +260,7 @@ what lets a stronger model run at medium effort inside the ceiling.
 > then exactly `EXPOSURE: SAFE` or `EXPOSURE: UNSAFE`.
 
 ```bash
-python tools/codex_ro.py --model "$EXPOSURE_MODEL" --effort "$EXPOSURE_EFFORT" \
+python tools/codex_ro.py --expect-workdir "$TARGET" --model "$EXPOSURE_MODEL" --effort "$EXPOSURE_EFFORT" \
   --prompt-file "$SCRATCH/exposure-<component>.txt" --out-file "$SCRATCH/exposure-<component>-verdict.txt" \
   --err-file "$SCRATCH/exposure-<component>-stderr.txt"
 ```

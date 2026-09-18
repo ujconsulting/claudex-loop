@@ -19,6 +19,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
+import unittest.mock
 from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -918,6 +920,608 @@ class _CapturedStderr:
         sys.stderr = self._previous
         self.text = self._buffer.getvalue()
         return False
+
+
+class _CapturedStdout:
+    def __enter__(self):
+        import io
+
+        self._previous = sys.stdout
+        self._buffer = io.StringIO()
+        sys.stdout = self._buffer
+        return self
+
+    def __exit__(self, *exc):
+        sys.stdout = self._previous
+        self.text = self._buffer.getvalue()
+        return False
+
+
+class _FakeCompletedChild:
+    """Stands in for subprocess.Popen so main() never starts real Codex.
+
+    communicate() writes to whatever path follows `-o` in the child argv --
+    that is how build_argv() tells the (real) Codex process where to put its
+    answer, and main() checks that same path afterwards. Nothing here talks to
+    a network or spends quota.
+    """
+
+    def __init__(self, cmd, **kwargs):
+        self.args = cmd
+        self.kwargs = kwargs
+        self.returncode = 0
+        self.pid = 999999
+
+    def communicate(self, input=None, timeout=None):  # noqa: A002 - matches Popen's signature
+        try:
+            idx = self.args.index("-o")
+            Path(self.args[idx + 1]).write_text('{"ok":true}\n', encoding="utf-8")
+        except ValueError:
+            pass
+        return (b"", b"")
+
+
+class _FakeCodexRun:
+    """Context manager patching find_codex + Popen so a run "proceeds" without
+    ever touching the real Codex quota. Records every Popen call for R1."""
+
+    def __init__(self):
+        self.popen_calls = []
+
+    def __enter__(self):
+        self._find_patch = unittest.mock.patch("codex_ro.find_codex", return_value="fake-codex")
+        self._find_patch.start()
+
+        def fake_popen(cmd, **kwargs):
+            self.popen_calls.append((cmd, kwargs))
+            return _FakeCompletedChild(cmd, **kwargs)
+
+        self._popen_patch = unittest.mock.patch("codex_ro.subprocess.Popen", side_effect=fake_popen)
+        self._popen_patch.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._popen_patch.stop()
+        self._find_patch.stop()
+        return False
+
+
+# --- --expect-workdir (wrapper 2.5.0, docs/audit/2026-09-11-scope.md §5) --------------------------
+
+
+class SourceHygieneTests(unittest.TestCase):
+    def test_the_wrapper_compiles_without_a_syntax_warning(self):
+        """A Windows path in a non-raw docstring is an invalid escape sequence.
+
+        Twice on 2026-09-18 alone a docstring about `--expect-workdir` gained a
+        backslash followed by a letter. Python 3.12 only WARNS, once, at first
+        compile -- after that the .pyc hides it, so neither the suite nor a
+        normal run ever shows it again. Later versions are set to make it an
+        error, and this file is copied into every consumer repo. Compile from
+        source with warnings as errors, bypassing the cache.
+        """
+        source = Path(codex_ro.__file__).read_text(encoding="utf-8")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            compile(source, codex_ro.__file__, "exec")
+
+
+class ExpectWorkdirLexicalTests(unittest.TestCase):
+    """check_expected_workdir(): the lexical refusals, no filesystem access at
+    all -- T6/T14/T15/T19/T21/T23. `cwd` here is an arbitrary string; these
+    checks must fire before `cwd` is ever touched."""
+
+    CWD = "C:\\actual\\project" if os.name == "nt" else "/actual/project"
+
+    def _refused(self, raw):
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.check_expected_workdir(raw, self.CWD)
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    def test_t14_empty_and_whitespace_values_are_refused(self):
+        for raw in ("", "   ", "\t "):
+            with self.subTest(raw=repr(raw)):
+                self._refused(raw)
+
+    def test_t15_t19_dot_forms_and_relative_values_are_refused(self):
+        for raw in (".", "./", ".\\", "./.", "missing/..", "some/relative/dir"):
+            with self.subTest(raw=raw):
+                self._refused(raw)
+
+    def test_t6_t23_unc_and_device_paths_are_refused_on_every_platform(self):
+        for raw in (r"\\srv\share", "//srv/share", r"\\?\C:\x", r"\\.\C:\x"):
+            with self.subTest(raw=raw):
+                self._refused(raw)
+
+    def test_t21_a_file_path_as_expectation_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            file_path = Path(d) / "somefile.txt"
+            file_path.write_text("x", encoding="utf-8")
+            with self.assertRaises(SystemExit) as caught:
+                codex_ro.check_expected_workdir(str(file_path), str(d))
+            self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    def test_control_characters_are_refused_and_the_raw_newline_never_echoed(self):
+        raw = "C:\\x\nFAKE LOG LINE"
+        with _CapturedStderr() as captured:
+            with self.assertRaises(SystemExit) as caught:
+                codex_ro.check_expected_workdir(raw, self.CWD)
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertNotIn("\nFAKE LOG LINE", captured.text)
+
+
+class ExpectWorkdirComparisonTests(unittest.TestCase):
+    """T1-T3, T9's building block: real-filesystem string comparison."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_t1_matching_cwd_does_not_raise(self):
+        codex_ro.check_expected_workdir(str(self.root), str(self.root))  # must not raise
+
+    def test_t2_mismatch_is_refused_and_shows_both_paths(self):
+        other = self.root / "elsewhere"
+        other.mkdir()
+        with _CapturedStderr() as captured:
+            with self.assertRaises(SystemExit) as caught:
+                codex_ro.check_expected_workdir(str(other), str(self.root))
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertIn(str(self.root), captured.text)
+        self.assertIn(str(other), captured.text)
+
+    def test_t3_a_subdirectory_of_cwd_is_refused(self):
+        sub = self.root / "sub"
+        sub.mkdir()
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.check_expected_workdir(str(sub), str(self.root))
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    def test_t3_the_parent_of_cwd_is_refused(self):
+        child = self.root / "child"
+        child.mkdir()
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.check_expected_workdir(str(self.root), str(child))
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    @unittest.skipUnless(os.name == "nt", "case/drive-letter folding is a Windows question")
+    def test_t4_a_different_case_and_forward_slashes_are_accepted(self):
+        raw = str(self.root).upper().replace("\\", "/")
+        codex_ro.check_expected_workdir(raw, str(self.root))  # must not raise
+
+    def test_a_spelling_that_only_NORMALISES_to_the_cwd_is_refused(self):
+        """Closing-gate finding (code-review, 2026-09-18): the comparison ran the
+        expectation through os.path.abspath() first, and abspath() is a
+        normaliser. `<cwd>/sub/..`, `<cwd>/.`, a trailing dot or space and --
+        on Windows -- a drive-rooted `\\repo` all came out as the cwd and were
+        ACCEPTED, samefile() included. "Names exactly this logical path" had
+        quietly become "names something that collapses to it". The value is
+        now compared as typed; normcase() (case, slash direction) and one
+        trailing separator are the only tolerance.
+        """
+        cwd = str(self.root)
+        (self.root / "sub").mkdir()
+        spellings = [
+            os.path.join(cwd, "sub", ".."),
+            os.path.join(cwd, "."),
+            cwd + os.sep + os.sep + ".",
+            cwd + ".",
+            cwd + " ",
+        ]
+        if os.name == "nt":
+            spellings.append(os.path.splitdrive(cwd)[1])  # drive-rooted: \Users\...\tmpX
+        with unittest.mock.patch.object(codex_ro.os.path, "samefile", return_value=True) as belt:
+            for raw in spellings:
+                with self.subTest(raw=raw), _CapturedStderr():
+                    with self.assertRaises(SystemExit) as caught:
+                        codex_ro.check_expected_workdir(raw, cwd)
+                    self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertEqual(belt.call_count, 0, "none of these may get as far as samefile()")
+
+    def test_one_trailing_separator_is_still_the_same_path(self):
+        cwd = str(self.root)
+        codex_ro.check_expected_workdir(cwd + os.sep, cwd)  # must not raise
+
+    def test_t4b_mocked_samefile_confirms_a_case_variant_without_a_real_alias(self):
+        """Portable stand-in for T4: no real filesystem alias needed."""
+        fake_cwd = "C:\\Fake\\Project" if os.name == "nt" else "/fake/project"
+        raw = fake_cwd.upper() if os.name == "nt" else fake_cwd
+        with unittest.mock.patch.object(codex_ro.os.path, "realpath", return_value=fake_cwd), \
+             unittest.mock.patch.object(codex_ro.os.path, "samefile", return_value=True) as mock_samefile:
+            codex_ro.check_expected_workdir(raw, fake_cwd)  # must not raise
+        mock_samefile.assert_called_once_with(fake_cwd, raw)
+
+
+class ExpectWorkdirAliasTests(unittest.TestCase):
+    """T5 (reversed from earlier plan rounds, docs/audit/2026-09-11-scope.md §5/E-1.4): an alias
+    for the same directory -- symlink, junction -- is refused. Herkunft, not
+    nur Blatt."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name).resolve()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _make_alias(self, target, link):
+        try:
+            link.symlink_to(target, target_is_directory=True)
+            return True
+        except (OSError, NotImplementedError):
+            pass
+        if os.name == "nt":
+            result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode == 0:
+                return True
+        return False
+
+    def test_t5_an_alias_of_cwd_as_the_expectation_is_refused(self):
+        real_dir = self.base / "real"
+        real_dir.mkdir()
+        alias_dir = self.base / "alias"
+        if not self._make_alias(real_dir, alias_dir):
+            self.skipTest("this environment will not let the test create a symlink or junction")
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.check_expected_workdir(str(alias_dir), str(real_dir))
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    def test_t5_cwd_reached_through_a_real_alias_is_refused_where_observable(self):
+        """POSIX's os.getcwd() typically canonicalises a symlinked cwd away
+        already (PLAN.md O-1) -- this only demonstrates something where the
+        alias is still observable in `cwd` itself; otherwise it skips, and
+        the mocked variant below covers the rule on every runner regardless.
+        """
+        real_dir = self.base / "real2"
+        real_dir.mkdir()
+        alias_dir = self.base / "alias2"
+        if not self._make_alias(real_dir, alias_dir):
+            self.skipTest("this environment will not let the test create a symlink or junction")
+        observed_cwd = str(alias_dir)
+        if os.path.normcase(os.path.realpath(observed_cwd)) == os.path.normcase(observed_cwd):
+            self.skipTest("this platform's realpath() already canonicalises the alias away")
+        with self.assertRaises(SystemExit) as caught:
+            codex_ro.check_expected_workdir(observed_cwd, observed_cwd)
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    def test_t5_mocked_alias_free_cwd_rule_holds_on_every_runner(self):
+        """Portable: realpath(cwd) != cwd must refuse regardless of what this
+        particular machine's chdir/getcwd happen to canonicalise."""
+        fake_cwd = "C:\\fake\\project\\alias" if os.name == "nt" else "/fake/project/alias"
+        fake_real = "C:\\fake\\project\\real" if os.name == "nt" else "/fake/project/real"
+        with unittest.mock.patch.object(codex_ro.os.path, "realpath", return_value=fake_real), \
+             unittest.mock.patch.object(codex_ro.os.path, "samefile") as mock_samefile:
+            with self.assertRaises(SystemExit) as caught:
+                codex_ro.check_expected_workdir(fake_cwd, fake_cwd)
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        mock_samefile.assert_not_called()
+
+
+class ExpectWorkdirSamefileBeltTests(unittest.TestCase):
+    """T7: samefile() is the belt, after the string/alias checks already
+    passed -- its own failure must refuse too, never fall back."""
+
+    CWD = "C:\\match\\here" if os.name == "nt" else "/match/here"
+
+    def test_t7_samefile_raising_oserror_is_refused(self):
+        with unittest.mock.patch.object(codex_ro.os.path, "realpath", return_value=self.CWD), \
+             unittest.mock.patch.object(codex_ro.os.path, "samefile", side_effect=OSError("boom")):
+            with self.assertRaises(SystemExit) as caught:
+                codex_ro.check_expected_workdir(self.CWD, self.CWD)
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    def test_t7_samefile_returning_false_is_refused(self):
+        with unittest.mock.patch.object(codex_ro.os.path, "realpath", return_value=self.CWD), \
+             unittest.mock.patch.object(codex_ro.os.path, "samefile", return_value=False):
+            with self.assertRaises(SystemExit) as caught:
+                codex_ro.check_expected_workdir(self.CWD, self.CWD)
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+
+class ExpectWorkdirOracleLimitTests(unittest.TestCase):
+    """T17: the mismatch/failure messages must never leak the exception text
+    an underlying OSError happened to carry -- only the two paths."""
+
+    CWD = "C:\\match\\here" if os.name == "nt" else "/match/here"
+    SECRET = "TOTALLY-UNIQUE-EXCEPTION-TEXT-should-not-leak-42"
+
+    def test_realpath_exception_text_is_not_in_the_message(self):
+        with unittest.mock.patch.object(
+            codex_ro.os.path, "realpath", side_effect=OSError(self.SECRET)
+        ):
+            with _CapturedStderr() as captured:
+                with self.assertRaises(SystemExit) as caught:
+                    codex_ro.check_expected_workdir(self.CWD, self.CWD)
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertNotIn(self.SECRET, captured.text)
+
+    def test_samefile_exception_text_is_not_in_the_message(self):
+        with unittest.mock.patch.object(codex_ro.os.path, "realpath", return_value=self.CWD), \
+             unittest.mock.patch.object(
+                 codex_ro.os.path, "samefile", side_effect=OSError(self.SECRET)
+             ):
+            with _CapturedStderr() as captured:
+                with self.assertRaises(SystemExit) as caught:
+                    codex_ro.check_expected_workdir(self.CWD, self.CWD)
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertNotIn(self.SECRET, captured.text)
+
+
+class ExpectWorkdirOrderingTests(unittest.TestCase):
+    """T20: samefile() must be provably unreached for anything refused in the
+    lexical or string-comparison steps. The order is the control."""
+
+    CWD = "C:\\some\\project" if os.name == "nt" else "/some/project"
+
+    CASES = {
+        "empty": "",
+        "whitespace": "   ",
+        "control_char": "C:\\x\nFAKE",
+        "unc_backslash": r"\\srv\share",
+        "unc_forward": "//srv/share",
+        "extended_device": r"\\?\C:\x",
+        "device_ns": r"\\.\C:\x",
+        "relative_dot": ".",
+        "relative_dot_slash": "./",
+        "relative_dot_backslash": ".\\",
+        "relative_dot_dot_slash": "./.",
+        "relative_missing_dotdot": "missing/..",
+        "relative_plain": "some/relative/dir",
+        "plain_mismatch": ("C:\\somewhere\\else" if os.name == "nt" else "/somewhere/else"),
+    }
+
+    def test_t20_samefile_is_never_called_for_any_of_these(self):
+        for name, raw in self.CASES.items():
+            with self.subTest(case=name):
+                with unittest.mock.patch.object(codex_ro.os.path, "samefile") as mock_samefile:
+                    with self.assertRaises(SystemExit) as caught:
+                        codex_ro.check_expected_workdir(raw, self.CWD)
+                    self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+                self.assertEqual(
+                    mock_samefile.call_count, 0,
+                    f"samefile() must not be reached for {name!r}",
+                )
+
+
+class CwdCaptureTests(unittest.TestCase):
+    """T16: capture_cwd() is the single os.getcwd() call every later step
+    reuses; its own failure must not be a traceback."""
+
+    def test_t16_getcwd_failure_is_refused_with_the_placeholder(self):
+        with unittest.mock.patch.object(codex_ro.os, "getcwd", side_effect=OSError("gone")):
+            with _CapturedStderr() as captured:
+                with self.assertRaises(SystemExit) as caught:
+                    codex_ro.capture_cwd()
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertIn("<cwd unavailable>", captured.text)
+        self.assertNotIn("Traceback", captured.text)
+
+    def test_getcwd_success_is_returned_unchanged(self):
+        self.assertEqual(codex_ro.capture_cwd(), os.getcwd())
+
+
+class ResolveInRootsCwdFailureTests(unittest.TestCase):
+    """T24's narrower target, tested directly and portably: resolve_in_roots()
+    must not let a vanished cwd surface as a traceback for a RELATIVE path
+    argument, where os.path.realpath() needs os.getcwd() internally."""
+
+    def test_a_realpath_failure_is_refused_not_raised(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            with unittest.mock.patch.object(
+                codex_ro.os.path, "realpath", side_effect=OSError("cwd vanished")
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    codex_ro.resolve_in_roots("relative.txt", [root], "--out-file")
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+
+    def test_an_absolute_path_is_unaffected_by_the_new_handling(self):
+        """Positive control: the try/except must not change behaviour for the
+        ordinary case that was already covered by PathConfinementTests."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            target = root / "sub" / "verdict.txt"
+            self.assertEqual(
+                codex_ro.resolve_in_roots(str(target), [root], "--out-file"), target
+            )
+
+
+class ExpectWorkdirMainIntegrationTests(unittest.TestCase):
+    """--expect-workdir wired through main(): header, allowed_roots, out-file
+    survival, the whole ordering. Codex itself never starts here -- find_codex
+    and Popen are faked (see _FakeCodexRun)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cwd = Path(self.tmp.name).resolve()
+        self.previous = Path.cwd()
+        os.chdir(self.cwd)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(lambda: os.chdir(self.previous))
+
+    def test_t1_matching_cwd_lets_a_run_proceed(self):
+        out = self.cwd / "out.txt"
+        with _FakeCodexRun():
+            rc = codex_ro.main([
+                "--prompt", "x", "--out-file", str(out),
+                "--expect-workdir", str(self.cwd),
+            ])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.exists() and out.stat().st_size > 0)
+
+    def test_t2_mismatched_expectation_refuses_before_any_codex_call(self):
+        out = self.cwd / "out.txt"
+        with _FakeCodexRun() as fake:
+            with self.assertRaises(SystemExit) as caught:
+                codex_ro.main([
+                    "--prompt", "x", "--out-file", str(out),
+                    "--expect-workdir", str(self.cwd / "elsewhere"),
+                ])
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertEqual(fake.popen_calls, [], "a refused run must never reach Popen")
+
+    def test_t14_an_empty_expectation_is_refused_through_main_not_skipped(self):
+        """The fail-open from round 3 of the plan review, one level up.
+
+        check_expected_workdir("") refuses -- but main() guarded the call with
+        `if args.expect_workdir:`, and "" is falsy. So `--expect-workdir "$TARGET"`
+        with an unset TARGET skipped the assertion ENTIRELY and the run went
+        ahead unchecked: the flag confirmed itself by vanishing. Found reading
+        the diff on 2026-09-18, before it shipped; the unit-level T14 above was
+        green the whole time, which is why this one goes through main().
+        "Flag given" is `is not None`, never truthiness.
+        """
+        out = self.cwd / "out.txt"
+        for value in ("", "   "):
+            with self.subTest(value=repr(value)), _FakeCodexRun() as fake:
+                with self.assertRaises(SystemExit) as caught:
+                    codex_ro.main([
+                        "--prompt", "x", "--out-file", str(out),
+                        "--expect-workdir", value,
+                    ])
+                self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+                self.assertEqual(fake.popen_calls, [], "an empty expectation must never reach Popen")
+
+    def test_t8_a_refused_run_leaves_an_existing_out_file_untouched(self):
+        out = self.cwd / "out.txt"
+        original = b"previous round's verdict, byte for byte"
+        out.write_bytes(original)
+        with self.assertRaises(SystemExit) as caught:
+            with _FakeCodexRun():
+                codex_ro.main([
+                    "--prompt", "x", "--out-file", str(out),
+                    "--expect-workdir", str(self.cwd / "elsewhere"),
+                ])
+        self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+        self.assertEqual(out.read_bytes(), original)
+
+    def test_t9_the_header_names_the_cwd_and_the_repo_marker(self):
+        out = self.cwd / "out.txt"
+        with _CapturedStdout() as captured, _FakeCodexRun():
+            codex_ro.main(["--prompt", "x", "--out-file", str(out)])
+        self.assertIn("cwd:", captured.text)
+        self.assertIn(str(self.cwd), captured.text)
+        self.assertTrue(
+            "(git repo)" in captured.text or "(no git repo)" in captured.text,
+            captured.text,
+        )
+
+    def test_t18_allowed_roots_never_receives_the_expectation_value_as_extra(self):
+        """When --expect-workdir matches, its string equals the real cwd's, so
+        the `cwd` KWARG legitimately carrying that same value proves nothing
+        (it is the captured cwd, not a leak of the expectation). What must
+        never happen is the expectation reaching allowed_roots() as an
+        opt-in/`extra` root -- that positional argument stays whatever
+        --allow-path supplied (nothing, here), never the checked value.
+        """
+        out = self.cwd / "out.txt"
+        with unittest.mock.patch.object(
+            codex_ro, "allowed_roots", wraps=codex_ro.allowed_roots
+        ) as mock_roots, _FakeCodexRun():
+            codex_ro.main([
+                "--prompt", "x", "--out-file", str(out),
+                "--expect-workdir", str(self.cwd),
+            ])
+        self.assertGreaterEqual(mock_roots.call_count, 2)
+        for call in mock_roots.call_args_list:
+            args, kwargs = call
+            extra = args[0] if args else kwargs.get("extra", [])
+            self.assertEqual(list(extra), [], "no --allow-path was given; extra must stay empty")
+            self.assertIn("cwd", kwargs, "main() must pass the captured cwd explicitly")
+            self.assertEqual(kwargs["cwd"], self.cwd)
+
+    def _assert_no_bare_exception(self, argv):
+        """Either the run completes (an int return) or it refuses cleanly
+        (SystemExit(EXIT_REFUSED)) -- anything else (a bare OSError escaping
+        as a traceback) fails this assertion, and would fail the test even
+        without it since unittest treats an uncaught exception as an error.
+
+        No fixed call count is asserted: os.path.realpath()/Path.resolve()
+        internally consult os.getcwd() even for an ALREADY absolute path on
+        this platform (measured on Windows/ntpath; POSIX's realpath does not
+        for an absolute argument) -- an implementation detail of the stdlib,
+        not of this wrapper's own code, and one CLAUDE.md's "measure, don't
+        assume" rule says not to hard-code across platforms.
+        """
+        try:
+            rc = codex_ro.main(argv)
+        except SystemExit as exc:
+            self.assertEqual(
+                exc.code, codex_ro.EXIT_REFUSED,
+                "a cwd that vanishes mid-run must refuse cleanly, not exit some other way",
+            )
+            return None
+        self.assertIsInstance(rc, int)
+        return rc
+
+    def test_t24_a_cwd_that_vanishes_soon_after_capture_never_raises_a_bare_exception(self):
+        out = self.cwd / "out.txt"
+        real_cwd = str(self.cwd)
+        calls = {"n": 0}
+
+        def fake_getcwd():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_cwd
+            raise OSError("cwd vanished after capture")
+
+        with unittest.mock.patch.object(codex_ro.os, "getcwd", side_effect=fake_getcwd), _FakeCodexRun():
+            self._assert_no_bare_exception([
+                "--prompt", "x", "--out-file", str(out),
+                "--expect-workdir", real_cwd,
+            ])
+        self.assertGreaterEqual(calls["n"], 1, "capture_cwd() must have run at least once")
+
+    def test_t24_a_relative_out_file_after_the_cwd_vanishes_never_raises_a_bare_exception(self):
+        real_cwd = str(self.cwd)
+        calls = {"n": 0}
+
+        def fake_getcwd():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_cwd
+            raise OSError("cwd vanished after capture")
+
+        with unittest.mock.patch.object(codex_ro.os, "getcwd", side_effect=fake_getcwd), _FakeCodexRun():
+            self._assert_no_bare_exception(["--prompt", "x", "--out-file", "relative-out.txt"])
+
+
+class ExpectWorkdirRegressionTests(unittest.TestCase):
+    """R1/R2: hold today already (no --expect-workdir logic to speak of yet for
+    R1's shape), listed as regression per CLAUDE.md rule 6, not "first red"."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cwd = Path(self.tmp.name).resolve()
+        self.previous = Path.cwd()
+        os.chdir(self.cwd)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(lambda: os.chdir(self.previous))
+
+    def test_r1_module_source_never_calls_chdir(self):
+        source = Path(codex_ro.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("os.chdir(", source)
+
+    def test_r1_popen_is_never_given_a_cwd_kwarg(self):
+        out = self.cwd / "out.txt"
+        with _FakeCodexRun() as fake:
+            codex_ro.main(["--prompt", "x", "--out-file", str(out)])
+        self.assertTrue(fake.popen_calls)
+        for _cmd, kwargs in fake.popen_calls:
+            self.assertNotIn("cwd", kwargs)
+
+    def test_r2_allowed_roots_cwd_none_matches_an_explicit_current_cwd(self):
+        explicit = Path.cwd().resolve()
+        self.assertEqual(codex_ro.allowed_roots([]), codex_ro.allowed_roots([], cwd=explicit))
+        self.assertEqual(
+            codex_ro.allowed_roots([], for_write=True),
+            codex_ro.allowed_roots([], for_write=True, cwd=explicit),
+        )
 
 
 if __name__ == "__main__":

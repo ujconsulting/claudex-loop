@@ -93,6 +93,39 @@ usually contains spaces on Windows.
 **A round is not complete until its output is copied into `LOG_FILE`.** The scratch file
 is a staging buffer, not the record. (upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 
+<!-- claudex-target:begin -->
+### Review target (`target=`)
+
+The skill argument `target=<absolute path>` (same `key=value` grammar as
+`scope=` / `SPEC_FILE=`) names the directory under review. If it is missing,
+ASK the human for it. ⛔ Never derive it from `$PWD`, `$(pwd)`, `.`, the
+harness's working directory, or the output of any command — a value the
+session derives from itself confirms itself, which is the incident this
+exists for.
+
+Precondition: the session must have been STARTED in exactly this directory.
+A `cd` does not persist between tool calls, and a `cd … &&` in front of the
+wrapper call is denied by the guard — reviewing some other repo from here is
+not supported; start a session there instead.
+
+Show the value to the human BEFORE the first wrapper call:
+
+```bash
+# TARGET is the literal value of the skill argument target= -- substituted by whoever
+# runs this block. Copied unchanged it fails closed: the wrapper refuses a non-absolute value.
+TARGET='<target= argument>'
+echo "Review scope: $TARGET"
+```
+
+The wrapper refuses with exit 2 when `$TARGET` is not the working directory —
+that is a STOP: tell the human, do not retry with a different value. A
+different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
+mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
+the flag yet. Update it from the plugin
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+and rerun. ⛔ Never drop the flag to make the error go away.
+<!-- claudex-target:end -->
+
 ## Flow
 
 ### Step 0 — Kickoff (human gate #1)
@@ -181,7 +214,7 @@ SPEC=$(python scripts/claudex_roles.py --spec plan-review) || exit 2
 MODEL=$(echo "$SPEC" | sed -n 's/.*model=\([^ ]*\).*/\1/p')
 EFFORT=$(echo "$SPEC" | sed -n 's/.*effort=\([^ ]*\).*/\1/p')
 
-python tools/codex_ro.py --model "$MODEL" --effort "$EFFORT" \
+python tools/codex_ro.py --expect-workdir "$TARGET" --model "$MODEL" --effort "$EFFORT" \
   --prompt-file "$SCRATCH_DIR/review-prompt-r$ROUND.txt" \
   --out-file "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" \
   --err-file "$SCRATCH_DIR/codex-stderr-r$ROUND.txt"
@@ -206,7 +239,7 @@ Parse `thread_id` from the `{"type":"thread.started","thread_id":"..."}` line �
 
 ```bash
 ROUND=$((ROUND + 1))
-python tools/codex_ro.py --resume "$THREAD_ID" --model "$MODEL" --effort "$EFFORT" \
+python tools/codex_ro.py --expect-workdir "$TARGET" --resume "$THREAD_ID" --model "$MODEL" --effort "$EFFORT" \
   --prompt-file "$SCRATCH_DIR/review-prompt-r$ROUND.txt" \
   --out-file "$SCRATCH_DIR/codex-verdict-r$ROUND.txt" \
   --err-file "$SCRATCH_DIR/codex-stderr-r$ROUND.txt"
@@ -224,6 +257,7 @@ caller `-c` touching the sandbox, `profile` or `mcp_servers`.
    - `VERDICT: APPROVED` → break the loop, go to Step 3 (converged).
    - `VERDICT: REVISE` → Claude reads the critique, decides **what's actually worth acting on** (Claude has final say — Codex advises, it does not command). Revise `PLAN_FILE`. Append to `LOG_FILE`: `### Claude's response` + what you changed and what you rejected and why. Increment `ROUND`.
    - **Neither — missing, malformed, or an empty file → INVALID ROUND.** Log it as such with the reply verbatim, read the stderr file, and stop to tell the user. It does not count towards `MAX_ROUNDS` and it never counts as an approval.
+   - **Wrapper exit 3 → INVALID ROUND, whatever the verdict says.** The reviewer's shell was refused every command and it read no file; the verdict came from the prompt alone. Log `## Round <n> — INVALID (exit 3, reviewer read nothing)`.
 3. If `ROUND > MAX_ROUNDS` → break to Step 3 (deadlock).
 
 **If Codex dies mid-loop (quota, credits, outage):** don't dead-end and don't retry blind — full protocol in [FALLBACK.md](../../FALLBACK.md). Check remaining quota + reset time with `python scripts/codex_usage.py` (reads Codex's local session rollouts, no API call; also run it before round 1). On a confirmed terminal failure (429/"usage limit"/401 in the stderr file, or an empty verdict file on exit 0 twice in a row), halt and let the USER choose: **wait** for the reset (resume the same `$THREAD_ID` — session memory survives), **switch** to a configured fallback reviewer (`python scripts/fallback_review.py --plan "$PLAN_FILE" --log "$LOG_FILE" --round "$ROUND" --append-log "$LOG_FILE" --out "$SCRATCH_DIR/fallback-verdict-r$ROUND.txt"` — any OpenAI-compatible endpoint via `.env` profiles, plan-text only, rubber-stamp-rejecting, plan-hash-bound; it writes the round into `LOG_FILE` itself as `## Round <n> — <model> (via <reviewer>, fallback — plan-text only, no repo access)`, invalid attempts included). **`--append-log` is required** and `--plan` takes the resolved `PLAN_FILE`, not a literal `PLAN.md` — this line had both wrong, so the documented escape hatch would have exited on its own argument check at the one moment it is needed. A remote reviewer also needs `CLAUDEX_EGRESS_ALLOW=<host>`; loopback profiles need nothing. Or **skip** the review with an explicit log entry and take the plan to sign-off marked **not cross-reviewed**. Never automatically, never silently.
@@ -232,7 +266,11 @@ caller `-c` touching the sandbox, `profile` or `mcp_servers`.
 
 **If APPROVED:** Present to the user — the final `PLAN_FILE`, a 3-bullet summary of what the argument improved, and the round count. Ask: *"Plan survived N rounds of Codex. Implement it now — Codex builds it (`/build`), Claude builds it, or stop here?"* Only on a yes is code written. **No code is written during the loop.** If the user picks Codex, invoke the `build` skill with `SPEC_FILE=PLAN.md` and the same `LOG_FILE` — roles flip (Codex writes, Claude reviews the diff) and the build rounds append to the same log.
 
-**If MAX_ROUNDS hit without APPROVED (deadlock):** Do NOT pretend it converged. Surface the unresolved disagreements explicitly: list each point Codex still flags and Claude's counter-position. Hand it to the human to break the tie. This is a legitimate, useful outcome — a flagged disagreement beats a false "approved."
+**If MAX_ROUNDS hit without APPROVED (deadlock):** Do NOT pretend it converged. Surface the unresolved disagreements explicitly: list each point Codex still flags and Claude's counter-position. Hand it to the human to break the tie. This is a legitimate, useful outcome — a flagged disagreement beats a false "approved." If the human then decides to build anyway, the build owes the same closing gate as an approved one.
+
+**Either way, write the gate anchor into `PLAN_FILE`** — the section `## Closing gate (after the build)` with the marker `<!-- claudex-gate: pending -->`, exactly as specified in the `claudex-loop` skill (Resolution). The plan outlives this session; the build usually happens in another one that never loads this skill, and the marker is what tells it — and the `gate_reminder` hook at `git commit` — that a gate is owed.
+
+**When Claude builds** (now or later): after the proof passes, run the post-build cross-inspection (fresh read-only Codex session on plan + diff, `MAX_INSPECTION_ROUNDS=2`, logged under `## Post-build inspection`) and then the closing gate `/claudex-loop:code-review SPEC_FILE=<PLAN_FILE> LOG_FILE=<LOG_FILE> scope=dod,quality,security` — both as described in the `claudex-loop` skill. Default on, never a blocker: with the Codex quota out, the user picks wait / fallback / skip, and a skip is logged and flips the marker to `skipped`. A finished build sets it to `done`.
 
 **Either way, close with the residual risk: which files no round ever opened.** An `APPROVED` verdict covers the surface that was actually read, and rounds tend to keep re-reading the files the plan names. Track the set of files opened across all rounds, diff it against the files touching the same shared state, and report the remainder as **unreviewed** rather than sound. This is the cheapest finding in the loop and the easiest to skip.
 

@@ -75,6 +75,39 @@ breaks path matching against `git rev-parse --show-toplevel`. Prefer the harness
 scratchpad; otherwise `<repo>/.claudex-tmp/`, gitignored in the same step. Quote the path.
 (upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 
+<!-- claudex-target:begin -->
+### Review target (`target=`)
+
+The skill argument `target=<absolute path>` (same `key=value` grammar as
+`scope=` / `SPEC_FILE=`) names the directory under review. If it is missing,
+ASK the human for it. ⛔ Never derive it from `$PWD`, `$(pwd)`, `.`, the
+harness's working directory, or the output of any command — a value the
+session derives from itself confirms itself, which is the incident this
+exists for.
+
+Precondition: the session must have been STARTED in exactly this directory.
+A `cd` does not persist between tool calls, and a `cd … &&` in front of the
+wrapper call is denied by the guard — reviewing some other repo from here is
+not supported; start a session there instead.
+
+Show the value to the human BEFORE the first wrapper call:
+
+```bash
+# TARGET is the literal value of the skill argument target= -- substituted by whoever
+# runs this block. Copied unchanged it fails closed: the wrapper refuses a non-absolute value.
+TARGET='<target= argument>'
+echo "Review scope: $TARGET"
+```
+
+The wrapper refuses with exit 2 when `$TARGET` is not the working directory —
+that is a STOP: tell the human, do not retry with a different value. A
+different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
+mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
+the flag yet. Update it from the plugin
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+and rerun. ⛔ Never drop the flag to make the error go away.
+<!-- claudex-target:end -->
+
 ## Flow
 
 ### Step 1 — Assemble the evidence (Claude, no user input needed)
@@ -214,7 +247,7 @@ SPEC=$(python scripts/claudex_roles.py --spec code-review) || exit 2
 MODEL=$(echo "$SPEC" | sed -n 's/.*model=\([^ ]*\).*/\1/p')
 EFFORT=$(echo "$SPEC" | sed -n 's/.*effort=\([^ ]*\).*/\1/p')
 
-python tools/codex_ro.py --model "$MODEL" --effort "$EFFORT" \
+python tools/codex_ro.py --expect-workdir "$TARGET" --model "$MODEL" --effort "$EFFORT" \
   --prompt-file "$SCRATCH_DIR/verify-prompt-r$ROUND.txt" \
   --out-file "$SCRATCH_DIR/code-review-r$ROUND.txt" \
   --err-file "$SCRATCH_DIR/codex-stderr-r$ROUND.txt"
@@ -290,7 +323,7 @@ the ceiling.
 Mechanics as Step 2, with the model and effort the resolver printed:
 
 ```bash
-python tools/codex_ro.py --model "$EXPOSURE_MODEL" --effort "$EXPOSURE_EFFORT" \
+python tools/codex_ro.py --expect-workdir "$TARGET" --model "$EXPOSURE_MODEL" --effort "$EXPOSURE_EFFORT" \
   --prompt-file "$SCRATCH_DIR/exposure-prompt-r$ROUND.txt" \
   --out-file "$SCRATCH_DIR/exposure-r$ROUND.txt" --err-file "$SCRATCH_DIR/exposure-stderr-r$ROUND.txt"
 ```
@@ -398,6 +431,13 @@ to the user to decide. Never average a red scope away — `SECURITY: FAIL` with
 gate on its own, whatever the scopes say; an exposed change with no exposure verdict
 (pass not run, invalid, or skipped) is **not reviewed** — report it as such, not as
 green with a footnote.
+
+**Close the plan's gate marker.** If `SPEC_FILE` carries `claudex-gate: pending`, set it to
+`claudex-gate: done` once the gate result is in `LOG_FILE` — pass or fail; the marker says
+the gate *ran*, the log says how it went. If the gate was skipped (quota out and no
+fallback, or declined), log `## Closing gate skipped — <reason>` and set
+`claudex-gate: skipped`. The `gate_reminder` hook stops mentioning the plan once the
+marker is no longer `pending`.
 
 ## If Codex is unavailable (quota, credits, outage)
 

@@ -36,11 +36,50 @@ Jede Zeile der folgenden Tabelle war einmal eine verlorene Stunde:
 | read-only hart setzen | `-s read-only` bei `exec`; beim `resume` gibt es **kein** `-s`, dort geht es nur über `-c sandbox_mode=read-only`. Jedes weitere `-c sandbox_mode` / `approval_policy` / `sandbox_permissions` wird mit Exit 2 abgewiesen. |
 | Pfadargumente einsperren | Der Wrapper löscht seine Ausgabedatei vor jedem Lauf. Ein unbegrenztes Pfadargument wäre damit ein Schreib-Primitiv auf die ganze Platte. Erlaubt sind Repo und Temp-Verzeichnis, mehr nur per `--allow-path` / `CLAUDEX_ALLOWED_PATHS`. |
 
+Jeder Aufruf braucht seit 2.5.0 zusätzlich `--expect-workdir "$TARGET"` — die
+Zusicherung, dass die Sitzung im erwarteten Verzeichnis gestartet wurde (Details
+und die verbindliche Stanza im folgenden Abschnitt, wörtlich gleich in allen
+aufrufenden Skills):
+
+<!-- claudex-target:begin -->
+### Review target (`target=`)
+
+The skill argument `target=<absolute path>` (same `key=value` grammar as
+`scope=` / `SPEC_FILE=`) names the directory under review. If it is missing,
+ASK the human for it. ⛔ Never derive it from `$PWD`, `$(pwd)`, `.`, the
+harness's working directory, or the output of any command — a value the
+session derives from itself confirms itself, which is the incident this
+exists for.
+
+Precondition: the session must have been STARTED in exactly this directory.
+A `cd` does not persist between tool calls, and a `cd … &&` in front of the
+wrapper call is denied by the guard — reviewing some other repo from here is
+not supported; start a session there instead.
+
+Show the value to the human BEFORE the first wrapper call:
+
+```bash
+# TARGET is the literal value of the skill argument target= -- substituted by whoever
+# runs this block. Copied unchanged it fails closed: the wrapper refuses a non-absolute value.
+TARGET='<target= argument>'
+echo "Review scope: $TARGET"
+```
+
+The wrapper refuses with exit 2 when `$TARGET` is not the working directory —
+that is a STOP: tell the human, do not retry with a different value. A
+different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
+mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
+the flag yet. Update it from the plugin
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+and rerun. ⛔ Never drop the flag to make the error go away.
+<!-- claudex-target:end -->
+
 **Aufruf:**
 
 ```bash
-python tools/codex_ro.py --prompt-file p.txt  --out-file "$SCRATCH_DIR/verdict-r1.txt"
-python tools/codex_ro.py --resume <thread-id> --prompt-file p2.txt \
+python tools/codex_ro.py --expect-workdir "$TARGET" --prompt-file p.txt \
+                         --out-file "$SCRATCH_DIR/verdict-r1.txt"
+python tools/codex_ro.py --expect-workdir "$TARGET" --resume <thread-id> --prompt-file p2.txt \
                          --out-file "$SCRATCH_DIR/verdict-r2.txt"
 ```
 
@@ -52,11 +91,55 @@ Auf macOS heißt der Interpreter in der Regel `python3`. Exit-Codes: `0` Antwort
 Sandbox-Pin, Pfadgrenzen, stderr-Datei, Timeout und MCP-Abschaltung auf einmal — und
 genau dann, wenn man es eilig hat.
 
-⚠️ Der Wrapper braucht ein **Git-Verzeichnis** als Arbeitsverzeichnis, sonst verweigert
-Codex mit „Not inside a trusted directory". Das ist kein Schikane-Check: er begrenzt
-Codex' Schreibwurzel auf das Repo. ⛔ Die Flagge, die die Fehlermeldung nennt
-(`--skip-git-repo-check`), wird **nie** gesetzt — unter `-s read-only` ist sie nur
-sinnlos, unter `build`s `--yolo` hebt sie die Grenze auf. Greenfield: erst `git init`.
+⚠️ **Korrektur (Sec. 1b in `main()`, gemessen).** Hier stand bis zum 18.09.2026, der
+Wrapper brauche ein Git-Verzeichnis, sonst verweigere Codex mit „Not inside a trusted
+directory", und die Flagge aus der Fehlermeldung (`--skip-git-repo-check`) werde „nie"
+gesetzt, weil sie „Codex' Schreibwurzel auf das Repo" begrenze. Beides war falsch.
+`build_argv()` setzt die Flagge seit dem 09.09.2026 **unbedingt** — bei jedem Aufruf,
+git-Repo oder nicht. Ein cwd außerhalb eines Git-Repos ist seither kein Abbruch mehr,
+nur eine Warnung (`main()`, „1b. Outside a git repo"). Die „Schreibwurzel"-Begründung
+war aus upstream Issue #10 übernommen und hier nie nachgemessen worden; @mraol08831 hat
+sie auf upstream PR #15 gemessen und widerlegt: `workspace-write` meldet seine Wurzeln
+als `[cwd, /tmp, $TMPDIR]` — das **Arbeitsverzeichnis**, nicht der Repo-Root, mit und
+ohne Flagge gleich. Hier auf codex-cli 0.149.1 nachgestellt. Die Flagge schaltet nur eine
+Start-**Trust**-Prüfung ab, nichts an der Sandbox. Praktisch bleibt trotzdem wichtig,
+wo man startet: die Pfadeinsperrung des Wrappers (read/write roots) hängt am
+**Arbeitsverzeichnis**, nicht am Repo-Root — und seit Wrapper 2.5.0 nennt die Kopfzeile
+dieses cwd immer:
+
+```
+# codex read-only | exec (new) | gpt-5.6-terra/high | timeout 600s | wrapper 2.5.0
+#   cwd: D:\…\wegwerf-repo   (git repo)          <- oder "(kein git repo)"
+```
+
+Greenfield (noch kein Repo): einfach loslegen, der Wrapper warnt nur; `git init` ist
+nicht mehr Voraussetzung, nur weiterhin sinnvoll für `build`, das mit vollen
+Schreibrechten läuft und dort von einer Rückrollbarkeit profitiert.
+
+### Der Scope kommt vom Sitzungsstart, nicht von einem `cd` (docs/audit/2026-09-11-scope.md §3)
+
+Nur eine Sitzung, die im Zielverzeichnis **gestartet** wurde, ist unterstützt — ein
+Verzeichniswechsel mitten in der Sitzung erreicht den Wrapper-Aufruf nicht. Gemessen:
+
+| Werkzeug | Befund |
+| --- | --- |
+| Bash-Tool, alleinstehendes `cd C:\…\Temp` | Harness antwortet: *"Shell cwd was reset to d:\…\uj-claudex-loop"* — der Wechsel hält nicht über den Aufruf hinaus |
+| PowerShell-Tool, `Set-Location` + `Get-Location` | zeigt den neuen Pfad **nur innerhalb** desselben Aufrufs, danach dieselbe Rücksetzung |
+| `cd X && python tools/codex_ro.py …` in einem Aufruf | vom `wrapper_guard.py`-Hook verweigert (Exit 2) |
+
+Der eine Aufruf, der beides täte — wechseln und den Wrapper im selben Kommando starten
+— ist damit gesperrt, und ein alleinstehender Wechsel hält nicht über den nächsten
+Werkzeugaufruf hinaus. **Es gibt genau einen unterstützten Weg:** eine Sitzung, die im
+Zielverzeichnis beginnt. ⛔ Ein Verzeichniswechsel lässt sich **nicht** über zwei
+getrennte Werkzeugaufrufe „mitnehmen" — genau das zeigt die Messung oben, der zweite
+Aufruf läuft wieder im ursprünglichen Verzeichnis. Zwei getrennte Aufrufe sind der
+Ausweg nur für einen **zweiten Befehl**, der sonst an den Wrapper-Aufruf angekettet
+würde (`… && …`), nie für das cwd.
+
+⚠️ **G-1, am Rande:** Text, der den Wrapper-Pfad nur **zitiert** — etwa in einem Heredoc
+mit typografischen Anführungszeichen — kann vom Guard mit „unbalanced quotes" abgewiesen
+werden, obwohl nichts ausgeführt wird. Solchen Text über eine Datei schreiben, nicht per
+Heredoc.
 
 ### Wohin die Dateien gehen
 
