@@ -387,20 +387,38 @@ Full protocol: [FALLBACK.md](../../FALLBACK.md). The short form:
 ### Resolution (you sign off — final gate)
 - **APPROVED:** present the final `PLAN_FILE`, a 3-bullet summary of what the loop improved, and the round count. **Optional cold-read before sign-off:** the APPROVED came from the thread that negotiated the plan for N rounds — right for checking prior findings, but it can anchor the closing verdict. Offer one extra pass from a FRESH read-only session (same review prompt, plan inlined, no access to the argument) as a cheap anchoring control — the same fresh-eyes mechanism Phase 3 already uses. Its verdict is advisory: a fresh REVISE doesn't reopen the loop, it goes to the user as a flagged disagreement — and it is logged like any round (`## Cold-read — fresh session` + critique verbatim + Claude's per-finding disposition), never only mentioned in the chat. Then ask: *"Interrogated + survived N rounds of Codex. Implement it now — Codex builds it (`/build`), Claude builds it, or stop here?"* Code only on a yes.
 - **MAX_ROUNDS hit without APPROVED (deadlock):** do NOT fake convergence. List each unresolved point + Claude's counter-position; hand it to the user to break the tie. A flagged disagreement beats a false "approved." **If the user breaks the tie and decides to build, the build takes the same path as after APPROVED** — Phase 3, the post-build cross-inspection and the closing gate. A plan that ended in deadlock needs the gate more, not less.
-- **Either outcome — write the gate anchor into `PLAN_FILE`.** Append this section as the plan's last one, verbatim apart from the two paths:
+- **Either outcome — write the gate anchor into `PLAN_FILE`.** Append this section as the plan's last one, verbatim apart from the two paths and the due point:
 
   ```markdown
   ## Closing gate (after the build)
 
-  <!-- claudex-gate: pending -->
+  <!-- claudex-gate: pending; due-after: <last plan step> -->
 
-  Whoever builds this plan — this session or a later one — owes the closing gate before
-  the work counts as done: the post-build cross-inspection and
-  `/claudex-loop:code-review SPEC_FILE=<PLAN_FILE> LOG_FILE=<LOG_FILE> scope=dod,quality,security`.
-  Afterwards set the marker to `claudex-gate: done`. If the gate cannot run (Codex quota
-  out and no fallback, or the user declines), log `## Closing gate skipped — <reason>` in
-  `LOG_FILE` and set `claudex-gate: skipped`. Skipping is allowed; skipping silently is not.
+  `pending` is the normal state while this plan is being built. The closing gate is due
+  **after the step named above** — not before: it compares the finished work with the plan,
+  so mid-build it can only answer `INCOMPLETE`. Whoever completes that step — this session
+  or a later one — runs it before the work counts as done: the post-build cross-inspection
+  and `/claudex-loop:code-review SPEC_FILE=<PLAN_FILE> LOG_FILE=<LOG_FILE> scope=dod,quality,security`.
+  Afterwards change the marker's state word to `done` and leave the due point standing. If
+  the gate cannot run (Codex quota out and no fallback, or the user declines), log
+  `## Closing gate skipped — <reason>` in `LOG_FILE` and set the state word to `skipped`.
+  Skipping is allowed; skipping silently is not. An interim review of a finished piece is
+  fine, but it is not this gate and does not change the marker.
   ```
+
+  **The due point is the plan's last step**, in the plan's own words and short — `Welle 4`,
+  `step 5/5`, `Phase 3 rollout`; a plan without stages gets `due-after: build`. Name it to
+  the user together with the sign-off question: it is part of what they approve, because it
+  decides when the gate costs quota. Keep it a label — one line, at most six words and 60
+  characters; plain ASCII letters (plus `äöüÄÖÜß`), digits, spaces and `._-/#` only — no
+  other scripts, no quotes, no punctuation beyond those. The `gate_reminder` hook quotes it
+  into the session's context, and since that text comes out of a repo file it refuses to
+  echo anything longer or stranger; a due point it will not echo is treated as missing.
+
+  **Why `pending` needed a due point (2026-09-21):** the marker said only *that* a gate was
+  open, and the hook filled the gap with "the closing gate is owed … run it now" on the
+  first commit of a staged build. In a consumer repo a session building wave 0 of 5 listed
+  the gate as still missing — and asked for a DoD verdict on work nobody had started.
 
   **Why it lives in the plan and not only here:** measured 2026-09-18 across every log in the
   largest user repo — the gate had never run once. Every recent run ended at `MAX_ROUNDS`,
@@ -441,7 +459,7 @@ After the cross-inspection (whichever model built), run the **`code-review`** sk
 - The loop ALWAYS terminates at `MAX_ROUNDS`.
 - Claude is final arbiter on every REVISE — incorporate good critiques, reject bad ones *with a logged reason*. Don't cave to everything (defeats the cross-model check) and don't ignore it (defeats the point).
 - Code only after the user's final sign-off.
-- **Every resolved plan carries the gate anchor** (`claudex-gate: pending` + the closing-gate section, see Resolution), and a finished build flips it to `done` or `skipped` — never leaves it pending.
+- **Every resolved plan carries the gate anchor** (`claudex-gate: pending; due-after: <last plan step>` + the closing-gate section, see Resolution), and a finished build flips its state word to `done` or `skipped` — never leaves it pending. `pending` *before* the due point is the normal state, not a debt: the gate is due after the last step, and running it earlier buys a foregone `INCOMPLETE`.
 - `LOG_FILE` is the deliverable — keep the whole argument. **Findings ledger rule:** every reviewer output — Phase 2 rounds, a fallback round (valid or an INVALID attempt, labeled as such), an optional cold-read, the post-build inspection, any recheck, and every `code-review` pass — is appended to `LOG_FILE` **verbatim, at the moment it arrives**, followed by Claude's per-finding disposition (accepted → what changed / rejected → why). Nothing about a review lives only in the chat transcript; if it isn't in the log, it didn't happen. `scripts/fallback_review.py --append-log <LOG_FILE>` does this mechanically for fallback rounds.
 - `CONTEXT.md` stays a glossary only — never implementation details.
 

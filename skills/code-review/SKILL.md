@@ -114,7 +114,15 @@ and rerun. ⛔ Never drop the flag to make the error go away.
 
 1. `git diff <BASE_REF>...HEAD` (plus `git status --short` for untracked files
    that belong to the change). If the diff is empty, stop — nothing to verify.
-2. Read `SPEC_FILE` (and `DOD_FILE` if given).
+2. Read `SPEC_FILE` (and `DOD_FILE` if given). **If `scope` contains `dod` and the plan's
+   marker names a due point** (`claudex-gate: pending; due-after: <step>`), say one sentence
+   before anything is sent: *"Per the plan the closing gate is due after `<step>`. Is
+   `<step>` reached? If not, `DOD: INCOMPLETE` is the expected result."* This is a notice,
+   not a stop — a deliberate interim review must stay possible — but then drop `dod` or
+   expect that verdict, log the run as an interim review, and leave the marker alone (see
+   "Close the plan's gate marker"). The gate compares FINISHED work with the plan; asked
+   mid-build it spends quota on an answer that was known beforehand (2026-09-21: a session
+   building wave 0 of 5 had the gate on its to-do list because a hook had called it owed).
 3. **Only when `docs` or `tests` is selected** — measure, don't guess. Run
    whatever the repo already has and inline the *numbers* in the prompt; a
    threshold check beats an opinion, and it is what makes `DOCSTRING_MIN`
@@ -432,12 +440,15 @@ gate on its own, whatever the scopes say; an exposed change with no exposure ver
 (pass not run, invalid, or skipped) is **not reviewed** — report it as such, not as
 green with a footnote.
 
-**Close the plan's gate marker.** If `SPEC_FILE` carries `claudex-gate: pending`, set it to
-`claudex-gate: done` once the gate result is in `LOG_FILE` — pass or fail; the marker says
-the gate *ran*, the log says how it went. If the gate was skipped (quota out and no
-fallback, or declined), log `## Closing gate skipped — <reason>` and set
-`claudex-gate: skipped`. The `gate_reminder` hook stops mentioning the plan once the
-marker is no longer `pending`.
+**Close the plan's gate marker.** If `SPEC_FILE` carries `claudex-gate: pending`, change
+that **state word** to `done` once the gate result is in `LOG_FILE` — pass or fail; the
+marker says the gate *ran*, the log says how it went. Leave a `due-after:` on the marker
+standing; it is the record of when the gate was due. If the gate was skipped (quota out
+and no fallback, or declined), log `## Closing gate skipped — <reason>` and set the state
+word to `skipped`. The `gate_reminder` hook stops mentioning the plan once the state is no
+longer `pending`. ⛔ An **interim review** — this skill run on a finished piece before the
+plan's due point — closes nothing: log it as `## Interim review (<scopes>)`, not as the
+gate, and leave the marker on `pending`.
 
 ## If Codex is unavailable (quota, credits, outage)
 

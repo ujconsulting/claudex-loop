@@ -710,6 +710,89 @@ class FailClosedComplementTests(unittest.TestCase):
                     )
 
 
+class GateMarkerContractTests(unittest.TestCase):
+    """The closing-gate marker says WHEN the gate is due (2026-09-21).
+
+    `<!-- claudex-gate: pending -->` carried no due point, and the `gate_reminder` hook
+    filled the gap with "owed … run it now" on the first commit of a staged build. The
+    marker is WRITTEN in two places (claudex-loop's Resolution, and plan-review, which
+    points there) and FLIPPED in two others (build, code-review). Four files and a hook
+    have to agree on one spelling; the hook's side is pinned in test_gate_reminder.py.
+    """
+
+    WRITERS = ("claudex-loop", "plan-review")
+    FLIPPERS = ("build", "code-review")
+    BARE_PENDING_COMMENT = re.compile(r"<!--\s*claudex-gate:\s*pending\s*-->")
+
+    @staticmethod
+    def _text(skill):
+        return (REPO / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+
+    CANONICAL_MARKER = "<!-- claudex-gate: pending; due-after: <last plan step> -->"
+    ANY_MARKER_COMMENT = re.compile(r"<!--\s*claudex-gate:.*?-->", re.S)
+
+    def test_no_writer_offers_the_marker_without_a_due_point(self):
+        for skill in self.WRITERS:
+            with self.subTest(skill=skill):
+                self.assertIsNone(
+                    self.BARE_PENDING_COMMENT.search(self._text(skill)),
+                    f"{skill}: the marker it tells the reader to write has no `due-after:`",
+                )
+                self.assertIn("claudex-gate: pending; due-after:", self._text(skill))
+
+    def test_every_marker_a_writer_shows_is_the_canonical_one_byte_for_byte(self):
+        """Closing-gate finding Q1: substring checks let two writers drift apart --
+        `due-after:<step>`, `due_after:`, a different placeholder -- and stay green. The
+        hook parses ONE spelling. So every marker comment a writer shows is compared
+        whole, and each writer must show at least one."""
+        for skill in self.WRITERS:
+            found = self.ANY_MARKER_COMMENT.findall(self._text(skill))
+            with self.subTest(skill=skill):
+                self.assertTrue(found, f"{skill} shows no marker comment at all")
+                for marker in found:
+                    self.assertEqual(marker, self.CANONICAL_MARKER)
+
+    def test_the_hook_parses_the_canonical_marker(self):
+        """The contract's other half: what the skills write is what the hook reads."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gate_reminder", REPO / "hooks" / "gate_reminder.py")
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        filled = self.CANONICAL_MARKER.replace("<last plan step>", "Welle 4")
+        self.assertEqual(hook.due_point(f"# PLAN\n\n{filled}\n"), "Welle 4")
+        # Copied unchanged, the placeholder is not a label: `<` and `>` are not echoable.
+        self.assertIsNone(hook.due_point(self.CANONICAL_MARKER))
+
+    def test_the_writer_says_what_goes_into_the_due_point(self):
+        text = self._text("claudex-loop")
+        self.assertIn("last step", text.lower())
+        self.assertIn("due-after: build", text, "a plan without stages needs a value too")
+
+    def test_flipping_the_marker_keeps_the_due_point(self):
+        for skill in self.FLIPPERS:
+            with self.subTest(skill=skill):
+                self.assertIn(
+                    "due-after", self._text(skill),
+                    f"{skill}: say that only the state word changes — the due point stays as a record",
+                )
+
+    def test_the_gate_is_due_after_the_build_not_during_it(self):
+        """code-review runs `dod` against a plan; mid-build INCOMPLETE is a foregone result."""
+        text = self._text("code-review")
+        self.assertIn("due-after", text)
+        self.assertRegex(text, r"(?i)interim review")
+
+    def test_hook_and_skills_use_one_key(self):
+        hook = (REPO / "hooks" / "gate_reminder.py").read_text(encoding="utf-8")
+        self.assertIn("due-after", hook)
+        for skill in (*self.WRITERS, *self.FLIPPERS):
+            with self.subTest(skill=skill):
+                self.assertNotIn(
+                    "faellig-nach", self._text(skill),
+                    "the skills WRITE one key; the German one is read by the hook for old plans only",
+                )
+
+
 class CanonicalTargetSectionTests(unittest.TestCase):
     """docs/audit/2026-09-11-scope.md §5 E-3.1: one section, byte-identical everywhere it is
     required. Six skills built six different stanzas before this was made

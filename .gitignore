@@ -29,3 +29,11 @@ docs/self-review/
 # nicht stimmte: wer der eigenen Regel folgte, hatte danach einen untrackten
 # Ordner im Repo-Root, den der Repo-Root-Waechter meldet.
 .claudex-tmp/
+
+# Arbeitslisten und Plaene des Eigners. Dieser Fork ist oeffentlich; Aufgaben und
+# Plaene nennen mit der Zeit zwangslaeufig Dinge, die nicht hierher gehoeren (andere
+# Repos, Infrastruktur, Entscheidungen). Das Repo bleibt lokal fuehrend, gespiegelt
+# wird nach Jira (docs/todos/README.md, T11) -- nicht nach GitHub. Was aus einem Plan
+# oeffentlich belegt werden soll, wandert als Destillat nach docs/audit/.
+docs/todos/
+docs/plans/
