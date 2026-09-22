@@ -904,5 +904,23 @@ class BetriebDocAccuracyTests(unittest.TestCase):
         )
 
 
+class ModelPinConsistencyTests(unittest.TestCase):
+    """A skill whose own commands pass the role's model must not tell the reader not to.
+
+    `claudex-loop` resolved model and effort via `claudex_roles.py --spec` and
+    passed `--model "$MODEL"` — while its prerequisites said "Do NOT pin -m. Use
+    the config default" and told Claude to echo the config's model as the one in
+    use. The echoed model was not the one that ran.
+    """
+
+    def test_no_skill_passing_the_role_model_says_use_the_config_default(self):
+        for path in SKILLS:
+            text = path.read_text(encoding="utf-8")
+            if '--model "$MODEL"' not in text:
+                continue
+            with self.subTest(skill=path.parent.name):
+                self.assertNotRegex(text, r"Do NOT pin `-m`|Use the config default")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

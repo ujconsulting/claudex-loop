@@ -200,5 +200,51 @@ class TranslationSyncTests(unittest.TestCase):
         )
 
 
+class TunablesMatchTheSkillsTests(unittest.TestCase):
+    """A default in the README table is a copy of the one in the skill — and copies drift.
+
+    2026-09-19 `code-review` raised MAX_RECHECK from 1 to 2; the README table did
+    not list MAX_RECHECK at all, and nothing noticed. Every row whose skill cell
+    names one skill and whose default is a literal is now compared with that
+    skill's own table.
+    """
+
+    ROW_RE = re.compile(r"^\| `([a-z-]+)` \| `([A-Za-z_]+)` \| `([^`]+)` \|", re.M)
+
+    @staticmethod
+    def skill_default(skill, var):
+        text = (REPO / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+        m = re.search(rf"^\| `{var}` \| `([^`]+)` \|", text, re.M)
+        return m.group(1) if m else None
+
+    def test_every_literal_default_matches_its_skill(self):
+        for path in (EN, DE):
+            rows = self.ROW_RE.findall(path.read_text(encoding="utf-8"))
+            self.assertTrue(rows, f"{path.name}: tunables table not found")
+            for skill, var, default in rows:
+                with self.subTest(readme=path.name, skill=skill, var=var):
+                    self.assertEqual(default, self.skill_default(skill, var))
+
+    def test_the_recheck_limits_are_listed(self):
+        for path in (EN, DE):
+            rows = {(s, v) for s, v, _ in self.ROW_RE.findall(path.read_text(encoding="utf-8"))}
+            for skill in ("code-review", "docs-backfill"):
+                with self.subTest(readme=path.name, skill=skill):
+                    self.assertIn((skill, "MAX_RECHECK"), rows)
+
+
+class UpgradeNotesTests(unittest.TestCase):
+    """2.5.0 stops a run that used to work: every skill passes --expect-workdir, and a
+    2.4.0 copy in a consumer repo refuses the unknown flag (exit 2). The README had
+    upgrade notes for 2.2.0 and 2.3.0 — and none for the break that was live."""
+
+    def test_both_readmes_carry_the_2_5_0_upgrade_note(self):
+        for path, heading in ((EN, "## Upgrading to 2.5.0"), (DE, "## Umstieg auf 2.5.0")):
+            with self.subTest(readme=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(heading, text)
+                self.assertIn("wrapper_drift.py --repo . --update", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

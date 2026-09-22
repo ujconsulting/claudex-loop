@@ -78,7 +78,7 @@ Zwei Artefakte pro Lauf: `PLAN.md` (das *Was*) und `PLAN-REVIEW-LOG.md` (die vol
 
 ## Jenseits des Plans
 
-Phase 3 endet mit dem Abnahme-Gate auf dem fertigen Diff — standardmäßig an, überspringbar nur mit protokolliertem Grund. **Diese vier Skills gehören nicht zu dieser Schleife** — sie laufen für sich, auf Artefakten, die die Schleife nie sieht.
+Phase 3 endet mit `code-review`, dem Abnahme-Gate auf dem fertigen Diff — standardmäßig an, überspringbar nur mit protokolliertem Grund. **Es ist zugleich ein eigenständiger Skill, und die drei darunter sind es auch:** jeder läuft für sich, auf Artefakten, die die Schleife nie erzeugt — ein Diff, der ohne Plan entstand, eine Codebasis, die nie geprüft wurde, liegengebliebene Doku-Schulden, ein Repo, das noch nicht eingerichtet ist.
 
 | Skill | Beurteilt | Verdikt |
 |---|---|---|
@@ -174,8 +174,12 @@ gesamtes Produkt Kontrollen sind:
   Wrapper erlaubt; Runde 3 fand einen Fail-open, den der Autor beim Beheben von Runde 2
   selbst eingebaut hatte — `os.path.realpath("")` ist gleich dem cwd, ein nicht gesetztes
   `$TARGET` hätte sich also selbst bestätigt. `MAX_ROUNDS` wurde erreicht, ohne
-  `VERDICT: APPROVED`; der Auftraggeber hat es per ausdrücklicher Entscheidung aufgelöst,
-  und das abschließende `code-review`-Gate ist geschuldet wie bei jedem Plan, der so endet.
+  `VERDICT: APPROVED`; der Auftraggeber hat es per ausdrücklicher Entscheidung aufgelöst.
+  Das abschließende `code-review`-Gate lief danach und endete nach seinem zulässigen
+  Recheck **rot**: der Erstlauf fand das oben beschriebene `abspath()`-Loch, der Recheck
+  bestätigte die Kontrolle im Wrapper als geschlossen, und sein letzter Fund — in den
+  Contract-Tests der Skills — ist rot-zuerst behoben, vom Reviewer aber noch nicht
+  gegengeprüft. So wie es ist aufgeschrieben in [`docs/audit/2026-09-11-scope.md`](./docs/audit/2026-09-11-scope.md) §10.
 
 Drei unabhängige Durchgänge über dieselben 500 Zeilen, jeder fand, was der vorige
 übersehen hatte. Das ist das Argument für die ganze Methode, vorgetragen gegen ihren
@@ -183,6 +187,34 @@ eigenen Autor. Alles ist samt Nachweis aufgeschrieben in
 [`docs/audit/2026-08-30-baseline.md`](./docs/audit/2026-08-30-baseline.md) — inklusive
 der **zurückgewiesenen** Befunde und der Stellen, an denen dem Rat eines Prüfers
 bewusst nicht gefolgt wurde.
+
+## Umstieg auf 2.5.0 — ein bewusster Bruch
+
+2.5.0 gibt dem Wrapper `--expect-workdir` (siehe [Sicherheit](#sicherheit)): ein Review kann
+nicht mehr unbemerkt in einem Verzeichnis laufen, das niemand gewählt hat — denn dieses
+Verzeichnis entscheidet, welche `AGENTS.md` mit dem Prompt die Maschine verlässt.
+
+**Eine Änderung stoppt absichtlich einen Lauf, der vorher funktionierte:**
+
+- **Jeder Review-Skill übergibt jetzt `--expect-workdir "$TARGET"`.** Ein Repo, dessen
+  `tools/codex_ro.py` noch auf 2.4.0 oder älter steht, kennt den Schalter nicht und lehnt
+  den Aufruf ab — Exit 2, `unrecognized arguments: --expect-workdir` —, bevor irgendetwas
+  bei Codex ankommt. Die Skills erkennen das und nennen die Abhilfe. Einmal je Repo die
+  Kopie angleichen:
+
+```bash
+python <plugin>/scripts/wrapper_drift.py --repo . --update
+```
+
+  `--update` fasst nur den Wrapper an. `--update-optional` überschreibt zusätzlich
+  `codex_usage.py` und `fallback_review.py`, die in Repos gern vor Ort angepasst werden —
+  erst den Diff lesen.
+
+**Ebenfalls wissenswert:** Die Review-Skills nehmen `target=<absoluter Pfad>` und fragen
+danach, wenn er fehlt — nie aus `$PWD` abgeleitet. Der Wrapper *sichert* diesen Pfad nur
+zu; er kann ein Review nicht dorthin verlegen, also die Sitzung in dem Repo starten, das
+geprüft werden soll. Seine Kopfzeile nennt jetzt immer das Verzeichnis, in dem er
+tatsächlich lief.
 
 ## Umstieg auf 2.3.0 — ein bewusster Bruch
 
@@ -240,7 +272,7 @@ Die Installation kopiert den **Arbeitsbaum**, uncommittete Änderungen eingeschl
 **Seit 2.2.0 zurückgezogen — `skills/` zu kopieren war nie eine funktionierende Installation.** Es ließ beide Hälften der Maschinerie zurück, die die Skills aufrufen, und die zweite Auslassung ist die gefährliche:
 
 - **`scripts/`** — der read-only-Wrapper und der Rollen-Resolver. Die Kommandos der Skills rufen `tools/codex_ro.py` und `scripts/claudex_roles.py` über Pfad auf. Kopierte Skills allein haben nichts auszuführen und keinen unterstützten Weg, woandershin zu zeigen.
-- **`hooks/`** — der `PreToolUse`-Guard. Die Setup-Anleitung empfiehlt einen Allowlist-Eintrag für den Wrapper, und *der Guard ist das Einzige, was ein passendes Kommando davon abhält, ein zweites auf derselben Freigabe mitzuführen.* Eine Installation mit Allowlist und ohne Hook ist schlechter als gar keine. Daneben `gate_reminder.py`: beim `git commit` nennt es jeden `PLAN.md`, dessen Abschluss-Gate noch `pending` ist — einmal je Sitzung, nur als Erinnerung, es blockiert nie.
+- **`hooks/`** — der `PreToolUse`-Guard. Die Setup-Anleitung empfiehlt einen Allowlist-Eintrag für den Wrapper, und *der Guard ist das Einzige, was ein passendes Kommando davon abhält, ein zweites auf derselben Freigabe mitzuführen.* Eine Installation mit Allowlist und ohne Hook ist schlechter als gar keine. Daneben `gate_reminder.py`: beim `git commit` nennt es jeden `PLAN.md`, dessen Abschluss-Gate noch `pending` ist, und zitiert den Schritt, nach dem es fällig ist — einmal je Sitzung, nur als Erinnerung, es blockiert nie.
 
 Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles Kopieren kann das nicht, weil es keinen benutzerbezogenen Pfad gibt, aus dem Claude Code Hooks für lose Skills lädt. Statt eine Konfiguration zu dokumentieren, die es nicht gibt, ist diese Variante entfallen. Nimm **Variante A**, oder **Variante C**, wenn du an den Skills selbst arbeitest — das ist ein echtes Checkout mit allem an Bord.
 
@@ -248,14 +280,23 @@ Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles
 
 ## Voraussetzungen
 
-- **Codex CLI ≥ 0.130** — `npm install -g @openai/codex@latest`
+- **Codex CLI ≥ 0.130** — `npm install -g @openai/codex@latest`. Unter Windows braucht Codex
+  ab 0.147 einen Wrapper **ab 2.4.0**, sonst liest der Reviewer lautlos nichts (siehe
+  [Sicherheit](#sicherheit)). Nichts prüft die installierte Version für dich.
 - **Angemeldet** — einmal `codex login` (jedes ChatGPT-Konto: Free/Plus/Pro/Max)
-- **Kein Modell pinnen** — die ChatGPT-Konto-Authentifizierung lehnt `gpt-5.x-codex`-Varianten ab; die Skills nehmen deinen Konfigurations-Default und nennen das aktive Modell beim Start, damit du ein Veto einlegen kannst, bevor eine Runde verbrannt ist
+- **Modell und Aufwand kommen aus den Rollen, nicht aus deiner Codex-Konfiguration** —
+  `python scripts/claudex_roles.py --spec <role>` löst sie auf (`gpt-5.6-terra/high` für
+  die prüfenden Rollen, `gpt-5.6-sol/medium` für den Exposure-Pass), und die Review-Skills
+  geben sie an den Wrapper weiter; je Rolle überschreibbar in `.claudex.yaml`
+  ([ROLES.md](ROLES.md)). Nur `build` läuft, wenn Codex baut, auf deinem
+  Konfigurations-Default. Die `gpt-5.x-codex`-Slugs meiden: die ChatGPT-Konto-
+  Authentifizierung lehnt sie ab.
 
 ## Stellschrauben
 
 | Skill | Variable | Default | Bedeutung |
 |-------|----------|---------|-----------|
+| `claudex-loop`, `plan-review`, `code-review`, `audit`, `setup` | `target` | wird erfragt, wenn er fehlt | Absoluter Pfad des geprüften Repos. Nie aus `$PWD` abgeleitet; der Wrapper sichert ihn zu (`--expect-workdir`) und lehnt eine Abweichung ab |
 | `claudex-loop` | `research` | fragt nach | `none` / `web` / `deep` — beantwortet das Recherche-Tor aus Phase 0 vorab |
 | Review-Skills | `MAX_ROUNDS` | `5` | Harte Obergrenze für Review-Runden |
 | Review-Skills | `PLAN_FILE` | `PLAN.md` | Wo der Plan liegt |
@@ -268,16 +309,18 @@ Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles
 | `code-review` | `DOCSTRING_MIN` | `80` | Prozent der neuen/geänderten öffentlichen Einheiten, die dokumentiert sein müssen |
 | `code-review` | `EXPOSURE` | `auto` | Exposure-Pass für alles, was zum Netz zeigt — `no` ist eine protokollierte Behauptung und wird abgelehnt, wenn der Diff etwas anderes sagt |
 | `code-review` | `THIRD_REVIEWER` | `off` | **Optionaler** Zusatzlauf durch einen Prüfer, der weder Produzent noch primärer Gegenspieler ist (`coderabbit`). Das Gate ist auch ohne vollständig — standardmäßig aus, weil das nicht jeder hat |
+| `code-review` | `MAX_RECHECK` | `2` | Rechecks nach angenommenen Fixes — Erstlauf + N; das Gate endet immer |
 | `docs-backfill` | `TARGET` | *Pflicht* | Was dokumentiert werden soll. Verweigert unbegrenzte Läufe |
 | `docs-backfill` | `BATCH` | `15` | Einheiten je Schreib-dann-Prüf-Zyklus |
+| `docs-backfill` | `MAX_RECHECK` | `1` | Rechecks je Batch nach Fixes |
 | `audit` | `SLICES` | auto | Welche Teile geprüft werden. Der ausgeschlossene Rest wird berichtet, nicht verschwiegen |
 | `audit` | `DIMENSIONS` | `security,quality,docs,tests,rules` | `rules` = Einhaltung der repo-eigenen CLAUDE.md / AGENTS.md |
-| `audit` | `BASELINE_FILE` | `docs/audit/<datum>-baseline.md` | Das Ergebnisdokument |
+| `audit` | `BASELINE_FILE` | `docs/audit/<YYYY-MM-DD>-baseline.md` | Das Ergebnisdokument |
 | `audit` | `EXPOSED` | auto | Komponenten, die zum Netz zeigen; jede bekommt ihre eigene Exposure-Session. Unbekannt gilt als exponiert |
 
 Zum Überschreiben beim Aufruf z. B. `rounds=3` mitgeben.
 
-⛔ **Der eine Hinweis, der die anderen aussticht:** Die hier gepinnte Modellwahl ist `gpt-5.6-terra` mit `model_reasoning_effort=high`, nicht `sol` — `sol` lief an einem echten Plan in die 10-Minuten-Decke. Das widerspricht der Zeile „kein Modell pinnen" weiter oben, die auf die älteren `*-codex`-Slugs zielt; ein Pin funktioniert unter ChatGPT-Authentifizierung einwandfrei.
+⛔ **Warum die prüfenden Rollen `terra` pinnen, nicht `sol`:** `sol` lief an einem echten Plan in die 10-Minuten-Decke; `gpt-5.6-terra` mit `model_reasoning_effort=high` nicht. Ein Pin funktioniert unter ChatGPT-Authentifizierung einwandfrei — abgelehnt werden nur die älteren `*-codex`-Slugs.
 
 ## Wenn Codex leerläuft (Fallback-Prüfer)
 

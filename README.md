@@ -73,7 +73,7 @@ Two artifacts every run: `PLAN.md` (the *what*) and `PLAN-REVIEW-LOG.md` (the fu
 
 ## Beyond the plan
 
-Phase 3 closes with the acceptance gate on the finished diff — on by default, skippable only with a logged reason. **These four skills are not part of that loop** — they run on their own, on artefacts the loop never sees.
+Phase 3 closes with `code-review`, the acceptance gate on the finished diff — on by default, skippable only with a logged reason. **It is also a skill in its own right, and so are the three below it:** each runs on its own, on artefacts the loop never produces — a diff built without a plan, a codebase nobody reviewed, standing documentation debt, a repo not yet wired up.
 
 | Skill | Judges | Verdict |
 |---|---|---|
@@ -165,8 +165,12 @@ product is controls:
   prefix-matched allowlist entry as everything else the wrapper allows; round 3 found
   a fail-open the author introduced while fixing round 2 — `os.path.realpath("")`
   equals the cwd, so an unset `$TARGET` would have confirmed itself. `MAX_ROUNDS` was
-  reached without `VERDICT: APPROVED`; the owner resolved it by explicit decision, and
-  the closing `code-review` gate is owed like any other plan that ends that way.
+  reached without `VERDICT: APPROVED`; the owner resolved it by explicit decision. The
+  closing `code-review` gate then ran and ended **red** after its permitted recheck:
+  its first pass found the `abspath()` hole described above, the recheck confirmed
+  the wrapper control closed, and its last finding — in the skills' contract tests —
+  is fixed red-first but not yet re-verified by the reviewer. Written up as it is in
+  [`docs/audit/2026-09-11-scope.md`](./docs/audit/2026-09-11-scope.md) §10.
 
 Three independent passes over the same 500 lines, each finding what the previous one
 missed. That is the argument for the whole method, made against its own author.
@@ -174,6 +178,32 @@ Everything is written up with its verification in
 [`docs/audit/2026-08-30-baseline.md`](./docs/audit/2026-08-30-baseline.md) — including
 the findings that were **rejected**, and where a reviewer's advice was deliberately not
 followed.
+
+## Upgrading to 2.5.0 — one deliberate break
+
+2.5.0 adds `--expect-workdir` to the wrapper (see [Safety](#safety)): a review can no longer
+run in a directory nobody chose without saying so, because that directory decides which
+`AGENTS.md` leaves the machine with the prompt.
+
+**One change will stop a run that used to work, on purpose:**
+
+- **Every review skill now passes `--expect-workdir "$TARGET"`.** A repo whose
+  `tools/codex_ro.py` is still 2.4.0 or older does not know the flag and refuses the call —
+  exit 2, `unrecognized arguments: --expect-workdir` — before anything reaches Codex. The
+  skills recognise that and name the fix. Level the copy once per repo:
+
+```bash
+python <plugin>/scripts/wrapper_drift.py --repo . --update
+```
+
+  `--update` touches only the wrapper. `--update-optional` also overwrites
+  `codex_usage.py` and `fallback_review.py`, which repos tend to edit in place — read the
+  diff before using it.
+
+**Also worth knowing:** the review skills take `target=<absolute path>` and ask for it when
+it is missing — never derived from `$PWD`. The wrapper only *asserts* that path; it cannot
+move a review there, so start the session in the repo you want reviewed. Its header line
+now always names the directory it actually ran in.
 
 ## Upgrading to 2.3.0 — one deliberate break
 
@@ -280,8 +310,9 @@ one:
   entry for the wrapper, and *the guard is the only thing keeping a matched command from
   carrying a second one along on the same approval.* An install with the allowlist and
   without the hook is worse than no install at all. Next to it, `gate_reminder.py`: at
-  `git commit` it mentions every `PLAN.md` whose closing gate is still `pending` — once
-  per session, a reminder only, it never blocks.
+  `git commit` it mentions every `PLAN.md` whose closing gate is still `pending` and
+  quotes the step after which it is due — once per session, a reminder only, it never
+  blocks.
 
 A plugin install wires `hooks/hooks.json` up on its own; a manual copy cannot, because
 there is no per-user path Claude Code reads hooks from for loose skills. Rather than
@@ -293,14 +324,22 @@ with everything in place.
 
 ## Prerequisites
 
-- **Codex CLI ≥ 0.130** — `npm install -g @openai/codex@latest`
+- **Codex CLI ≥ 0.130** — `npm install -g @openai/codex@latest`. On Windows, Codex 0.147
+  and later needs wrapper **2.4.0 or newer**, or the reviewer silently reads nothing (see
+  [Safety](#safety)). Nothing checks the installed version for you.
 - **Authenticated** — `codex login` once (any ChatGPT account: Free/Plus/Pro/Max)
-- **Don't pin a model** — ChatGPT-account auth rejects `gpt-5.x-codex` variants; the skills use your config default and echo the active model at kickoff so you can veto before a round burns
+- **Model and effort come from the roles, not from your Codex config** —
+  `python scripts/claudex_roles.py --spec <role>` resolves them (`gpt-5.6-terra/high` for
+  the reviewing roles, `gpt-5.6-sol/medium` for the exposure pass) and the review skills
+  pass them to the wrapper; override per role in `.claudex.yaml` ([ROLES.md](ROLES.md)).
+  Only `build`, when Codex builds, runs on your config default. Avoid the
+  `gpt-5.x-codex` slugs: ChatGPT-account auth rejects them.
 
 ## Tunables
 
 | Skill | Var | Default | Meaning |
 |-------|-----|---------|---------|
+| `claudex-loop`, `plan-review`, `code-review`, `audit`, `setup` | `target` | asked if missing | Absolute path of the repo under review. Never derived from `$PWD`; the wrapper asserts it (`--expect-workdir`) and refuses a mismatch |
 | `claudex-loop` | `research` | ask | `none` / `web` / `deep` — pre-answers the Phase 0 research gate |
 | review skills | `MAX_ROUNDS` | `5` | Hard cap on review rounds |
 | review skills | `PLAN_FILE` | `PLAN.md` | Where the plan lives |
@@ -313,19 +352,20 @@ with everything in place.
 | `code-review` | `DOCSTRING_MIN` | `80` | Percent of new/changed public units that must be documented |
 | `code-review` | `EXPOSURE` | `auto` | Exposure pass for anything that faces the network — `no` is a logged claim, refused when the diff says otherwise |
 | `code-review` | `THIRD_REVIEWER` | `off` | **Optional** extra pass by a reviewer that is neither producer nor primary adversary (`coderabbit`). The gate is complete without one — off by default because not everyone has one |
+| `code-review` | `MAX_RECHECK` | `2` | Rechecks after accepted fixes — initial pass + N; the gate always terminates |
 | `docs-backfill` | `TARGET` | *required* | What to document. Refuses to run unbounded |
 | `docs-backfill` | `BATCH` | `15` | Units per write-then-review cycle |
+| `docs-backfill` | `MAX_RECHECK` | `1` | Rechecks per batch after fixes |
 | `audit` | `SLICES` | auto | Which parts to audit. The excluded remainder is reported, not hidden |
 | `audit` | `DIMENSIONS` | `security,quality,docs,tests,rules` | `rules` = conformance to the repo's own CLAUDE.md / AGENTS.md |
-| `audit` | `BASELINE_FILE` | `docs/audit/<date>-baseline.md` | The deliverable |
+| `audit` | `BASELINE_FILE` | `docs/audit/<YYYY-MM-DD>-baseline.md` | The deliverable |
 | `audit` | `EXPOSED` | auto | Components that face the network; each gets its own exposure session. Unknown counts as exposed |
 
 Pass e.g. `rounds=3` when invoking to override.
 
-⛔ **The one note that outranks the rest:** the model that pinned this project's model
-choice is `gpt-5.6-terra` with `model_reasoning_effort=high`, not `sol` — `sol` ran into
-the 10-minute ceiling on a real plan. That contradicts the "don't pin a model" line
-above, which targets the older `*-codex` slugs; a pin works fine under ChatGPT auth.
+⛔ **Why the reviewing roles pin `terra`, not `sol`:** `sol` ran into the 10-minute
+ceiling on a real plan; `gpt-5.6-terra` with `model_reasoning_effort=high` did not. A
+pin works fine under ChatGPT auth — only the older `*-codex` slugs are rejected.
 
 ## When Codex runs dry (fallback reviewers)
 

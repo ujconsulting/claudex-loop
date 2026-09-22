@@ -192,8 +192,8 @@ Hand the locked plan to Codex for adversarial review. Mechanics verified end-to-
   reproduced here. Phase 3 still wants a repo, for diff isolation. (This skill said the
   opposite until 2026-09-09
   proposes the opposite; [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10) is why we don't).
-- Do NOT pin `-m`. Use the config default. Pinning `gpt-5.x-codex` variants 400s on ChatGPT-account auth.
-- **Echo the active model before Round 1** so the user can confirm: read the `model` line from `~/.codex/config.toml` (if absent, report "CLI default"). State it alongside the resolved tunables, e.g. `Reviewer model: CLI default (config unpinned) — codex-cli 0.149.1` (whatever `codex --version` actually reports; the number moves). If the user objects, stop and let them adjust config before burning a review round.
+- Model and effort come from the role, never from this document or `~/.codex/config.toml`: `python scripts/claudex_roles.py --spec plan-review` resolves them and the calls below pass them to the wrapper. Never hand-pick a `gpt-5.x-codex` slug — those 400 on ChatGPT-account auth.
+- **Echo the resolved reviewer before Round 1** so the user can confirm: state the `--spec plan-review` line alongside the resolved tunables, e.g. `Reviewer: codex gpt-5.6-terra/high — codex-cli 0.149.1` (whatever `--spec` and `codex --version` actually report; both move). If the user objects, stop and let them change the role in `.claudex.yaml` before burning a review round.
 
 ### Tunables (read from args, else default)
 | Var | Default | Meaning |
