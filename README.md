@@ -13,6 +13,8 @@
 
 [English](README.md) | [Deutsch](README_DE.md)
 
+<sub>Started as a fork of [chaseai-yt/claudex-loop](https://github.com/chaseai-yt/claudex-loop) by Chase AI — an independent project since 2026-09-22. See [Credits](#credits).</sub>
+
 </div>
 
 ---
@@ -52,9 +54,9 @@ flowchart LR
 
 **You enter at four points only:** confirming the ledger, answering the interview, signing off the converged plan, and approving the final diff if you build. Every reviewing step is read-only and never touches a file.
 
-**Orange is whoever produces, green is whoever grades — not Claude and Codex.** The colours name *roles*, because in this fork the actor behind each one is configuration (see [The actor is configuration, not a name](#the-actor-is-configuration-not-a-name)). In the delegation arrangement the boxes swap models without the diagram changing.
+**Orange is whoever produces, green is whoever grades — not Claude and Codex.** The colours name *roles*, because here the actor behind each one is configuration (see [The actor is configuration, not a name](#the-actor-is-configuration-not-a-name)). In the delegation arrangement the boxes swap models without the diagram changing.
 
-**Dotted edges are conditional.** Building is optional. The acceptance gate on the finished diff is **on by default** — it may be skipped (opt-out, or the Codex quota is out and no fallback is chosen), but only with a logged reason; when the change faces the network, it and its exposure pass are required and `EXPOSURE: UNSAFE` blocks the commit. A plan that ended at `MAX_ROUNDS` reaches the same path once you break the tie. Every resolved plan carries a `claudex-gate: pending; due-after: <last plan step>` marker, so a build in a *later* session still knows the gate is ahead of it — and after which step it is due. `pending` before that step is the normal state, not a debt: the gate compares finished work with the plan, so mid-build it can only answer `INCOMPLETE`. Solid edges always happen. `audit`, `docs-backfill` and `setup` are deliberately absent: they are not steps in this loop at all — see [Beyond the plan](#beyond-the-plan-this-fork).
+**Dotted edges are conditional.** Building is optional. The acceptance gate on the finished diff is **on by default** — it may be skipped (opt-out, or the Codex quota is out and no fallback is chosen), but only with a logged reason; when the change faces the network, it and its exposure pass are required and `EXPOSURE: UNSAFE` blocks the commit. A plan that ended at `MAX_ROUNDS` reaches the same path once you break the tie. Every resolved plan carries a `claudex-gate: pending; due-after: <last plan step>` marker, so a build in a *later* session still knows the gate is ahead of it — and after which step it is due. `pending` before that step is the normal state, not a debt: the gate compares finished work with the plan, so mid-build it can only answer `INCOMPLETE`. Solid edges always happen. `audit`, `docs-backfill` and `setup` are deliberately absent: they are not steps in this loop at all — see [Beyond the plan](#beyond-the-plan).
 
 ## The four phases
 
@@ -69,7 +71,7 @@ flowchart LR
 
 Two artifacts every run: `PLAN.md` (the *what*) and `PLAN-REVIEW-LOG.md` (the full round-by-round argument — the *why*).
 
-## Beyond the plan (this fork)
+## Beyond the plan
 
 Phase 3 closes with the acceptance gate on the finished diff — on by default, skippable only with a logged reason. **These four skills are not part of that loop** — they run on their own, on artefacts the loop never sees.
 
@@ -122,9 +124,9 @@ From the first end-to-end greenfield run (a solo-creator CRM):
 - **~7 missing subsystems**, including the homepage feature that had no backing data source
 - **What survived untouched:** every product decision from the interview. The review only ever attacked *how it would break* — the phases genuinely divide the labor
 
-### And then this fork turned the tools on themselves
+### And then this project turned the tools on themselves
 
-That run is upstream's evidence for the *plan* loop. This fork's own evidence is
+That run is upstream's evidence for the *plan* loop. This project's own evidence is
 harsher, because `audit` was pointed at the repo that ships it — a repo whose entire
 product is controls:
 
@@ -320,7 +322,7 @@ with everything in place.
 
 Pass e.g. `rounds=3` when invoking to override.
 
-⛔ **The one note that outranks the rest:** the model that pinned this fork's model
+⛔ **The one note that outranks the rest:** the model that pinned this project's model
 choice is `gpt-5.6-terra` with `model_reasoning_effort=high`, not `sol` — `sol` ran into
 the 10-minute ceiling on a real plan. That contradicts the "don't pin a model" line
 above, which targets the older `*-codex` slugs; a pin works fine under ChatGPT auth.
@@ -378,11 +380,14 @@ A first design, `--workdir DIR` — a selector that would have set the child's c
 
 **The wrapper alone does not make an allowlist entry safe.** A permission rule matches the *start* of a command, so `Bash(python tools/codex_ro.py*)` also approves whatever is chained behind it. The wrapper nails Codex's sandbox down; it has nothing to say about a second command sharing its approval. [`hooks/wrapper_guard.py`](./hooks/wrapper_guard.py) is the missing half: a `PreToolUse` hook that denies any wrapper invocation carrying chaining, a pipe, a redirect, command substitution, or unbalanced quotes. Without a verified hook, the honest configuration is no allowlist entry at all — roughly six prompts across a five-round review, which is the price of seeing which sandbox Codex starts in.
 
+**Reporting a vulnerability:** privately, never as a public issue — see [SECURITY.md](./SECURITY.md).
+
 ## Credits
 
 - The [`legacy/`](./legacy/) skills' Act 1 (`grill-me`, `grill-with-docs`) © [Matt Pocock](https://github.com/mattpocock/skills) (MIT) — see their `THIRD-PARTY-NOTICES.md`. Claudex-loop's interview is an original redesign.
 - Phase 3's Codex-as-builder pattern adapted from Peter Steinberger's [`codex-first`](https://github.com/steipete/agent-scripts).
-- Claudex-loop, the iterative cross-model review, and packaging by [Chase AI](https://youtube.com/@chaseai).
+- Claudex-loop, the iterative cross-model review, and packaging by [Chase AI](https://youtube.com/@chaseai) — this project started as a fork of [chaseai-yt/claudex-loop](https://github.com/chaseai-yt/claudex-loop).
+- The read-only wrapper, the PreToolUse guard, the role gates, the egress boundary and the audit trail by Uwe Jörk ([U. Jörk Consulting](https://github.com/ujconsulting)).
 
 <div align="center">
 

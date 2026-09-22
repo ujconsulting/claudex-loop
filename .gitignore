@@ -30,7 +30,7 @@ docs/self-review/
 # Ordner im Repo-Root, den der Repo-Root-Waechter meldet.
 .claudex-tmp/
 
-# Arbeitslisten und Plaene des Eigners. Dieser Fork ist oeffentlich; Aufgaben und
+# Arbeitslisten und Plaene des Eigners. Dieses Repo ist oeffentlich; Aufgaben und
 # Plaene nennen mit der Zeit zwangslaeufig Dinge, die nicht hierher gehoeren (andere
 # Repos, Infrastruktur, Entscheidungen). Das Repo bleibt lokal fuehrend, gespiegelt
 # wird nach Jira (docs/todos/README.md, T11) -- nicht nach GitHub. Was aus einem Plan

@@ -13,6 +13,8 @@
 
 [English](README.md) | [Deutsch](README_DE.md)
 
+<sub>Hervorgegangen aus einem Fork von [chaseai-yt/claudex-loop](https://github.com/chaseai-yt/claudex-loop) von Chase AI — seit 22.09.2026 ein eigenständiges Projekt. Siehe [Danksagungen](#danksagungen).</sub>
+
 </div>
 
 > Beide Fassungen werden zusammen gepflegt; `tests/test_readme_sync.py` schlägt fehl,
@@ -57,9 +59,9 @@ flowchart LR
 
 **Du kommst an genau vier Stellen ins Spiel:** Annahmen-Ledger bestätigen, Interview beantworten, den konvergierten Plan abzeichnen und — falls gebaut wird — den finalen Diff freigeben. Jeder prüfende Schritt läuft read-only und fasst keine Datei an.
 
-**Orange ist, wer produziert, Grün ist, wer benotet — nicht Claude und Codex.** Die Farben benennen *Rollen*, denn in diesem Fork ist der Akteur dahinter Konfiguration (siehe [Der Akteur ist Konfiguration, kein Name](#der-akteur-ist-konfiguration-kein-name)). In der Delegations-Aufstellung tauschen die Kästen das Modell, ohne dass sich die Grafik ändert.
+**Orange ist, wer produziert, Grün ist, wer benotet — nicht Claude und Codex.** Die Farben benennen *Rollen*, denn hier ist der Akteur dahinter Konfiguration (siehe [Der Akteur ist Konfiguration, kein Name](#der-akteur-ist-konfiguration-kein-name)). In der Delegations-Aufstellung tauschen die Kästen das Modell, ohne dass sich die Grafik ändert.
 
-**Gepunktete Kanten sind bedingt.** Das Bauen ist optional. Das Abnahme-Gate auf dem fertigen Diff ist **standardmäßig an** — überspringen geht (Opt-out, oder das Codex-Kontingent ist leer und kein Fallback gewählt), aber nur mit protokolliertem Grund; zeigt die Änderung zum Netz, sind es und sein Exposure-Pass Pflicht, und `EXPOSURE: UNSAFE` blockiert den Commit. Ein Plan, der an `MAX_ROUNDS` endet, kommt auf denselben Weg, sobald du den Gleichstand auflöst. Jeder abgeschlossene Plan trägt die Markierung `claudex-gate: pending; due-after: <last plan step>`, damit auch ein Bau in einer *späteren* Sitzung weiß, dass das Gate noch aussteht — und nach welchem Schritt es fällig ist. `pending` vor diesem Schritt ist der Normalzustand, keine Schuld: das Gate vergleicht das fertige Ergebnis mit dem Plan, mitten im Bau kann es nur `INCOMPLETE` antworten. Durchgezogene Kanten passieren immer. `audit`, `docs-backfill` und `setup` fehlen absichtlich: sie sind überhaupt keine Schritte dieser Schleife — siehe [Jenseits des Plans](#jenseits-des-plans-dieser-fork).
+**Gepunktete Kanten sind bedingt.** Das Bauen ist optional. Das Abnahme-Gate auf dem fertigen Diff ist **standardmäßig an** — überspringen geht (Opt-out, oder das Codex-Kontingent ist leer und kein Fallback gewählt), aber nur mit protokolliertem Grund; zeigt die Änderung zum Netz, sind es und sein Exposure-Pass Pflicht, und `EXPOSURE: UNSAFE` blockiert den Commit. Ein Plan, der an `MAX_ROUNDS` endet, kommt auf denselben Weg, sobald du den Gleichstand auflöst. Jeder abgeschlossene Plan trägt die Markierung `claudex-gate: pending; due-after: <last plan step>`, damit auch ein Bau in einer *späteren* Sitzung weiß, dass das Gate noch aussteht — und nach welchem Schritt es fällig ist. `pending` vor diesem Schritt ist der Normalzustand, keine Schuld: das Gate vergleicht das fertige Ergebnis mit dem Plan, mitten im Bau kann es nur `INCOMPLETE` antworten. Durchgezogene Kanten passieren immer. `audit`, `docs-backfill` und `setup` fehlen absichtlich: sie sind überhaupt keine Schritte dieser Schleife — siehe [Jenseits des Plans](#jenseits-des-plans).
 
 ## Die vier Phasen
 
@@ -74,7 +76,7 @@ flowchart LR
 
 Zwei Artefakte pro Lauf: `PLAN.md` (das *Was*) und `PLAN-REVIEW-LOG.md` (die vollständige Auseinandersetzung Runde für Runde — das *Warum*).
 
-## Jenseits des Plans (dieser Fork)
+## Jenseits des Plans
 
 Phase 3 endet mit dem Abnahme-Gate auf dem fertigen Diff — standardmäßig an, überspringbar nur mit protokolliertem Grund. **Diese vier Skills gehören nicht zu dieser Schleife** — sie laufen für sich, auf Artefakten, die die Schleife nie sieht.
 
@@ -127,9 +129,9 @@ Aus dem ersten Ende-zu-Ende-Lauf auf der grünen Wiese (ein CRM für Einzelunter
 - **~7 fehlende Subsysteme**, darunter das Startseiten-Feature ohne dahinterliegende Datenquelle
 - **Was unangetastet überlebt hat:** jede Produktentscheidung aus dem Interview. Der Review griff ausschließlich an, *wie es kaputtginge* — die Phasen teilen die Arbeit tatsächlich auf
 
-### Und dann hat dieser Fork die Werkzeuge auf sich selbst gerichtet
+### Und dann hat dieses Projekt die Werkzeuge auf sich selbst gerichtet
 
-Dieser Lauf ist upstreams Beleg für die *Plan*-Schleife. Der Beleg dieses Forks ist
+Dieser Lauf ist upstreams Beleg für die *Plan*-Schleife. Der Beleg dieses Projekts ist
 härter, denn `audit` wurde auf das Repo gerichtet, das es ausliefert — ein Repo, dessen
 gesamtes Produkt Kontrollen sind:
 
@@ -275,7 +277,7 @@ Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles
 
 Zum Überschreiben beim Aufruf z. B. `rounds=3` mitgeben.
 
-⛔ **Der eine Hinweis, der die anderen aussticht:** Die in diesem Fork gepinnte Modellwahl ist `gpt-5.6-terra` mit `model_reasoning_effort=high`, nicht `sol` — `sol` lief an einem echten Plan in die 10-Minuten-Decke. Das widerspricht der Zeile „kein Modell pinnen" weiter oben, die auf die älteren `*-codex`-Slugs zielt; ein Pin funktioniert unter ChatGPT-Authentifizierung einwandfrei.
+⛔ **Der eine Hinweis, der die anderen aussticht:** Die hier gepinnte Modellwahl ist `gpt-5.6-terra` mit `model_reasoning_effort=high`, nicht `sol` — `sol` lief an einem echten Plan in die 10-Minuten-Decke. Das widerspricht der Zeile „kein Modell pinnen" weiter oben, die auf die älteren `*-codex`-Slugs zielt; ein Pin funktioniert unter ChatGPT-Authentifizierung einwandfrei.
 
 ## Wenn Codex leerläuft (Fallback-Prüfer)
 
@@ -330,11 +332,14 @@ Ein erster Entwurf, `--workdir DIR` — ein Selektor, der das cwd des Kindes ges
 
 **Der Wrapper allein macht einen Allowlist-Eintrag nicht sicher.** Eine Berechtigungsregel matcht den *Anfang* eines Kommandos, `Bash(python tools/codex_ro.py*)` gibt also auch alles frei, was dahinter verkettet ist. Der Wrapper nagelt Codex' Sandbox fest; über ein zweites Kommando auf derselben Freigabe sagt er nichts. [`hooks/wrapper_guard.py`](./hooks/wrapper_guard.py) ist die fehlende Hälfte: ein `PreToolUse`-Hook, der jeden Wrapper-Aufruf mit Verkettung, Pipe, Umleitung, Kommandosubstitution oder unbalancierten Anführungszeichen ablehnt. Ohne verifizierten Hook ist die ehrliche Konfiguration gar kein Allowlist-Eintrag — grob sechs Rückfragen über einen Review mit fünf Runden, und das ist der Preis dafür, zu sehen, in welcher Sandbox Codex startet.
 
+**Eine Schwachstelle melden:** vertraulich, nie als öffentliches Issue — siehe [SECURITY.md](./SECURITY.md).
+
 ## Danksagungen
 
 - Akt 1 der [`legacy/`](./legacy/)-Skills (`grill-me`, `grill-with-docs`) © [Matt Pocock](https://github.com/mattpocock/skills) (MIT) — siehe deren `THIRD-PARTY-NOTICES.md`. Das Interview von claudex-loop ist eine eigenständige Neuentwicklung.
 - Das Codex-als-Bauender-Muster aus Phase 3 ist adaptiert von Peter Steinbergers [`codex-first`](https://github.com/steipete/agent-scripts).
-- Claudex-loop, der iterative modellübergreifende Review und die Paketierung von [Chase AI](https://youtube.com/@chaseai).
+- Claudex-loop, der iterative modellübergreifende Review und die Paketierung von [Chase AI](https://youtube.com/@chaseai) — dieses Projekt ist aus einem Fork von [chaseai-yt/claudex-loop](https://github.com/chaseai-yt/claudex-loop) hervorgegangen.
+- Der read-only Wrapper, der PreToolUse-Guard, die Rollen-Gates, die Egress-Grenze und die Audit-Spur von Uwe Jörk ([U. Jörk Consulting](https://github.com/ujconsulting)).
 
 <div align="center">
 

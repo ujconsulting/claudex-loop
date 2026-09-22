@@ -2,7 +2,7 @@
 
 Upstream bakes the actor into the skill name: `codex-review` means Codex reviews,
 `codex-build` means Codex builds. That reads fine until you want the other
-arrangement, and then the name lies. This fork moves the actor into
+arrangement, and then the name lies. This project moves the actor into
 configuration and names the skills after the **activity** instead.
 
 | Skill | Activity | Actor comes from |

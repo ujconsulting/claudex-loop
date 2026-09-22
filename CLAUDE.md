@@ -57,10 +57,11 @@ automatically; read it before reviewing anything here.
    mirror for German-speaking users, not a summary. Commands, env vars and the diagram
    are copied verbatim rather than translated, and the test compares them literally —
    prose it cannot check, so that part is on you.
-8. **Before this repo is ever published as a real public project** (not the current
-   fork), in this order: **first** enable GitHub's private vulnerability reporting
-   (Settings → Advanced Security), **then** add a `SECURITY.md` pointing at it with a
-   reachable address. Never the other way round — a `SECURITY.md` that forbids public
+9. **The security channel stays in this order** — done on 2026-09-22, when the repo
+   left GitHub's fork network: **first** GitHub's private vulnerability reporting
+   (Settings → Advanced Security) is on, **then** `SECURITY.md` points at it with a
+   reachable address. `tests/test_project_identity.py` holds the file to that.
+   Never switch the reporting off while the file stays. Never the other way round — a `SECURITY.md` that forbids public
    issues while naming no working channel closes the only open door and replaces it
    with nothing. This repo is the likely candidate for it: it enforces a read-only
    sandbox and a taboo scope over what leaves the machine, so a bug here is a security
