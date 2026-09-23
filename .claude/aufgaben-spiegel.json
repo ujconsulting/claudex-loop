@@ -1,0 +1,74 @@
+{
+  "bereiche": [
+    {
+      "aktiv": [
+        "docs/todos/*.md"
+      ],
+      "archiv": [
+        "docs/todos/archiv/**/*.md"
+      ],
+      "name": "_repo"
+    }
+  ],
+  "confluence": {
+    "einrichtung": {
+      "space": "55410711"
+    },
+    "seiten": [
+      {
+        "quelle": "README.md",
+        "titel": "uj-claudex-loop"
+      },
+      {
+        "quelle": "CLAUDE.md",
+        "titel": "Projektregeln (CLAUDE.md)"
+      },
+      {
+        "quelle": "AGENTS.md",
+        "titel": "Codex-Betriebsanleitung (AGENTS.md)"
+      },
+      {
+        "quelle": "ROLES.md",
+        "titel": "Rollenmodell (ROLES.md)"
+      },
+      {
+        "quelle": "FALLBACK.md",
+        "titel": "Fallback-Kette (FALLBACK.md)"
+      },
+      {
+        "quelle": "SECURITY.md",
+        "titel": "Sicherheitsmeldungen (SECURITY.md)"
+      },
+      {
+        "quelle": "docs/betrieb.md",
+        "titel": "Betriebsnotizen (docs/betrieb.md)"
+      }
+    ],
+    "space": "CLAUDEX"
+  },
+  "github": "aus",
+  "jira": {
+    "einrichtung": {
+      "epics": {
+        "_repo": "CLAUDEX-1"
+      },
+      "projekt": "10112"
+    },
+    "entschieden_modus": "label",
+    "epic_marke": "claudexepic-",
+    "marke": "claudexsrc-",
+    "projekt": "CLAUDEX",
+    "status": {
+      "entschieden": null,
+      "erledigt": "10163",
+      "in Arbeit": "10162",
+      "offen": "10161"
+    }
+  },
+  "kundennamen_erlaubt": false,
+  "min_version": "1.0.0",
+  "privat": false,
+  "repo_name": "uj-claudex-loop",
+  "revision": 8,
+  "schema": 1
+}

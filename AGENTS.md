@@ -142,3 +142,48 @@ Die Config wird **nur aus dem Repo-Root** gelesen (oder `~/.claude/claudex.yaml`
 python -m pytest -q
 python scripts/claudex_roles.py --explain
 ```
+
+## Aufgaben — Repo führend, Jira und Confluence sind Spiegel
+
+Codex kennt weder Skills noch Hooks; deshalb stehen die Regeln hier vollständig. Aufgaben
+liegen als Dateien mit Frontmatter im Repo; das Werkzeug `aufgaben-spiegel` (Repo
+`_DIV/uj-aufgaben-spiegel`) spiegelt sie nach Jira CLAUDEX und in den Confluence-Space
+CLAUDEX. Beschreibung dieses Repos: `.claude/aufgaben-spiegel.json`.
+
+| Bereich | aktiv | Archiv |
+|---|---|---|
+| `_repo` | `docs/todos/*.md` | `docs/todos/archiv/**/*.md` |
+
+Zusätzlich: `docs/plans/**` sind Pläne, keine Aufgaben — und wie `docs/todos/` git-ignoriert
+(Details: [`docs/todos/README.md`](docs/todos/README.md)).
+
+**Frontmatter** (ganz oben, nur diese Schlüssel):
+
+```yaml
+---
+id: <uuid4>          # aus `aufgaben-spiegel --vorlage`, entsteht beim Anlegen
+status: offen        # offen | entschieden | in Arbeit | erledigt
+aufwand: S           # S | M | L | S-M | M-L
+angelegt: JJJJ-MM-TT
+---
+```
+
+- `ziele` und `punkte` setzt das Werkzeug — ⛔ nie von Hand schreiben, ändern oder kopieren.
+  Eine kopierte `id` heißt: zwei Dateien, ein Ticket. `pending@…` heißt: Anlegen lief, Antwort
+  fehlt — nie löschen.
+- Kästchen der obersten Ebene (`- [ ] …`) werden eigene Unteraufgaben; die Kennung
+  `<!-- aufgabe:<uuid> -->` dahinter setzt das Werkzeug und bleibt stehen.
+- Ablauf: `offen` → `entschieden` (Auftraggeber) → `in Arbeit` (vor dem ersten Edit) →
+  `erledigt` (gebaut **und** nachgewiesen) → Datei ins Archiv verschieben. Die fette
+  Statuszeile im Text wird mitgezogen; maßgeblich ist das Frontmatter.
+- Im Archiv gilt alles als erledigt, auch nicht abgehakte Kästchen.
+
+**Spiegeln:** `aufgaben-spiegel --check` schreibt nichts. `aufgaben-spiegel --apply` nur, wenn
+der Auftraggeber es verlangt, am Ende der Arbeitseinheit. Beides braucht ausgehendes HTTPS,
+`--apply` zusätzlich Schreibrechte — in der Standard-Sandbox gesperrt, also freigeben lassen,
+nicht umgehen. Im Ziel wird nie gelöscht und nie von Hand geändert: Änderungen im Repo, dann
+`--apply`.
+
+**Cloud-Grenze:** Kennwörter, Tokens und Verbindungszeichenfolgen gehören in keine Aufgabe; das
+Werkzeug hält solche Stellen zurück (Exit 4) und nennt nur Datei und Zeile. Kundennamen gehören
+hier nicht hinein.
