@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a0d22f-741d-7921-9afc-45c48153ebfc"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\n  user (<USERPROFILE-PATH>): `mcp_servers.n8n.transport` is ignored."}}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\n  user (<USERPROFILE-PATH>): `mcp_servers.n8n.transport` is ignored."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":50429,"cached_input_tokens":27264,"cache_write_input_tokens":0,"output_tokens":132,"reasoning_output_tokens":10}}

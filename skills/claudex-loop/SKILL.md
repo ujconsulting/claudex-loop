@@ -24,7 +24,7 @@ This skill does not decide which model runs it. Before anything else, resolve
 `plan`, `plan-review`, `build` and `code-review` and check the gates:
 
 ```bash
-python scripts/claudex_roles.py --explain
+python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --explain
 ```
 
 Use the actor it prints — it orchestrates all four steps. **A non-zero exit means stop:** the role
@@ -172,8 +172,8 @@ Phases 0-1 (recon + interrogation) complete — plan locked with the user. MAX_R
 Hand the locked plan to Codex for adversarial review. Mechanics verified end-to-end (2026-06-04) — do not "improve" the invocations below.
 
 ### Prerequisites (verify once, fast)
-- `codex --version` must actually PRINT a version, ≥ 0.130 (older CLIs error on the
-  config default model). **Empty output with a non-zero exit is neither a hang nor an
+- `codex --version` must actually PRINT a version, ≥ 0.156.0 for codex (the version this
+  plugin is measured against; `gpt-6-sol` is HTTP 400 on older CLIs). **Empty output with a non-zero exit is neither a hang nor an
   auth failure** — it is a dead binary; do not retry it. Exit 137 (SIGKILL) on macOS
   means a stale npm-global `codex` shadows the current CLI, which now ships inside the
   ChatGPT desktop app at `/Applications/ChatGPT.app/Contents/Resources/codex`. Symlink
@@ -192,8 +192,8 @@ Hand the locked plan to Codex for adversarial review. Mechanics verified end-to-
   reproduced here. Phase 3 still wants a repo, for diff isolation. (This skill said the
   opposite until 2026-09-09
   proposes the opposite; [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10) is why we don't).
-- Model and effort come from the role, never from this document or `~/.codex/config.toml`: `python scripts/claudex_roles.py --spec plan-review` resolves them and the calls below pass them to the wrapper. Never hand-pick a `gpt-5.x-codex` slug — those 400 on ChatGPT-account auth.
-- **Echo the resolved reviewer before Round 1** so the user can confirm: state the `--spec plan-review` line alongside the resolved tunables, e.g. `Reviewer: codex gpt-5.6-terra/high — codex-cli 0.149.1` (whatever `--spec` and `codex --version` actually report; both move). If the user objects, stop and let them change the role in `.claudex.yaml` before burning a review round.
+- Model and effort come from the role, never from this document or `~/.codex/config.toml`: `python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec plan-review` resolves them and the calls below pass them to the wrapper. Never hand-pick a `gpt-5.x-codex` slug — those 400 on ChatGPT-account auth.
+- **Echo the resolved reviewer before Round 1** so the user can confirm: state the `--spec plan-review` line alongside the resolved tunables, e.g. `Reviewer: codex gpt-6-sol/medium — codex-cli 0.156.0` (whatever `--spec` and `codex --version` actually report; both move). If the user objects, stop and let them change the role in `.claudex.yaml` before burning a review round.
 
 ### Tunables (read from args, else default)
 | Var | Default | Meaning |
@@ -254,7 +254,7 @@ that is a STOP: tell the human, do not retry with a different value. A
 different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
 mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
 the flag yet. Update it from the plugin
-(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update --private-root <your projects folder>`, see `setup`)
 and rerun. ⛔ Never drop the flag to make the error go away.
 <!-- claudex-target:end -->
 
@@ -302,7 +302,7 @@ First write the prompt above into `$SCRATCH_DIR/review-prompt.txt` **yourself**,
 ROUND=1
 # Model and effort come from the role config. Reading them and not passing them
 # leaves the wrapper on its own defaults — the drift this doctrine exists to stop.
-SPEC=$(python scripts/claudex_roles.py --spec plan-review) || exit 2
+SPEC=$(python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec plan-review) || exit 2
 MODEL=$(echo "$SPEC" | sed -n 's/.*model=\([^ ]*\).*/\1/p')
 EFFORT=$(echo "$SPEC" | sed -n 's/.*effort=\([^ ]*\).*/\1/p')
 
@@ -448,7 +448,7 @@ After the cross-inspection (whichever model built), run the **`code-review`** sk
 
 **Default on, never a blocker.** It runs unless the user opts out for this run, or it cannot run: check `python scripts/codex_usage.py` first; with the quota out, the user picks wait / fallback reviewer / skip ([FALLBACK.md](../../FALLBACK.md)). A skip is logged as `## Closing gate skipped — <reason>` and the plan's marker set to `claudex-gate: skipped`; after a run it is set to `claudex-gate: done`. What is not allowed is ending the build without either. (Until 2026-09-18 this said "offer it, don't force it" — and across every recorded run it was never offered once.)
 
-**One exception: a change that faces the network.** If the built diff touches routes, authentication, sessions, webhooks, `ports:`, proxy/tunnel or DNS config, `code-review` is **required** before the human gate, and its exposure pass runs with it — a separate session on the `exposure-review` role (own model and effort, `python scripts/claudex_roles.py --spec exposure-review`) that judges only the exposed components with verdict `EXPOSURE: SAFE/UNSAFE`. `UNSAFE` blocks the commit. Say at the gate whether the pass ran; an exposed change without it is presented as *not reviewed*, not as done.
+**One exception: a change that faces the network.** If the built diff touches routes, authentication, sessions, webhooks, `ports:`, proxy/tunnel or DNS config, `code-review` is **required** before the human gate, and its exposure pass runs with it — a separate session on the `exposure-review` role (own model and effort, `python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec exposure-review`) that judges only the exposed components with verdict `EXPOSURE: SAFE/UNSAFE`. `UNSAFE` blocks the commit. Say at the gate whether the pass ran; an exposed change without it is presented as *not reviewed*, not as done.
 
 ---
 

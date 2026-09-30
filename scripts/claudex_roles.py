@@ -71,14 +71,18 @@ DEFAULTS = {
     },
     "actors": {
         "codex": {
-            "model": "gpt-5.6-terra",
-            "effort": "high",
+            # gpt-5.6-terra was superseded by gpt-6-sol (2026-09-22); measured on
+            # codex-cli 0.156.0, a real plan-review round took ~4:48 min at medium.
+            "model": "gpt-6-sol",
+            "effort": "medium",
             "sandbox": "read-only",
             # Per-role overrides of model and effort only. The sandbox is not
             # overridable here: an adversary role stays read-only whatever the
             # model, and the gate below checks the actor's sandbox, not a copy.
             "roles": {
-                "exposure-review": {"model": "gpt-5.6-sol", "effort": "medium"},
+                # Same values as the actor since 2026-09-30, kept as its OWN entry
+                # so the exposure pass can be set apart again without a code change.
+                "exposure-review": {"model": "gpt-6-sol", "effort": "medium"},
             },
         },
         "claude": {"fresh_subagent": True},

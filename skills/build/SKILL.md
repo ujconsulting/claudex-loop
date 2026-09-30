@@ -17,7 +17,7 @@ This skill does not decide which model runs it. Before anything else, resolve
 `build` and check the gates:
 
 ```bash
-python scripts/claudex_roles.py --explain
+python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --explain
 ```
 
 Use the actor it prints — the plan being implemented was written by `roles.plan`. **A non-zero exit means stop:** the role
@@ -27,8 +27,8 @@ role with an open sandbox), and no run may start on it. Where this document says
 Reference: `ROLES.md`.
 ## Prerequisites (verify once, fast)
 
-- `codex --version` must actually PRINT a version, ≥ 0.130 (older CLIs error on the
-  config default model). **Empty output with a non-zero exit is neither a hang nor an
+- `codex --version` must actually PRINT a version, ≥ 0.156.0 for codex (the version this
+  plugin is measured against; `gpt-6-sol` is HTTP 400 on older CLIs). **Empty output with a non-zero exit is neither a hang nor an
   auth failure** — it is a dead binary; do not retry it. Exit 137 (SIGKILL) on macOS
   means a stale npm-global `codex` shadows the current CLI, which now ships inside the
   ChatGPT desktop app at `/Applications/ChatGPT.app/Contents/Resources/codex`. Symlink

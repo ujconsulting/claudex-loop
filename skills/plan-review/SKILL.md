@@ -15,7 +15,7 @@ This skill does not decide which model runs it. Before anything else, resolve
 `plan-review` and check the gates:
 
 ```bash
-python scripts/claudex_roles.py --explain
+python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --explain
 ```
 
 Use the actor it prints — the plan under review was written by `roles.plan`. **A non-zero exit means stop:** the role
@@ -26,7 +26,8 @@ Reference: `ROLES.md`.
 ## Prerequisites (verify once, fast)
 
 - Codex CLI installed **and alive**: `codex --version` must actually PRINT a version
-  (need ≥ 0.130; older CLIs error on the config default model). **Empty output with a
+  (need ≥ 0.156.0 for codex — the version this plugin is measured against; `gpt-6-sol`
+  is HTTP 400 on older CLIs, and the wrapper refuses it there up front). **Empty output with a
   non-zero exit is neither a hang nor an auth failure** — it is a dead binary, and
   retrying it burns the round. Exit 137 (SIGKILL) on macOS means a stale npm-global
   `codex` is shadowing the current CLI, which now ships inside the ChatGPT desktop app:
@@ -48,12 +49,13 @@ Reference: `ROLES.md`.
   skill claimed the opposite until 2026-09-09, on reasoning inherited from upstream
   issue #10 and never measured. `build` still wants a repo, for diff isolation.
 - **The model comes from the role config, never from this skill.**
-  `python scripts/claudex_roles.py --spec plan-review` prints the actor with its model
+  `python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec plan-review` prints the actor with its model
   and effort; pass those to the wrapper. This line used to say *"do NOT pin `-m` unless
   the user asks"* while `setup` and `docs/betrieb.md` both recorded the verified
-  configuration as a `gpt-5.6-terra`/high pin and warned that `sol` runs into the
-  10-minute ceiling on real plans — following the wrong half of that made normal reviews
-  time out (audit 2026-08-30). One place decides; this is not it. (Pinning
+  configuration as a pin (2026-08-30: `gpt-5.6-terra`/high, because `gpt-5.6-sol` ran
+  into the 10-minute ceiling on real plans) — following the wrong half of that made normal
+  reviews time out (audit 2026-08-30). Since 2026-09-30 the role config says
+  `gpt-6-sol`/medium, measured at ~4:48 min for a real round. One place decides; this is not it. (Pinning
   `gpt-5.x-codex` variants still fails on ChatGPT-account auth — that is a model-name
   constraint, and it belongs in the role config too.)
 - **Echo the resolved model before Round 1** so the user can confirm, together with the
@@ -122,7 +124,7 @@ that is a STOP: tell the human, do not retry with a different value. A
 different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
 mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
 the flag yet. Update it from the plugin
-(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update --private-root <your projects folder>`, see `setup`)
 and rerun. ⛔ Never drop the flag to make the error go away.
 <!-- claudex-target:end -->
 
@@ -210,7 +212,7 @@ ROUND=1
 # Model and effort come from the role config. Reading them and NOT passing them
 # leaves the wrapper on its own defaults, which is the same drift the tunables
 # section above warns about. (CodeRabbit, 2026-08-30.)
-SPEC=$(python scripts/claudex_roles.py --spec plan-review) || exit 2
+SPEC=$(python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec plan-review) || exit 2
 MODEL=$(echo "$SPEC" | sed -n 's/.*model=\([^ ]*\).*/\1/p')
 EFFORT=$(echo "$SPEC" | sed -n 's/.*effort=\([^ ]*\).*/\1/p')
 

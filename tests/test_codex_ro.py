@@ -75,29 +75,19 @@ class ArgvTests(unittest.TestCase):
         occurrences = [a for a in argv if a.startswith("sandbox_mode=")]
         self.assertEqual(occurrences, ["sandbox_mode=read-only"])
 
-    def test_emptying_disable_mcp_is_refused_when_servers_are_configured(self):
-        """The third door to the same room as --allow-path and -c mcp_servers.
-
-        Codex runs MCP servers outside the sandbox, so an empty --disable-mcp is
-        a caller weakening the wrapper from its own command line. It used to warn
-        and continue; nobody reads stderr on a call that succeeded.
-        (CodeRabbit, 2026-08-30.)
-        """
+    def test_emptying_disable_mcp_no_longer_matters_because_no_server_loads(self):
+        """2.6.0: this used to be refused, because an empty value left the
+        installation's MCP servers on (CodeRabbit, 2026-08-30). Since every call
+        runs with --ignore-user-config, no server from the user config starts at
+        all, and the flag is reported as ignored instead."""
         with tempfile.TemporaryDirectory() as home:
             (Path(home) / "config.toml").write_text(
                 "[mcp_servers]\n[mcp_servers.n8n]\ntransport='http'\n", encoding="utf-8"
             )
-            previous = os.environ.get("CODEX_HOME")
-            os.environ["CODEX_HOME"] = home
-            try:
-                with self.assertRaises(SystemExit) as caught:
-                    self._args(["--disable-mcp", ""])
-                self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
-            finally:
-                if previous is None:
-                    os.environ.pop("CODEX_HOME", None)
-                else:
-                    os.environ["CODEX_HOME"] = previous
+            with unittest.mock.patch.dict(os.environ, {"CODEX_HOME": home}):
+                argv = codex_ro.build_argv(self._args(["--disable-mcp", ""]), Path("out.txt"))
+        self.assertIn("--ignore-user-config", argv)
+        self.assertFalse([a for a in argv if a.startswith("mcp_servers.")])
 
     def test_emptying_disable_mcp_is_fine_when_there_are_no_servers(self):
         """Nothing to leave enabled, so nothing to refuse."""
@@ -508,39 +498,17 @@ class McpTests(unittest.TestCase):
     def _write_config(self, text):
         (self.home / "config.toml").write_text(text, encoding="utf-8")
 
-    def test_configured_servers_are_discovered(self):
+    def test_no_server_is_named_even_when_one_is_configured(self):
+        """2.6.0: the per-server overrides are gone. Under --ignore-user-config
+        the server is undefined, and naming an undefined one is exactly what made
+        Codex reject its config in 2026-08-30 -- so nothing is named at all."""
         self._write_config(
-            "model = 'gpt-5.6-terra'\n"
-            "[mcp_servers]\n"
-            "[mcp_servers.n8n]\n"
-            "transport = 'http'\n"
-            "url = 'http://127.0.0.1:3069/mcp'\n"
-            "[mcp_servers.other]\n"
-            "command = 'x'\n"
-        )
-        self.assertEqual(codex_ro.installed_mcp_servers(), {"n8n", "other"})
-
-    def test_no_config_means_no_servers(self):
-        self.assertEqual(codex_ro.installed_mcp_servers(), set())
-
-    def test_a_server_that_is_not_installed_is_never_named(self):
-        """The whole point: an override for an absent server breaks Codex outright."""
-        self._write_config("[mcp_servers]\n[mcp_servers.n8n]\ntransport = 'http'\n")
-        args = codex_ro.parse_args(
-            ["--prompt", "x", "--out-file", "out.txt", "--disable-mcp", "n8n,MCP_DOCKER"]
-        )
-        argv = codex_ro.build_argv(args, Path("out.txt"))
-        self.assertIn("mcp_servers.n8n.enabled=false", argv)
-        self.assertNotIn("mcp_servers.MCP_DOCKER.enabled=false", argv)
-
-    def test_the_default_is_every_installed_server(self):
-        self._write_config(
-            "[mcp_servers]\n[mcp_servers.alpha]\ncommand='a'\n[mcp_servers.beta]\ncommand='b'\n"
+            "[mcp_servers]\n[mcp_servers.n8n]\ntransport = 'http'\n[mcp_servers.other]\ncommand = 'x'\n"
         )
         args = codex_ro.parse_args(["--prompt", "x", "--out-file", "out.txt"])
         argv = codex_ro.build_argv(args, Path("out.txt"))
-        self.assertIn("mcp_servers.alpha.enabled=false", argv)
-        self.assertIn("mcp_servers.beta.enabled=false", argv)
+        self.assertFalse([a for a in argv if "mcp_servers" in a])
+        self.assertIn("--ignore-user-config", argv)
 
     def test_an_mcp_override_from_the_caller_is_refused(self):
         for override in (
@@ -673,15 +641,22 @@ class BlindRunTests(unittest.TestCase):
         '`"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command "Get-Content ziel.txt"`: '
         'CreateProcess { message: "Rejected(\\"... rejected: blocked by policy\\")" }'
     )
-    ERFOLG = 'exec "pwsh.exe" -Command "Get-Content ziel.txt"\n succeeded in 1335ms:\nINHALT'
+    # 2.6.0: what ran is read from the event stream -- `succeeded in` never
+    # appears in stderr with --json (0 of ~90 real runs).
+    HEAD = '{"type":"thread.started","thread_id":"t1"}\n{"type":"turn.started"}\n'
+    RAN = ('{"type":"item.completed","item":{"type":"command_execution","command":"pwsh",'
+           '"exit_code":0,"status":"completed"}}\n')
+    TAIL = '{"type":"turn.completed"}\n'
 
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
         self.err = self.dir / "stderr.txt"
+        self.stream = self.dir / "stream.json"
 
-    def _blind(self, text):
-        self.err.write_text(text, encoding="utf-8")
-        return codex_ro.blind_run(self.err)
+    def _blind(self, stderr, ran=False):
+        self.err.write_text(stderr, encoding="utf-8")
+        self.stream.write_text(self.HEAD + (self.RAN if ran else "") + self.TAIL, encoding="utf-8")
+        return codex_ro.blind_run(self.err, self.stream)
 
     def test_every_command_refused_is_a_blind_run(self):
         grund = self._blind(self.REFUSAL + "\n" + self.REFUSAL)
@@ -699,20 +674,21 @@ class BlindRunTests(unittest.TestCase):
         command, is told no, and then does the job has produced a real review.
         Failing that run would make the wrapper block normal work -- and a control
         that blocks normal work gets switched off and then protects nothing."""
-        self.assertIsNone(self._blind(self.REFUSAL + "\n" + self.ERFOLG))
-        self.assertIsNone(self._blind(self.ERFOLG + "\n" + self.REFUSAL))
+        self.assertIsNone(self._blind(self.REFUSAL, ran=True))
 
     def test_an_ordinary_run_is_silent(self):
-        self.assertIsNone(self._blind(self.ERFOLG))
-        self.assertIsNone(self._blind(""))
-        self.assertIsNone(self._blind("some unrelated warning about MCP\n"))
+        self.assertIsNone(self._blind("", ran=True))
+        self.assertIsNone(self._blind("", ran=False), "no command, no refusal: a legitimate run")
+        self.assertIsNone(self._blind("some unrelated warning about MCP\n", ran=True))
 
     def test_a_missing_stderr_file_is_not_an_accusation(self):
-        self.assertIsNone(codex_ro.blind_run(self.dir / "gibtsnicht.txt"))
+        self.stream.write_text(self.HEAD + self.RAN + self.TAIL, encoding="utf-8")
+        self.assertIsNone(codex_ro.blind_run(self.dir / "gibtsnicht.txt", self.stream))
 
-    def test_the_reason_names_the_file_to_look_in(self):
+    def test_the_reason_names_the_files_to_look_in(self):
         grund = self._blind(self.REFUSAL)
         self.assertIn(str(self.err), grund)
+        self.assertIn(str(self.stream), grund)
 
 
 class SilentDeathTests(unittest.TestCase):
@@ -810,7 +786,7 @@ class SilentDeathTests(unittest.TestCase):
                 del os.environ["CLAUDEX_CODEX_BIN"]
             else:
                 os.environ["CLAUDEX_CODEX_BIN"] = previous
-        self.assertNotEqual(os.path.realpath(with_override), os.path.realpath(fake))
+        self.assertNotIn(os.path.realpath(fake), [os.path.realpath(part) for part in with_override])
         self.assertEqual(with_override, without_override)
 
     def test_an_override_pointing_nowhere_no_longer_causes_a_refusal(self):
@@ -843,10 +819,12 @@ class ThreadIdTests(unittest.TestCase):
             '{"type":"item.completed","thread_id":"01a0-second"}\n',
             encoding="utf-8",
         )
-        self.assertEqual(codex_ro.read_thread_id(self.stream), "01a0-first")
+        self.assertEqual(codex_ro.read_stream_evidence(self.stream).thread_id, "01a0-first")
 
     def test_a_missing_stream_is_not_an_error(self):
-        self.assertIsNone(codex_ro.read_thread_id(Path(self.tmp.name) / "absent.json"))
+        ev = codex_ro.read_stream_evidence(Path(self.tmp.name) / "absent.json")
+        self.assertIsNone(ev.thread_id)
+        self.assertFalse(ev.usable)
 
 
 class KillTreeTests(unittest.TestCase):
@@ -952,7 +930,19 @@ class _FakeCompletedChild:
         self.returncode = 0
         self.pid = 999999
 
+    # What real Codex writes to stdout for a run that read one file (the shape
+    # measured on 0.149.1 and 0.156.0). Without it the 2.6.0 evidence check
+    # rightly calls the run unprovable.
+    STREAM = (
+        b'{"type":"thread.started","thread_id":"01a0-fake"}\n{"type":"turn.started"}\n'
+        b'{"type":"item.completed","item":{"type":"command_execution","command":"x",'
+        b'"exit_code":0,"status":"completed"}}\n{"type":"turn.completed"}\n'
+    )
+
     def communicate(self, input=None, timeout=None):  # noqa: A002 - matches Popen's signature
+        stdout = self.kwargs.get("stdout")
+        if stdout is not None and hasattr(stdout, "write"):
+            stdout.write(self.STREAM)
         try:
             idx = self.args.index("-o")
             Path(self.args[idx + 1]).write_text('{"ok":true}\n', encoding="utf-8")
@@ -969,8 +959,11 @@ class _FakeCodexRun:
         self.popen_calls = []
 
     def __enter__(self):
-        self._find_patch = unittest.mock.patch("codex_ro.find_codex", return_value="fake-codex")
+        self._find_patch = unittest.mock.patch("codex_ro.find_codex", return_value=["fake-codex"])
         self._find_patch.start()
+        self._probe_patch = unittest.mock.patch(
+            "codex_ro.probe_cli_version", return_value=codex_ro.MEASURED_CODEX_CLI)
+        self._probe_patch.start()
 
         def fake_popen(cmd, **kwargs):
             self.popen_calls.append((cmd, kwargs))
@@ -982,6 +975,7 @@ class _FakeCodexRun:
 
     def __exit__(self, *exc):
         self._popen_patch.stop()
+        self._probe_patch.stop()
         self._find_patch.stop()
         return False
 

@@ -70,7 +70,7 @@ that is a STOP: tell the human, do not retry with a different value. A
 different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
 mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
 the flag yet. Update it from the plugin
-(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update --private-root <your projects folder>`, see `setup`)
 and rerun. ⛔ Never drop the flag to make the error go away.
 <!-- claudex-target:end -->
 
@@ -84,8 +84,11 @@ python tools/codex_ro.py --expect-workdir "$TARGET" --resume <thread-id> --promp
 ```
 
 Auf macOS heißt der Interpreter in der Regel `python3`. Exit-Codes: `0` Antwort da,
-`1` leere Antwort bei Exit 0 (der Auth-Fall), `2` abgewiesen, `124` Timeout,
-`127` kein codex gefunden, sonst codex' eigener Code.
+`1` leere Antwort bei Exit 0 (der Auth-Fall), `2` abgewiesen (auch: eine Ausgabe, die ein
+anderer Lauf gesperrt hält; eine `.codex/config.toml` im Arbeitsverzeichnis oder darüber; ein
+Modell, das die installierte CLI nicht kann), **`3` blind** — nachweisbar kein Befehl
+ausgeführt und eine Sandbox-Ablehnung oder ein unbrauchbarer Beleg: das Review **nicht**
+protokollieren —, `124` Timeout, `127` kein codex gefunden, sonst codex' eigener Code.
 
 ⛔ **Auch Ping und Resume laufen über den Wrapper.** Ein direkter `codex exec` umgeht
 Sandbox-Pin, Pfadgrenzen, stderr-Datei, Timeout und MCP-Abschaltung auf einmal — und
@@ -108,8 +111,9 @@ wo man startet: die Pfadeinsperrung des Wrappers (read/write roots) hängt am
 dieses cwd immer:
 
 ```
-# codex read-only | exec (new) | gpt-5.6-terra/high | timeout 600s | wrapper 2.5.0
+# codex read-only | exec (new) | gpt-6-sol/medium | timeout 600s | wrapper 2.6.0
 #   cwd: D:\…\wegwerf-repo   (git repo)          <- oder "(kein git repo)"
+#   codex-cli 0.156.0                             <- mit "(measured against …)" bei Abweichung
 ```
 
 Greenfield (noch kein Repo): einfach loslegen, der Wrapper warnt nur; `git init` ist
@@ -213,36 +217,111 @@ dafür einen Detektor mit (Schritt 0).
 
 ---
 
-## 3. Modell und MCP
+## 3. Modell, Abschottung und MCP
 
-**Modell für die Angriffsrunde pinnen.** Der Original-Skill rät vom `-m`-Pin ab — das
-zielte auf die alten `*-codex`-Slugs. Ein Pin läuft unter ChatGPT-Auth einwandfrei, kein
-HTTP 400.
+**Modell: `gpt-6-sol`/`medium` für jede Codex-Rolle** (seit 30.09.2026; `gpt-5.6-terra` wurde
+am 22.09.2026 durch `gpt-6-sol` abgelöst). Gemessen auf codex-cli 0.156.0: eine echte
+Plan-Review-Runde ≈ **4:48 min** mit 48 Befehlen — innerhalb des 600-s-Timeouts. Modell und
+Effort kommen aus `claudex_roles.py --spec <rolle>`, nie aus dem Skill. ⛔ codex-cli 0.149.1
+beantwortet `gpt-6-sol` bei jedem Aufruf mit HTTP 400; der Wrapper weist das vorab mit Exit 2
+ab (`MODEL_MIN_CLI`).
 
-⛔ **`terra`, nicht `sol`.** An einem 120-Zeilen-Plan mit Repo-Kontext lief `sol`/high in
-den 10-Minuten-Timeout (Exit 143), die Verdict-Datei kam erst auf der Ziellinie.
-`gpt-5.6-terra` mit `model_reasoning_effort="high"` lieferte dieselbe Schärfe in
-**1–2 Minuten je Runde**. Die frühere `sol`-Empfehlung stammte aus einem
-8-Sekunden-Smoketest, nicht aus einem Review.
+Historie, damit sie nicht wieder gelernt werden muss: am 30.08.2026 lief `gpt-5.6-sol`/high
+an einem 120-Zeilen-Plan in den 10-Minuten-Timeout (Exit 143), `gpt-5.6-terra`/high brauchte
+1–2 Minuten je Runde; die frühere `sol`-Empfehlung stammte aus einem 8-Sekunden-Smoketest.
+Deshalb gilt: Modellwahl nach einer **echten** Runde, nie nach einem Ping.
 
-**Die eine Ausnahme: der Exposure-Pass.** `code-review` und `audit` schicken alles, was
-aus dem Netz erreichbar ist (Routen, Auth, Webhooks, `ports:`, Proxy-/Tunnel-Config), in
-eine eigene Sitzung auf der Rolle `exposure-review` — Vorgabe `gpt-5.6-sol` mit
-`medium`. Das geht, weil der Input begrenzt ist: nur die exponierten Komponenten,
-nicht der ganze Diff. Ein stärkeres Modell bei mittlerem Effort über wenig Text bleibt
-unter dem Ceiling; ein anderes Modell macht den Pass zur zweiten Meinung statt zum
-längeren Blick derselben. Modell und Effort kommen aus
-`python scripts/claudex_roles.py --spec exposure-review`, nie aus dem Skill.
+**Der Exposure-Pass** (`exposure-review`, aus `code-review` und `audit`) läuft seither auf
+demselben Modell. Sein eigener Eintrag in der Rollen-Config bleibt, damit er sich wieder
+trennen lässt; die zweite Meinung kommt heute aus einer frischen Sitzung mit engerer Eingabe,
+nicht aus einem anderen Modell.
 
-Verfügbar sind `gpt-5.6-sol` / `-terra` / `-luna`, Effort bis `ultra`. Der Wrapper nimmt
-`terra`/high als Vorgabe. ⛔ `gpt-5.4` und `gpt-5.4-mini` verschwinden am **31.08.2026**
-aus Codex.
+**Abschottung (Wrapper 2.6.0).** Read-only legt nur die **Shell** fest. Alles andere, was
+Codex laden kann, läuft daneben: MCP-Server aus der Nutzer-Config oder aus der
+`.codex/config.toml` eines vertrauenswürdigen Projekts, und auf 0.156.0 eine Reihe
+standardmäßig eingeschalteter Features. Jeder Wrapper-Aufruf (`exec` **und** `resume`) läuft
+deshalb mit `--ignore-user-config`, `--ignore-rules`, `-c web_search="disabled"` und
+`--disable <feature>` für jede Zeile der ersten Tabelle. Gemessen am 30.09.2026: `web__run`,
+`image_gen`, `request_plugin_install`, die MCP-Werkzeuge und `goals` verschwinden; der
+Lesebefehl läuft, und die festgelegten `-c`-Schlüssel (`sandbox_mode`, `windows.sandbox`,
+Modell, Effort) gelten weiter. Upstream: chaseai-yt/claudex-loop#28 und #18.
 
-**MCP** schaltet der Wrapper selbst ab (`CLAUDEX_DISABLE_MCP` überschreibt die Auswahl,
-leerer Wert schaltet nichts ab). Die Messung dahinter steht in §1: nur der dotted-path-Weg
-greift. Ein kaputter MCP-Eintrag in `~/.codex/config.toml` meldet sich als 404 oder 401 in
-der stderr-Datei; für Reviews ist das harmlos, gehört aber repariert — und wenn dort ein
-Klartext-Token steht, gehört es in den Vault (`codex mcp add --bearer-token-env-var`).
+| Feature | im Wrapper |
+|---|---|
+| `apps` | abgeschaltet |
+| `plugins` | abgeschaltet |
+| `remote_plugin` | abgeschaltet |
+| `browser_use` | abgeschaltet |
+| `browser_use_external` | abgeschaltet |
+| `browser_use_full_cdp_access` | abgeschaltet |
+| `computer_use` | abgeschaltet |
+| `in_app_browser` | abgeschaltet |
+| `multi_agent` | abgeschaltet |
+| `goals` | abgeschaltet |
+| `image_generation` | abgeschaltet |
+| `skill_mcp_dependency_install` | abgeschaltet |
+| `hooks` | abgeschaltet |
+| `workspace_dependencies` | abgeschaltet |
+| `plugin_sharing` | abgeschaltet |
+| `tool_suggest` | abgeschaltet |
+| `skill_search` | abgeschaltet |
+| `auth_elicitation` | abgeschaltet |
+| `tool_call_mcp_elicitation` | abgeschaltet |
+| `realtime_conversation` | abgeschaltet |
+| `in_app_local_automation` | abgeschaltet |
+| `worktrees` | abgeschaltet |
+
+| Feature | im Wrapper |
+|---|---|
+| `shell_tool` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `unified_exec` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `unified_exec_tty` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `shell_snapshot` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `view_image` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `sleep_tool` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `content_item_kinds` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `compaction_image_budget` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `enable_request_compression` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `fast_mode` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `guardian_approval` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `guardian_reuse_parent_compaction` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `mentions_v2` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `secret_auth_storage` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `system_proxy_fallback` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `unbounded_connection_retries` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `code_mode_host` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `in_app_chat` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `in_app_dictation` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `in_app_updates` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+
+Beim **Heben der CLI** (§8) wird `codex features list` gegen beide Tabellen gelegt: ein
+Feature, das stable und `true` ist und in keiner steht, blockiert das Anheben der Messversion,
+bis es eingeordnet ist.
+
+⛔ **Nicht abschaltbar: `collaboration.*`** (Sub-Agenten starten). Kein Feature-Schalter
+entfernt die Werkzeuge (`multi_agent` und `collaboration_modes` versucht). Gemessen erbt ein
+gestarteter Sub-Agent read-only (Schreibversuch abgewiesen, Datei fehlt) **und** die
+Abschottung (dieselben fünf Werkzeuge wie der Haupt-Lauf, kein Web/App/Plugin/MCP). Seine
+Befehle stehen nicht im Strom des Haupt-Laufs — daraus folgt ein bekannter Fehlalarm in die
+sichere Richtung: haben nur Sub-Agenten Befehle ausgeführt **und** steht eine Ablehnung in
+stderr, endet der Lauf mit Exit 3.
+
+⛔ **Projekt-Config des geprüften Repos.** Gemessen am 30.09.2026: in einem in der Nutzer-Config
+als vertrauenswürdig eingetragenen Repo lud Codex dessen `.codex/config.toml`, und eine
+`developer_instructions`-Zeile darin bestimmte die Antwort. Unter `--ignore-user-config` gibt es
+keine Vertrauenseinträge, die Datei wurde nicht geladen. Zweite Linie: liegt eine
+`.codex/config.toml` im Arbeitsverzeichnis oder in **irgendeinem** Verzeichnis darüber (bis zur
+Laufwerkswurzel), bricht der Wrapper mit Exit 2 ab. Ausgenommen sind nur die Nutzer-Configs
+selbst (`$CODEX_HOME/config.toml` und `~/.codex/config.toml`). Der `.codex/`-Kontextordner, den
+`setup` anlegt (`README.md`, `knowledge.md`), ist davon nicht betroffen.
+
+**MCP** wird seit 2.6.0 nicht mehr Server für Server abgeschaltet: die Nutzer-Config, die die
+Server definiert, wird gar nicht geladen. `--disable-mcp` und `CLAUDEX_DISABLE_MCP` werden
+angenommen und als ignoriert gemeldet. (Ein Override für einen *nicht definierten* Server
+würde Codex die ganze Config ablehnen lassen — der Grund, warum die alte Logik nur installierte
+Server benannte; unter `--ignore-user-config` ist jeder undefiniert.) Ein kaputter MCP-Eintrag in
+`~/.codex/config.toml` betrifft damit nur noch die eigene, nicht-Wrapper-Arbeit; wenn dort ein
+Klartext-Token steht, gehört es trotzdem in den Vault (`codex mcp add --bearer-token-env-var`).
 
 ---
 
@@ -282,7 +361,7 @@ Frage, wie viele Funde man begründet zurückweisen konnte.
 
 | | |
 |---|---|
-| `codex --version` | muss eine Version **ausgeben**; gefordert ≥ 0.130, gemessen mit 0.149.1 |
+| `codex --version` | muss eine Version **ausgeben**; gefordert ≥ 0.156.0 (für `gpt-6-sol`), gemessen mit 0.156.0 — die Wrapper-Kopfzeile zeigt die gefundene |
 | `codex login status` | `Logged in using ChatGPT` (Abo, **kein** API-Key) |
 | Python | 3.10+ für Wrapper, Drift-Prüfung und Hook |
 | Plugin | `claudex-loop@claudex-loop`, enabled |
@@ -302,8 +381,9 @@ anwenden, dann findet die PATH-Suche das Bundle selbst.
 (Upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
 
 **Immer aus dem Repo-Root starten.** Codex lädt von dort automatisch die `AGENTS.md` — der
-Prüfkatalog steht darin — und nur dieser Pfad steht in `~/.codex/config.toml` als
-`trust_level = "trusted"`.
+Prüfkatalog steht darin. Der Eintrag `trust_level = "trusted"` in `~/.codex/config.toml`
+gilt seit Wrapper 2.6.0 nur noch für die eigene Arbeit außerhalb des Wrappers: der Wrapper
+lädt die Nutzer-Config nicht (`--ignore-user-config`) und übergibt `--skip-git-repo-check`.
 
 ---
 
@@ -421,3 +501,80 @@ Fallback / geloggt überspringen. Der Adapter kann die Gate-Grammatik fahren:
 mit Spec und Diff in **einer** Eingabedatei (Fallbacks sehen nur Inline-Text). E2E getestet
 27.08.2026: toter Provider übersprungen, das Ersatzmodell fand die gesäte SQL-Injection und
 fehlende Plan-Schritte (`DOD: INCOMPLETE | SECURITY: FAIL`, 3 Befunde).
+
+---
+
+## 8. Codex heben — Vorgang mit Nachmessung
+
+Jede Garantie des Wrappers ist eine Messung gegen eine bestimmte CLI-Version
+(`MEASURED_CODEX_CLI` = `0.156.0`, dieselbe Zahl steht in genau einer markierten Zeile
+des Modul-Docstrings). Die CLI hebt sich nicht selbst, und sie wird **nie** ungepinnt gehoben:
+
+```bash
+npm install -g @openai/codex@0.156.0
+```
+
+(mit der neuen, benannten Version statt der Messversion). Danach zwei Stufen:
+
+**Stufe 1 — Preflight, mit dem bisherigen Wrapper, bevor Code geändert wird.** Nur Rohbelege
+zählen (Antwortdatei, Ereignisstrom, stderr, Dateisystem):
+
+1. Das Rollenmodell wird angenommen (kein HTTP 400).
+2. Die Shell steht zur Verfügung: ≥ 1 `command_execution` mit ganzzahligem `exit_code` im Strom.
+3. Das Schreibverbot hält: ein Schreibversuch scheitert, die Datei fehlt, der Arbeitsbaum ist sauber.
+4. Resume bleibt read-only (derselbe Schreibversuch in einer Resume-Runde).
+5. Eine **echte** Plan-Review-Runde bleibt unter dem Timeout (am 30.09.2026: ≈ 4:48 min).
+6. Die Blind-Probe: ein eigenes `CODEX_HOME` **ohne** `[windows]`-Abschnitt (Anmeldung dort nur
+   per `codex login`, nie `auth.json` kopieren; danach `codex logout` und löschen) — jeder Befehl
+   muss abgewiesen werden, und festgehalten wird, wo die Ablehnung steht (am 30.09.2026: nur in
+   stderr, im Strom kein `command_execution`).
+
+Ein Exit 3 des bisherigen Wrappers bei nachweisbar ausgeführten Befehlen ist der bekannte
+Fehlalarm von 2.5 und kein Preflight-Fehler. **Scheitert etwas, wird zurückgesetzt**:
+`npm install -g @openai/codex@<bisherige Version>`, `codex --version` prüfen, ein Ping über den
+Wrapper mit dem bisherigen Modell. Scheitert der Rückbau, läuft kein Review, bis entschieden ist.
+
+**Stufe 2 — Abnahme, mit dem neuen Wrapper, vor dem Commit:** die Kopfzeile meldet die neue
+Version ohne Warnung · J1 zählt ≥ 1 ausgeführten Befehl · Schreibverbot hält · Exit 3 auf der
+Blind-Fixture (`tests/fixtures/codex-0.156/`) · `MODEL_MIN_CLI` verweigert gegen ein Fake-Binary
+mit alter Version · das Werkzeug-Inventar eines Laufs (Haupt-Lauf **und** ein Sub-Agent) enthält
+kein Web-, App-, Plugin- oder MCP-Werkzeug · die `AGENTS.md` des Repos erreicht den Prüfer
+weiterhin · `codex features list` enthält kein stable-`true`-Feature außerhalb der beiden
+Tabellen in §3. Erst dann wird `MEASURED_CODEX_CLI` angehoben.
+
+**Nach dem Commit: Kopien zuerst, dann das Plugin.** Das Heben der Kopien braucht seit 2.6.0
+`--private-root <ordner>` — den Ordner, von dem du bestätigst, dass nur du darunter
+schreibst:
+
+```bash
+python <plugin>/scripts/wrapper_drift.py --scan <projektordner> --update --private-root <projektordner>
+```
+
+`<projektordner>` ist hier der Ordner, **unter** dem die Repos liegen: `--scan` sucht eine und
+zwei Ebenen darunter. Ein einzelnes Repo nennt man mit `--repo <pfad>` (und derselben
+`--private-root`).
+
+⚠️ **Was `--private-root` zusichert, ist eng.** Das Werkzeug prüft den Ordner so, wie er
+eingegeben ist (absolut, keine Steuerzeichen, kein UNC-/Gerätepfad, keine Laufwerkswurzel, kein
+Netzlaufwerk, keine Junction in ihm oder darüber) und schreibt nur darunter. Windows-ACLs prüft
+es **nicht**: der Schutz gilt, solange deine Bestätigung stimmt. Zwischen jeder Prüfung und dem
+nächsten Dateisystemaufruf bleibt ein Fenster (`dir_fd` gibt es unter Windows nicht); wird der
+Ordner genau dort zur Junction, kann eine **leere** Staging-Datei außerhalb entstehen (sie wird
+über denselben Pfad wieder entfernt, wenn er noch erreichbar ist); wird er unmittelbar vor dem
+Ersetzen zur Junction, kann die **fertige Kopie** außerhalb landen. Gegen einen gleichzeitig
+laufenden Angreifer mit Schreibrecht unter dem Ordner schützt das nicht — gegen eine schon
+vorhandene Junction schon. `--scripts-dir` ist zusammen mit `--update` verboten: eine Kopie
+entsteht nur aus dem installierten Plugin.
+
+**Wie Codex gestartet wird (2.6.0).** Unter Windows nie über `codex.cmd`: eine Batch-Datei
+läuft über `cmd.exe`, das die Argumente noch einmal auswertet. Der Wrapper startet stattdessen
+`node.exe` (neben dem npm-Starter, sonst aus dem PATH) mit
+`node_modules/@openai/codex/bin/codex.js` — genau das, was der Starter tut, ohne `cmd.exe` —,
+sonst eine `codex.exe` aus dem PATH, sonst die App-Kopie. Eine Batch-Datei wird nie gestartet
+(Exit 127). Gemessen am 30.09.2026: der Lauf über `node.exe` + `codex.js` antwortet normal.
+
+**Was die Versionsprobe nicht beweist.** Der Wrapper startet für die Versionsprobe und für den
+Lauf dieselbe Startliste — unter Windows zwei Dateien, `node.exe` und `codex.js`. Dass
+dazwischen keine der beiden ersetzt wurde, beweist das nicht; ein Ersatz einer oder beider
+durch denselben Benutzer zwischen den zwei Starts ist ausdrücklich nicht abgedeckt.
+

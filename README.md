@@ -100,7 +100,7 @@ roles:
   plan-review: codex    # Dual draft:  plan: [claude, codex] + plan-review: cross
   build: claude
   code-review: codex
-  exposure-review: codex   # second grader of build — gpt-5.6-sol/medium by default, see ROLES.md
+  exposure-review: codex   # second grader of build — gpt-6-sol/medium by default, see ROLES.md
   docs: claude
   docs-review: codex
   audit: codex
@@ -179,6 +179,41 @@ Everything is written up with its verification in
 the findings that were **rejected**, and where a reviewer's advice was deliberately not
 followed.
 
+## Upgrading to 2.6.0 — Codex 0.156.0, gpt-6-sol, an isolated reviewer
+
+`gpt-5.6-terra` was superseded by `gpt-6-sol` on 2026-09-22; every Codex role now defaults to
+`gpt-6-sol`/`medium` (a real plan-review round measured ~4:48 min). **codex-cli 0.149.1 answers
+`gpt-6-sol` with HTTP 400 on every call**, so the CLI comes first:
+
+```bash
+npm install -g @openai/codex@0.156.0
+```
+
+**What stops on purpose:**
+
+- **An older CLI with `gpt-6-sol`** is refused up front — exit 2, with the install line — instead
+  of failing inside Codex. The wrapper asks the binary for its version once and shows it in its
+  header.
+- **A `.codex/config.toml` in or above the reviewed directory** is refused — exit 2. Measured:
+  in a repo trusted in the user config, Codex loaded that file and obeyed a
+  `developer_instructions` line in it; the repo under review steered its own review.
+- **On Windows, Codex is no longer started through `codex.cmd`.** A batch file runs through
+  `cmd.exe`, which re-reads its arguments; the wrapper now starts what the npm starter would —
+  `node.exe` with the package's `codex.js` — directly, or a `codex.exe`, and refuses to start a
+  batch file at all (exit 127).
+- **`wrapper_drift.py --update`** needs `--private-root <dir>`, the folder only you write to,
+  and no longer accepts `--scripts-dir` together with `--update`.
+
+**What changed underneath:** every call runs with `--ignore-user-config`, `--ignore-rules`,
+`web_search="disabled"` and `--disable` for apps, plugins, browser and computer control,
+multi-agent, image generation and more — on 0.156.0 these are on by default and run outside the
+read-only shell sandbox (upstream [#28](https://github.com/chaseai-yt/claudex-loop/issues/28),
+[#18](https://github.com/chaseai-yt/claudex-loop/pull/18)). `--disable-mcp` and
+`CLAUDEX_DISABLE_MCP` are accepted and ignored: no MCP server from the user config starts at all.
+Exit 3 now reads execution from the event stream (see [Safety](#safety)). Upgrade the copies
+first, then the plugin — the other way round the new plugin sends `gpt-6-sol` to a wrapper copy
+that may still run on an old CLI.
+
 ## Upgrading to 2.5.0 — one deliberate break
 
 2.5.0 adds `--expect-workdir` to the wrapper (see [Safety](#safety)): a review can no longer
@@ -193,7 +228,7 @@ run in a directory nobody chose without saying so, because that directory decide
   skills recognise that and name the fix. Level the copy once per repo:
 
 ```bash
-python <plugin>/scripts/wrapper_drift.py --repo . --update
+python <plugin>/scripts/wrapper_drift.py --repo . --update --private-root <your projects folder>
 ```
 
   `--update` touches only the wrapper. `--update-optional` also overwrites
@@ -261,8 +296,9 @@ work, and both do so on purpose** — the old behaviour was the defect:
    always said every fallback round is recorded, valid or invalid — the flag being
    optional meant that held only for whoever remembered it.
 
-Also worth knowing, though nothing breaks: the wrapper now derives which MCP servers to
-disable from your actual Codex config instead of guessing two names. The old default
+Also worth knowing, though nothing breaks: from 2.2.0 until 2.6.0 the wrapper derived which
+MCP servers to switch off from your actual Codex config instead of guessing two names (since
+2.6.0 the user config is not loaded at all, so no server from it starts). The old default
 named `MCP_DOCKER`, and an override for a server you do not have makes Codex reject its
 *entire* config — exit 1, empty answer file, an error pointing at your `config.toml`
 rather than at us. If the wrapper ever failed on a fresh machine, that was why.
@@ -324,13 +360,14 @@ with everything in place.
 
 ## Prerequisites
 
-- **Codex CLI ≥ 0.130** — `npm install -g @openai/codex@latest`. On Windows, Codex 0.147
-  and later needs wrapper **2.4.0 or newer**, or the reviewer silently reads nothing (see
-  [Safety](#safety)). Nothing checks the installed version for you.
+- **Codex CLI ≥ 0.156.0** — `npm install -g @openai/codex@0.156.0`, a named version, never an
+  unpinned latest. `gpt-6-sol` is HTTP 400 on older CLIs, and the wrapper refuses it there up
+  front; its header shows the version it found. On Windows, Codex 0.147 and later also needs
+  wrapper **2.4.0 or newer**, or the reviewer silently reads nothing (see [Safety](#safety)).
 - **Authenticated** — `codex login` once (any ChatGPT account: Free/Plus/Pro/Max)
 - **Model and effort come from the roles, not from your Codex config** —
-  `python scripts/claudex_roles.py --spec <role>` resolves them (`gpt-5.6-terra/high` for
-  the reviewing roles, `gpt-5.6-sol/medium` for the exposure pass) and the review skills
+  `python scripts/claudex_roles.py --spec <role>` resolves them (`gpt-6-sol/medium` for
+  every reviewing role, the exposure pass included) and the review skills
   pass them to the wrapper; override per role in `.claudex.yaml` ([ROLES.md](ROLES.md)).
   Only `build`, when Codex builds, runs on your config default. Avoid the
   `gpt-5.x-codex` slugs: ChatGPT-account auth rejects them.
@@ -363,9 +400,10 @@ with everything in place.
 
 Pass e.g. `rounds=3` when invoking to override.
 
-⛔ **Why the reviewing roles pin `terra`, not `sol`:** `sol` ran into the 10-minute
-ceiling on a real plan; `gpt-5.6-terra` with `model_reasoning_effort=high` did not. A
-pin works fine under ChatGPT auth — only the older `*-codex` slugs are rejected.
+⛔ **Why `gpt-6-sol`/`medium`:** it superseded `gpt-5.6-terra` on 2026-09-22, and a real
+plan-review round took ~4:48 min on codex-cli 0.156.0 — inside the 600 s timeout. (The
+earlier pin to `terra` existed because on 2026-08-30 `gpt-5.6-sol` at high effort ran into
+that ceiling.) A pin works fine under ChatGPT auth — only the older `*-codex` slugs are rejected.
 
 ## When Codex runs dry (fallback reviewers)
 
@@ -390,19 +428,22 @@ Two gates decide *where* it writes, both from [upstream PR #12](https://github.c
 
 ### The read-only wrapper — and why it isn't enough on its own
 
-[`scripts/codex_ro.py`](./scripts/codex_ro.py) is the canonical wrapper (Windows and macOS, Python 3.10+). It pins `-s read-only` on `exec`, `-c sandbox_mode=read-only` on `resume`, and refuses with exit 2 any `-c` override touching `sandbox_mode`, `approval_policy`, `sandbox_permissions`, `sandbox_workspace_write`, `profile`, `mcp_servers` or `windows` — a profile carries its own sandbox setting, Codex runs MCP servers as separate processes *outside* the sandbox, and `windows.sandbox` picks which backend enforces the pin at all.
+[`scripts/codex_ro.py`](./scripts/codex_ro.py) is the canonical wrapper (Windows and macOS, Python 3.10+). It pins `-s read-only` on `exec`, `-c sandbox_mode=read-only` on `resume`, and refuses with exit 2 any `-c` override touching `sandbox_mode`, `approval_policy`, `sandbox_permissions`, `sandbox_workspace_write`, `profile`, `mcp_servers` or `windows` — a profile carries its own sandbox setting, Codex runs MCP servers as separate processes *outside* the sandbox, and `windows.sandbox` picks which backend enforces the pin at all. Since 2.6.0 also `features`, `web_search`, `projects`, `developer_instructions` and `model_instructions_file`: each would undo part of the isolation below.
 
-**A pin needs something to enforce it, and on Windows nothing does by default.** Measured 2026-09-16 on codex-cli 0.149.1: with no `[windows] sandbox` key in the config, `codex exec` refuses **every** shell command — a plain file read included, in `read-only` and `workspace-write` alike — with `rejected: blocked by policy`, and still exits 0 with a fluent answer written from the prompt alone. Upstream: [#42172](https://github.com/openai/codex/issues/42172) (dates the regression to 0.147.0), [#44839](https://github.com/openai/codex/issues/44839), [#43633](https://github.com/openai/codex/issues/43633). Since **2.4.0** the wrapper passes `windows.sandbox="unelevated"` itself. Of the two accepted values — there is no "off" — `unelevated` is the one that works everywhere: `elevated` runs the command as a different user and therefore fails on any working directory inside the calling user's profile, which is where the harness scratchpad lives. Both refuse the write; that was measured too, with a positive control.
+**Read-only pins the shell; the isolation covers the rest (2.6.0).** Everything else Codex can load runs beside the shell sandbox, not inside it — MCP servers from the user config or a trusted project's `.codex/config.toml`, and on 0.156.0 a set of features that are on by default: apps and connectors, plugins, browser and computer control, multi-agent, image generation, web access. Every call therefore runs with `--ignore-user-config`, `--ignore-rules`, `web_search="disabled"` and `--disable` for each of those features (the list is `ISOLATION_DISABLE` in the wrapper). Measured on 0.156.0: the web, image, plugin-install, MCP and goals tools disappear, the shell still reads, and the pinned `-c` keys still apply. What cannot be switched off is `collaboration.*` — spawning sub-agents; a spawned sub-agent was measured to inherit read-only and the isolation. A `.codex/config.toml` in or above the working directory refuses the run: in a repo trusted in the user config, Codex was measured loading that file and obeying a `developer_instructions` line in it.
 
-**And a reviewer that could not read is not a reviewer.** That failure is silent — exit 0, a valid `thread_id`, a full answer file — so every ordinary check passes it through and a verdict gets recorded for a review of nothing. The wrapper now reads its own stderr and exits **3** when a run had shell refusals and not one successful command. Deliberately not "any refusal": a model that reaches for one illegal command, is told no, and then does the job has produced a real review, and a control that blocks normal work gets switched off.
+**A pin needs something to enforce it, and on Windows nothing does by default.** Measured 2026-09-16 on codex-cli 0.149.1: with no `[windows] sandbox` key in the config, `codex exec` refuses **every** shell command — a plain file read included, in `read-only` and `workspace-write` alike — with `rejected: blocked by policy`, and still exits 0 with a fluent answer written from the prompt alone. Upstream: [#42172](https://github.com/openai/codex/issues/42172) (dates the regression to 0.147.0), [#44839](https://github.com/openai/codex/issues/44839), [#43633](https://github.com/openai/codex/issues/43633). Since **2.4.0** the wrapper passes `windows.sandbox="unelevated"` itself. There is no "off": 0.149.1 accepted two values, and 0.156.0 accepts three — `elevated`, `unelevated`, `mxc` (measured 2026-09-30; `mxc` reads too). `unelevated` is the one that works everywhere: on 0.149.1 `elevated` ran the command as a different user and failed on any working directory inside the calling user's profile, which is where the harness scratchpad lives. Both refused the write; that was measured too, with a positive control. On 0.156.0 the regression is unchanged: without the key, every command is refused.
+
+**And a reviewer that could not read is not a reviewer.** That failure is silent — exit 0, a valid `thread_id`, a full answer file — so every ordinary check passes it through and a verdict gets recorded for a review of nothing. The wrapper exits **3** when nothing provably ran — no `command_execution` in the last turn of the event stream — and either a sandbox refusal is in stderr or the evidence itself is unusable (missing, truncated, malformed, over the size cap). Since 2.6.0 execution is read from the stream: the stderr success marker the first version relied on never appears with `--json` (0 of ~90 real runs), so one refusal alone used to mean exit 3. Deliberately not "any refusal" — a model that is told no once and then does the job has produced a real review — and not "no command" either: 12 of 72 real runs answered legitimately without one. What exit 3 guarantees is narrow on purpose: the shell was available to the reviewer, not that it read the right files.
 
 Path arguments are confined, and **write targets more tightly than reads**: the wrapper deletes `--out-file` and truncates `--err-file`, so an unbounded path argument would be a write primitive on a call the allowlist approved without a prompt. Reads may additionally use `--allow-path` / `CLAUDEX_ALLOWED_PATHS`; writes may not — a caller cannot widen its own confinement. Write targets must sit in the repo, in `<repo>/.claudex-tmp/`, or in the OS temp dir — POSIX additionally accepts an explicit `CLAUDEX_SCRATCH_DIR`. Each candidate is screened up its whole ancestry, and **the screen is the sticky bit, not world-writability**: `/tmp` is `drwxrwxrwt`, and the sticky bit is precisely the rule that only an entry's owner may rename or unlink it — which is what makes `mkdtemp` trustworthy there. So a private directory under `/tmp` passes; a world-writable parent *without* the sticky bit does not, nor does a sticky one owned by someone else, who could still remove our entries. A first version screened on world-writability alone: it locked out every harness scratchpad on Linux while accepting the identical layout on macOS, where `gettempdir()` happens to return a per-user path. Only CI showed that (2026-09-03). **On Windows `CLAUDEX_SCRATCH_DIR` is refused outright as of 2.3.0** (audit 2026-09-02, CRITICAL), because Windows offers no cheap equivalent of that test, and the repo/`.claudex-tmp/`/temp-dir candidates are therefore *assumed* private there rather than proven so — a documented residual gap, not a guarantee. A target that is a symlink, a Windows junction, a directory, a file that already hard-links to other data, or the same file as another output is refused outright. `python -m unittest discover -s tests` covers the refusals; the sandbox behaviour itself is a measurement, recorded in the file's docstring.
 
 **`--expect-workdir DIR`: the scope is asserted, never selected.** The working directory decides more than what gets reviewed — it decides which `AGENTS.md` Codex loads into the prompt unasked, so it is itself an egress parameter, and until 2.5.0 nothing displayed it. Incident 2026-09-11: eight review rounds ran with the wrapper's cwd in a production documentation repo instead of the intended throwaway one, and nothing said so. `DIR` must be an **absolute** path; the wrapper compares it against its own working directory and refuses — exit 2 — on any difference, before Codex is located, before any file is created, and before the previous round's verdict file is deleted. It is an **ASSERTION, not a SELECTOR**: it can only refuse, it never changes where Codex runs (default: unset, behaviour as in 2.4.0). Every other spelling of the same place is refused on purpose — a symlink or junction alias, an 8.3 short name, a `subst`/mapped-drive alias, a working directory itself reached through a link. The value is compared **as typed**: case and slash direction (Windows) and one trailing separator are the only tolerance, so `<cwd>\sub\..`, a trailing dot or space and a drive-rooted `\repo` are refused like any alias (the first build ran the value through `abspath()` and accepted all of them — found by the closing review gate, not by the tests). A relative value, `.`, an empty value, or any UNC/device path (`\\srv\share`, `//srv/share`, `\\?\…`) is refused before the filesystem is touched at all. A mapped network drive is not recognised as a network path — an accepted residual risk. The wrapper's header now always names the directory it actually ran in:
 
 ```
-# codex read-only | exec (new) | gpt-5.6-terra/high | timeout 600s | wrapper 2.5.0
+# codex read-only | exec (new) | gpt-6-sol/medium | timeout 600s | wrapper 2.6.0
 #   cwd: D:\…\throwaway-repo   (git repo)
+#   codex-cli 0.156.0
 ```
 
 The only supported way to point a review at a chosen repo is a session **started** in that directory — a `cd` mid-session does not persist between tool calls, and the guard denies the one call that would combine both (measured, see [`docs/audit/2026-09-11-scope.md`](./docs/audit/2026-09-11-scope.md)). The skills take `target=<absolute path>` for this and ask when it is missing, never deriving it from `$PWD`; `--expect-workdir "$TARGET"` is the net under that discipline, not a replacement for it:
@@ -416,7 +457,7 @@ python tools/codex_ro.py --expect-workdir "$TARGET" \
 
 A first design, `--workdir DIR` — a selector that would have set the child's cwd — was rejected as CRITICAL in plan review: the allowlist entry is a *prefix* rule, so the flag would have arrived unattended and handed any caller a way to choose which project's instructions leave the machine. The inversion to an assertion removed exactly that.
 
-`setup` copies it to each repo as `tools/codex_ro.py`, because a permission rule has to name a stable path and the plugin directory carries a version hash. Copies drift — [`scripts/wrapper_drift.py`](./scripts/wrapper_drift.py) reports which ones have fallen behind and `--update` levels them.
+`setup` copies it to each repo as `tools/codex_ro.py`, because a permission rule has to name a stable path and the plugin directory carries a version hash. Copies drift — [`scripts/wrapper_drift.py`](./scripts/wrapper_drift.py) reports which ones have fallen behind, and `--update --private-root <dir>` levels them — only below a folder you attest only you write to (Windows ACLs are not inspected; see its `--help`).
 
 **The wrapper alone does not make an allowlist entry safe.** A permission rule matches the *start* of a command, so `Bash(python tools/codex_ro.py*)` also approves whatever is chained behind it. The wrapper nails Codex's sandbox down; it has nothing to say about a second command sharing its approval. [`hooks/wrapper_guard.py`](./hooks/wrapper_guard.py) is the missing half: a `PreToolUse` hook that denies any wrapper invocation carrying chaining, a pipe, a redirect, command substitution, or unbalanced quotes. Without a verified hook, the honest configuration is no allowlist entry at all — roughly six prompts across a five-round review, which is the price of seeing which sandbox Codex starts in.
 

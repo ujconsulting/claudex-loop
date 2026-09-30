@@ -2,8 +2,9 @@
 
 The exposure pass runs on a different model/effort than the acceptance review,
 but the choice lives in the role config, not in the skill. These tests pin the
-contract the skills rely on: `--spec exposure-review` yields sol/medium by
-default, the sandbox cannot be overridden per role, and the build's second
+contract the skills rely on: `--spec exposure-review` yields gpt-6-sol/medium by
+default (since 2026-09-30 the same as every other Codex role, but still its own
+override entry), the sandbox cannot be overridden per role, and the build's second
 grader is walked by producer_never_reviews like the first.
 """
 from __future__ import annotations
@@ -38,15 +39,28 @@ def test_exposure_review_is_a_second_grader_of_build():
 def test_exposure_review_spec_defaults_to_sol_medium_read_only():
     (spec,) = cr.actor_spec(_cfg(), "exposure-review")
     assert spec["actor"] == "codex"
-    assert spec["model"] == "gpt-5.6-sol"
+    assert spec["model"] == "gpt-6-sol"
     assert spec["effort"] == "medium"
     assert spec["sandbox"] == "read-only"
 
 
+def test_every_codex_role_defaults_to_gpt6_sol_medium():
+    """K-T1 (2026-09-30): gpt-5.6-terra is superseded by gpt-6-sol; every Codex
+    role runs on gpt-6-sol/medium, and exposure-review keeps its OWN override
+    entry so it can still be tuned apart from the others."""
+    cfg = _cfg()
+    for role, actor in cfg["roles"].items():
+        if actor != "codex":
+            continue
+        (spec,) = cr.actor_spec(cfg, role)
+        assert (spec["model"], spec["effort"]) == ("gpt-6-sol", "medium"), role
+    assert "exposure-review" in cr.DEFAULTS["actors"]["codex"]["roles"]
+
+
 def test_code_review_spec_is_untouched_by_the_override():
     (spec,) = cr.actor_spec(_cfg(), "code-review")
-    assert spec["model"] == "gpt-5.6-terra"
-    assert spec["effort"] == "high"
+    assert spec["model"] == "gpt-6-sol"
+    assert spec["effort"] == "medium"
 
 
 def test_sandbox_cannot_be_overridden_per_role():
@@ -74,7 +88,7 @@ def test_spec_cli_prints_model_and_effort(capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert out.startswith("codex ")
-    assert "model=gpt-5.6-sol" in out and "effort=medium" in out and "sandbox=read-only" in out
+    assert "model=gpt-6-sol" in out and "effort=medium" in out and "sandbox=read-only" in out
 
 
 # --- audit 2026-08-30: the gates could be switched off by the reviewed repo -----

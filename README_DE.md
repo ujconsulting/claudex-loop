@@ -105,7 +105,7 @@ roles:
   plan-review: codex    # Dual draft:  plan: [claude, codex] + plan-review: cross
   build: claude
   code-review: codex
-  exposure-review: codex   # second grader of build — gpt-5.6-sol/medium by default, see ROLES.md
+  exposure-review: codex   # second grader of build — gpt-6-sol/medium by default, see ROLES.md
   docs: claude
   docs-review: codex
   audit: codex
@@ -188,6 +188,43 @@ eigenen Autor. Alles ist samt Nachweis aufgeschrieben in
 der **zurückgewiesenen** Befunde und der Stellen, an denen dem Rat eines Prüfers
 bewusst nicht gefolgt wurde.
 
+## Umstieg auf 2.6.0 — Codex 0.156.0, gpt-6-sol, ein abgeschotteter Prüfer
+
+`gpt-5.6-terra` wurde am 22.09.2026 durch `gpt-6-sol` abgelöst; jede Codex-Rolle steht jetzt auf
+`gpt-6-sol`/`medium` (eine echte Plan-Review-Runde gemessen ≈ 4:48 min). **codex-cli 0.149.1
+beantwortet `gpt-6-sol` bei jedem Aufruf mit HTTP 400**, also kommt die CLI zuerst:
+
+```bash
+npm install -g @openai/codex@0.156.0
+```
+
+**Was absichtlich stoppt:**
+
+- **Eine ältere CLI mit `gpt-6-sol`** wird vorab abgewiesen — Exit 2, mit der Installationszeile —,
+  statt in Codex zu scheitern. Der Wrapper fragt das Binary einmal nach seiner Version und zeigt sie
+  in der Kopfzeile.
+- **Eine `.codex/config.toml` im geprüften Verzeichnis oder darüber** wird abgewiesen — Exit 2.
+  Gemessen: in einem in der Nutzer-Config als vertrauenswürdig eingetragenen Repo lud Codex diese
+  Datei und befolgte eine `developer_instructions`-Zeile darin; das geprüfte Repo steuerte sein
+  eigenes Review.
+- **Unter Windows startet Codex nicht mehr über `codex.cmd`.** Eine Batch-Datei läuft über
+  `cmd.exe`, das ihre Argumente noch einmal auswertet; der Wrapper startet jetzt direkt, was der
+  npm-Starter tun würde — `node.exe` mit der `codex.js` des Pakets —, oder eine `codex.exe`, und
+  startet überhaupt keine Batch-Datei mehr (Exit 127).
+- **`wrapper_drift.py --update`** braucht `--private-root <ordner>`, den Ordner, in den nur du
+  schreibst, und nimmt `--scripts-dir` nicht mehr zusammen mit `--update` an.
+
+**Was sich darunter geändert hat:** jeder Aufruf läuft mit `--ignore-user-config`,
+`--ignore-rules`, `web_search="disabled"` und `--disable` für Apps, Plugins, Browser- und
+Computersteuerung, Multi-Agent, Bilderzeugung und mehr — auf 0.156.0 sind die standardmäßig an und
+laufen außerhalb der read-only-Shell-Sandbox (upstream
+[#28](https://github.com/chaseai-yt/claudex-loop/issues/28),
+[#18](https://github.com/chaseai-yt/claudex-loop/pull/18)). `--disable-mcp` und
+`CLAUDEX_DISABLE_MCP` werden angenommen und ignoriert: kein MCP-Server aus der Nutzer-Config startet
+mehr. Exit 3 liest die Ausführung jetzt aus dem Ereignisstrom (siehe [Sicherheit](#sicherheit)).
+Erst die Kopien heben, dann das Plugin — umgekehrt schickt das neue Plugin `gpt-6-sol` an eine
+Wrapper-Kopie, die womöglich noch auf einer alten CLI läuft.
+
 ## Umstieg auf 2.5.0 — ein bewusster Bruch
 
 2.5.0 gibt dem Wrapper `--expect-workdir` (siehe [Sicherheit](#sicherheit)): ein Review kann
@@ -203,7 +240,7 @@ Verzeichnis entscheidet, welche `AGENTS.md` mit dem Prompt die Maschine verläss
   Kopie angleichen:
 
 ```bash
-python <plugin>/scripts/wrapper_drift.py --repo . --update
+python <plugin>/scripts/wrapper_drift.py --repo . --update --private-root <your projects folder>
 ```
 
   `--update` fasst nur den Wrapper an. `--update-optional` überschreibt zusätzlich
@@ -240,7 +277,7 @@ tatsächlich lief.
 
 2. **`fallback_review.py --append-log <LOG_FILE>` ist Pflicht.** [FALLBACK.md](./FALLBACK.md) hat immer gesagt, dass jede Fallback-Runde protokolliert wird, gültig oder ungültig — solange das Flag optional war, galt das nur für den, der daran dachte.
 
-Ebenfalls wissenswert, auch wenn nichts bricht: Der Wrapper leitet jetzt aus deiner tatsächlichen Codex-Konfiguration ab, welche MCP-Server abzuschalten sind, statt zwei Namen zu raten. Der alte Default nannte `MCP_DOCKER`, und ein Override für einen Server, den es bei dir nicht gibt, lässt Codex seine *gesamte* Konfiguration verwerfen — Exit 1, leere Antwortdatei, und eine Fehlermeldung, die auf deine `config.toml` zeigt statt auf uns. Falls der Wrapper je auf einer frischen Maschine scheiterte: das war der Grund.
+Ebenfalls wissenswert, auch wenn nichts bricht: Von 2.2.0 bis 2.6.0 leitete der Wrapper aus deiner tatsächlichen Codex-Konfiguration ab, welche MCP-Server abzuschalten sind, statt zwei Namen zu raten (seit 2.6.0 wird die Nutzer-Config gar nicht geladen, kein Server daraus startet). Der alte Default nannte `MCP_DOCKER`, und ein Override für einen Server, den es bei dir nicht gibt, lässt Codex seine *gesamte* Konfiguration verwerfen — Exit 1, leere Antwortdatei, und eine Fehlermeldung, die auf deine `config.toml` zeigt statt auf uns. Falls der Wrapper je auf einer frischen Maschine scheiterte: das war der Grund.
 
 ## Installation
 
@@ -280,13 +317,14 @@ Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles
 
 ## Voraussetzungen
 
-- **Codex CLI ≥ 0.130** — `npm install -g @openai/codex@latest`. Unter Windows braucht Codex
-  ab 0.147 einen Wrapper **ab 2.4.0**, sonst liest der Reviewer lautlos nichts (siehe
-  [Sicherheit](#sicherheit)). Nichts prüft die installierte Version für dich.
+- **Codex CLI ≥ 0.156.0** — `npm install -g @openai/codex@0.156.0`, eine benannte Version, nie
+  ungepinnt. `gpt-6-sol` ist auf älteren CLIs HTTP 400, und der Wrapper weist es dort vorab ab;
+  seine Kopfzeile zeigt die gefundene Version. Unter Windows braucht Codex ab 0.147 außerdem einen
+  Wrapper **ab 2.4.0**, sonst liest der Reviewer lautlos nichts (siehe [Sicherheit](#sicherheit)).
 - **Angemeldet** — einmal `codex login` (jedes ChatGPT-Konto: Free/Plus/Pro/Max)
 - **Modell und Aufwand kommen aus den Rollen, nicht aus deiner Codex-Konfiguration** —
-  `python scripts/claudex_roles.py --spec <role>` löst sie auf (`gpt-5.6-terra/high` für
-  die prüfenden Rollen, `gpt-5.6-sol/medium` für den Exposure-Pass), und die Review-Skills
+  `python scripts/claudex_roles.py --spec <role>` löst sie auf (`gpt-6-sol/medium` für
+  jede prüfende Rolle, den Exposure-Pass eingeschlossen), und die Review-Skills
   geben sie an den Wrapper weiter; je Rolle überschreibbar in `.claudex.yaml`
   ([ROLES.md](ROLES.md)). Nur `build` läuft, wenn Codex baut, auf deinem
   Konfigurations-Default. Die `gpt-5.x-codex`-Slugs meiden: die ChatGPT-Konto-
@@ -320,7 +358,7 @@ Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles
 
 Zum Überschreiben beim Aufruf z. B. `rounds=3` mitgeben.
 
-⛔ **Warum die prüfenden Rollen `terra` pinnen, nicht `sol`:** `sol` lief an einem echten Plan in die 10-Minuten-Decke; `gpt-5.6-terra` mit `model_reasoning_effort=high` nicht. Ein Pin funktioniert unter ChatGPT-Authentifizierung einwandfrei — abgelehnt werden nur die älteren `*-codex`-Slugs.
+⛔ **Warum `gpt-6-sol`/`medium`:** es hat `gpt-5.6-terra` am 22.09.2026 abgelöst, und eine echte Plan-Review-Runde dauerte auf codex-cli 0.156.0 ≈ 4:48 min — innerhalb des 600-s-Timeouts. (Der frühere Pin auf `terra` bestand, weil `gpt-5.6-sol` bei hohem Effort am 30.08.2026 in diese Decke lief.) Ein Pin funktioniert unter ChatGPT-Authentifizierung einwandfrei — abgelehnt werden nur die älteren `*-codex`-Slugs.
 
 ## Wenn Codex leerläuft (Fallback-Prüfer)
 
@@ -345,19 +383,22 @@ Zwei Tore entscheiden, *wohin* geschrieben wird, beide aus [upstream PR #12](htt
 
 ### Der read-only-Wrapper — und warum er allein nicht genügt
 
-[`scripts/codex_ro.py`](./scripts/codex_ro.py) ist der kanonische Wrapper (Windows und macOS, Python 3.10+). Er nagelt `-s read-only` bei `exec` fest, `-c sandbox_mode=read-only` bei `resume`, und weist mit Exit 2 jedes `-c`-Override ab, das `sandbox_mode`, `approval_policy`, `sandbox_permissions`, `sandbox_workspace_write`, `profile`, `mcp_servers` oder `windows` berührt — ein Profil bringt seine eigene Sandbox-Einstellung mit, Codex startet MCP-Server als eigene Prozesse *außerhalb* der Sandbox, und `windows.sandbox` entscheidet, welches Backend die Festlegung überhaupt durchsetzt.
+[`scripts/codex_ro.py`](./scripts/codex_ro.py) ist der kanonische Wrapper (Windows und macOS, Python 3.10+). Er nagelt `-s read-only` bei `exec` fest, `-c sandbox_mode=read-only` bei `resume`, und weist mit Exit 2 jedes `-c`-Override ab, das `sandbox_mode`, `approval_policy`, `sandbox_permissions`, `sandbox_workspace_write`, `profile`, `mcp_servers` oder `windows` berührt — ein Profil bringt seine eigene Sandbox-Einstellung mit, Codex startet MCP-Server als eigene Prozesse *außerhalb* der Sandbox, und `windows.sandbox` entscheidet, welches Backend die Festlegung überhaupt durchsetzt. Seit 2.6.0 außerdem `features`, `web_search`, `projects`, `developer_instructions` und `model_instructions_file`: jedes davon höbe einen Teil der Abschottung unten auf.
 
-**Eine Festlegung braucht etwas, das sie durchsetzt — und unter Windows tut das per Voreinstellung nichts.** Gemessen am 16.09.2026 auf codex-cli 0.149.1: ohne `[windows] sandbox` in der Config weist `codex exec` **jeden** Shell-Aufruf ab — reines Lesen eingeschlossen, in `read-only` wie in `workspace-write` gleichermaßen — mit `rejected: blocked by policy`, beendet sich dabei aber mit 0 und liefert eine flüssige Antwort, geschrieben allein aus dem Prompt. Upstream: [#42172](https://github.com/openai/codex/issues/42172) (datiert die Regression auf 0.147.0), [#44839](https://github.com/openai/codex/issues/44839), [#43633](https://github.com/openai/codex/issues/43633). Seit **2.4.0** setzt der Wrapper `windows.sandbox="unelevated"` selbst. Von den zwei erlaubten Werten — ein „aus" gibt es nicht — ist `unelevated` der, der überall läuft: `elevated` startet den Befehl als anderer Benutzer und scheitert deshalb an jedem Arbeitsverzeichnis im Profil des aufrufenden Benutzers, und genau dort liegt der Scratchpad der Sitzung. Das Schreibverbot halten beide; auch das wurde gemessen, mit positiver Kontrolle.
+**Read-only legt die Shell fest; die Abschottung deckt den Rest ab (2.6.0).** Alles andere, was Codex laden kann, läuft neben der Shell-Sandbox, nicht in ihr — MCP-Server aus der Nutzer-Config oder aus der `.codex/config.toml` eines vertrauenswürdigen Projekts, und auf 0.156.0 eine Reihe standardmäßig eingeschalteter Features: Apps und Connectoren, Plugins, Browser- und Computersteuerung, Multi-Agent, Bilderzeugung, Webzugriff. Jeder Aufruf läuft deshalb mit `--ignore-user-config`, `--ignore-rules`, `web_search="disabled"` und `--disable` für jedes dieser Features (die Liste ist `ISOLATION_DISABLE` im Wrapper). Gemessen auf 0.156.0: die Web-, Bild-, Plugin-Installations-, MCP- und Goals-Werkzeuge verschwinden, die Shell liest weiter, und die festgelegten `-c`-Schlüssel gelten weiter. Nicht abschaltbar ist `collaboration.*` — das Starten von Sub-Agenten; ein gestarteter Sub-Agent erbte gemessen read-only und die Abschottung. Eine `.codex/config.toml` im Arbeitsverzeichnis oder darüber weist den Lauf ab: in einem in der Nutzer-Config als vertrauenswürdig eingetragenen Repo lud Codex diese Datei gemessen und befolgte eine `developer_instructions`-Zeile darin.
 
-**Und ein Reviewer, der nicht lesen konnte, ist kein Reviewer.** Dieser Fehlschlag ist still — Exit 0, gültige `thread_id`, volle Antwortdatei — also lässt ihn jede gewöhnliche Prüfung durch, und für ein Review über nichts wird ein Verdikt protokolliert. Der Wrapper liest jetzt sein eigenes stderr und endet mit **3**, wenn ein Lauf Shell-Ablehnungen hatte und keinen einzigen erfolgreichen Befehl. Bewusst nicht „irgendeine Ablehnung": ein Modell, das einmal nach einem unerlaubten Befehl greift, ein Nein bekommt und dann die Arbeit macht, hat ein echtes Review geliefert — und eine Kontrolle, die normale Arbeit blockiert, wird abgeschaltet.
+**Eine Festlegung braucht etwas, das sie durchsetzt — und unter Windows tut das per Voreinstellung nichts.** Gemessen am 16.09.2026 auf codex-cli 0.149.1: ohne `[windows] sandbox` in der Config weist `codex exec` **jeden** Shell-Aufruf ab — reines Lesen eingeschlossen, in `read-only` wie in `workspace-write` gleichermaßen — mit `rejected: blocked by policy`, beendet sich dabei aber mit 0 und liefert eine flüssige Antwort, geschrieben allein aus dem Prompt. Upstream: [#42172](https://github.com/openai/codex/issues/42172) (datiert die Regression auf 0.147.0), [#44839](https://github.com/openai/codex/issues/44839), [#43633](https://github.com/openai/codex/issues/43633). Seit **2.4.0** setzt der Wrapper `windows.sandbox="unelevated"` selbst. Ein „aus" gibt es nicht: 0.149.1 kannte zwei Werte, 0.156.0 kennt drei — `elevated`, `unelevated`, `mxc` (gemessen am 30.09.2026; auch `mxc` liest). `unelevated` ist der, der überall läuft: auf 0.149.1 startete `elevated` den Befehl als anderer Benutzer und scheiterte an jedem Arbeitsverzeichnis im Profil des aufrufenden Benutzers, und genau dort liegt der Scratchpad der Sitzung. Das Schreibverbot hielten beide; auch das wurde gemessen, mit positiver Kontrolle. Auf 0.156.0 besteht die Regression unverändert: ohne den Schlüssel wird jeder Befehl abgewiesen.
+
+**Und ein Reviewer, der nicht lesen konnte, ist kein Reviewer.** Dieser Fehlschlag ist still — Exit 0, gültige `thread_id`, volle Antwortdatei — also lässt ihn jede gewöhnliche Prüfung durch, und für ein Review über nichts wird ein Verdikt protokolliert. Der Wrapper endet mit **3**, wenn nachweisbar nichts lief — kein `command_execution` im letzten Turn des Ereignisstroms — und entweder eine Sandbox-Ablehnung in stderr steht oder der Beleg selbst unbrauchbar ist (fehlt, abgeschnitten, fehlerhaft, über der Größengrenze). Seit 2.6.0 wird die Ausführung aus dem Strom gelesen: die Erfolgsmarke in stderr, auf die sich die erste Fassung stützte, erscheint mit `--json` nie (0 von ~90 echten Läufen), also bedeutete schon eine einzige Ablehnung Exit 3. Bewusst nicht „irgendeine Ablehnung" — ein Modell, das einmal ein Nein bekommt und dann die Arbeit macht, hat ein echtes Review geliefert — und auch nicht „kein Befehl": 12 von 72 echten Läufen antworteten legitim ohne einen. Was Exit 3 zusichert, ist absichtlich eng: die Shell stand dem Reviewer zur Verfügung — nicht, dass er die richtigen Dateien gelesen hat.
 
 Pfadargumente sind eingegrenzt, und **Schreibziele enger als Lesezugriffe**: Der Wrapper löscht `--out-file` und kürzt `--err-file`, ein unbegrenztes Pfadargument wäre also ein Schreib-Primitiv auf einem Aufruf, den die Allowlist ohne Rückfrage freigegeben hat. Lesezugriffe dürfen zusätzlich `--allow-path` / `CLAUDEX_ALLOWED_PATHS` nutzen, Schreibzugriffe nicht — ein Aufrufer darf seine eigene Eingrenzung nicht aufweiten. Schreibziele müssen im Repo liegen, in `<repo>/.claudex-tmp/` oder im OS-Temp-Verzeichnis — unter POSIX zusätzlich in einem ausdrücklich gesetzten `CLAUDEX_SCRATCH_DIR`. Jeder Kandidat wird über seine gesamte Elternkette geprüft, und **geprüft wird auf das Sticky-Bit, nicht auf World-Writability**: `/tmp` ist `drwxrwxrwt`, und das Sticky-Bit ist genau die Regel, dass nur der Eigentümer eines Eintrags ihn umbenennen oder löschen darf — deshalb gilt `mkdtemp` dort als vertrauenswürdig. Ein privates Verzeichnis unter `/tmp` besteht also; ein world-writable Elternverzeichnis *ohne* Sticky-Bit nicht, und ein Sticky-Verzeichnis in fremdem Besitz ebenfalls nicht, denn dessen Eigentümer darf unsere Einträge weiterhin entfernen. Eine erste Fassung prüfte nur auf World-Writability: sie sperrte unter Linux jedes Harness-Scratchpad aus, während dieselbe Konstellation unter macOS durchlief, wo `gettempdir()` zufällig ein Pro-Benutzer-Pfad ist. Sichtbar wurde das erst durch die CI (03.09.2026). **Unter Windows wird `CLAUDEX_SCRATCH_DIR` seit 2.3.0 rundheraus abgelehnt** (Audit 02.09.2026, CRITICAL), weil Windows keinen billigen Weg bietet, ein Verzeichnis wirklich als privat zu verifizieren — und die Kandidaten Repo/`.claudex-tmp/`/Temp-Verzeichnis dort deshalb als privat *angenommen* statt bewiesen werden: eine dokumentierte Restlücke, keine Zusage. Ein Ziel, das ein Symlink, eine Windows-Junction, ein Verzeichnis, eine bereits per Hardlink auf andere Daten zeigende Datei oder dieselbe Datei wie eine andere Ausgabe ist, wird rundheraus abgelehnt. `python -m unittest discover -s tests` deckt die Ablehnungen ab; das Sandbox-Verhalten selbst ist eine Messung, festgehalten im Docstring der Datei.
 
 **`--expect-workdir DIR`: der Scope wird zugesichert, nie gewählt.** Das Arbeitsverzeichnis entscheidet über mehr als den geprüften Scope — es entscheidet, welche `AGENTS.md` Codex ungefragt in den Prompt zieht, ist also selbst ein Egress-Parameter, und bis 2.5.0 zeigte nichts das an. Vorfall 11.09.2026: Acht Review-Runden liefen mit dem cwd des Wrappers im Produktiv-Doku-Repo statt im vorgesehenen Wegwerf-Repo, und nichts sagte es. `DIR` muss ein **absoluter** Pfad sein; der Wrapper vergleicht ihn mit seinem eigenen Arbeitsverzeichnis und verweigert — Exit 2 — bei jeder Abweichung, bevor Codex gefunden wird, bevor irgendeine Datei angelegt wird und bevor die Verdikt-Datei der Vorrunde gelöscht wird. Es ist eine **ASSERTION, not a SELECTOR** — it can only refuse, es ändert nie, wo Codex läuft (Default: unset, behaviour as in 2.4.0). Jede andere Schreibweise desselben Orts wird absichtlich abgewiesen — Symlink- oder Junction-Alias, 8.3-Kurzname, `subst`-/Netzlaufwerk-Alias, ein Arbeitsverzeichnis, das selbst über einen Link erreicht wird. Der Wert wird verglichen, **wie er getippt wurde**: toleriert werden nur Groß-/Kleinschreibung und Schrägstrichrichtung (Windows) sowie ein Schluss-Separator — `<cwd>\sub\..`, ein Schlusspunkt oder -leerzeichen und das laufwerksrelative `\repo` werden abgewiesen wie jeder Alias (die erste Fassung schickte den Wert durch `abspath()` und akzeptierte sie alle — gefunden vom Abschluss-Review, nicht von den Tests). Ein relativer Wert, `.`, ein leerer Wert oder jeder UNC-/Gerätepfad (`\\srv\share`, `//srv/share`, `\\?\…`) wird abgewiesen, bevor überhaupt das Dateisystem angefasst wird. Ein verbundenes Netzlaufwerk wird nicht als Netzpfad erkannt — ein akzeptiertes Restrisiko. Die Kopfzeile des Wrappers nennt jetzt immer das Verzeichnis, in dem er tatsächlich lief:
 
 ```
-# codex read-only | exec (new) | gpt-5.6-terra/high | timeout 600s | wrapper 2.5.0
+# codex read-only | exec (new) | gpt-6-sol/medium | timeout 600s | wrapper 2.6.0
 #   cwd: D:\…\throwaway-repo   (git repo)
+#   codex-cli 0.156.0
 ```
 
 Der einzige unterstützte Weg, einen Review auf ein gewähltes Repo zu richten, ist eine Sitzung, die **in genau diesem Verzeichnis startet** — ein `cd` mitten in der Sitzung hält zwischen Werkzeugaufrufen nicht, und der Guard verweigert den einen Aufruf, der beides verbinden würde (gemessen, siehe [`docs/audit/2026-09-11-scope.md`](./docs/audit/2026-09-11-scope.md)). Die Skills nehmen dafür `target=<absoluter Pfad>` entgegen und fragen nach, wenn es fehlt — nie aus `$PWD` abgeleitet; `--expect-workdir "$TARGET"` ist das Netz unter dieser Disziplin, kein Ersatz dafür:
@@ -371,7 +412,7 @@ python tools/codex_ro.py --expect-workdir "$TARGET" \
 
 Ein erster Entwurf, `--workdir DIR` — ein Selektor, der das cwd des Kindes gesetzt hätte —, wurde im Plan-Review als CRITICAL verworfen: Die Allowlist-Regel ist eine *Präfix*-Regel, das Flag wäre also unbeaufsichtigt angekommen und hätte jedem Aufrufer erlaubt zu wählen, wessen Projektanweisungen die Maschine verlassen. Die Umkehr zur Zusicherung hat genau das entfernt.
 
-`setup` kopiert ihn in jedes Repo als `tools/codex_ro.py`, weil eine Berechtigungsregel einen stabilen Pfad nennen muss und das Plugin-Verzeichnis einen Versions-Hash trägt. Kopien driften — [`scripts/wrapper_drift.py`](./scripts/wrapper_drift.py) meldet, welche zurückliegen, und `--update` hebt sie an.
+`setup` kopiert ihn in jedes Repo als `tools/codex_ro.py`, weil eine Berechtigungsregel einen stabilen Pfad nennen muss und das Plugin-Verzeichnis einen Versions-Hash trägt. Kopien driften — [`scripts/wrapper_drift.py`](./scripts/wrapper_drift.py) meldet, welche zurückliegen, und `--update --private-root <ordner>` hebt sie an — nur unterhalb eines Ordners, von dem du bestätigst, dass nur du dort schreibst (Windows-ACLs werden nicht geprüft; siehe `--help`).
 
 **Der Wrapper allein macht einen Allowlist-Eintrag nicht sicher.** Eine Berechtigungsregel matcht den *Anfang* eines Kommandos, `Bash(python tools/codex_ro.py*)` gibt also auch alles frei, was dahinter verkettet ist. Der Wrapper nagelt Codex' Sandbox fest; über ein zweites Kommando auf derselben Freigabe sagt er nichts. [`hooks/wrapper_guard.py`](./hooks/wrapper_guard.py) ist die fehlende Hälfte: ein `PreToolUse`-Hook, der jeden Wrapper-Aufruf mit Verkettung, Pipe, Umleitung, Kommandosubstitution oder unbalancierten Anführungszeichen ablehnt. Ohne verifizierten Hook ist die ehrliche Konfiguration gar kein Allowlist-Eintrag — grob sechs Rückfragen über einen Review mit fünf Runden, und das ist der Preis dafür, zu sehen, in welcher Sandbox Codex startet.
 

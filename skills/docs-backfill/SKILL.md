@@ -27,7 +27,7 @@ This skill does not decide which model runs it. Before anything else, resolve
 `docs` and `docs-review` and check the gates:
 
 ```bash
-python scripts/claudex_roles.py --explain
+python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --explain
 ```
 
 Use the actor it prints — the docstrings are written by `roles.docs` and graded by `roles.docs-review`. **A non-zero exit means stop:** the role

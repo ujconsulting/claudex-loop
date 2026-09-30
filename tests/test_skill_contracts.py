@@ -339,8 +339,11 @@ class ModelResolutionContractTests(unittest.TestCase):
             if not self._invoking_blocks(path):
                 continue
             with self.subTest(skill=path.parent.name):
-                self.assertIn(
-                    "claudex_roles.py --spec", path.read_text(encoding="utf-8"),
+                # 2.6.0: the resolver is called by the plugin path, quoted --
+                # `"${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec` -- because
+                # the relative `scripts/claudex_roles.py` does not exist in a consumer repo.
+                self.assertRegex(
+                    path.read_text(encoding="utf-8"), r'claudex_roles\.py"?\s+--spec',
                     f"{path.parent.name} builds a wrapper call but never resolves the role",
                 )
 

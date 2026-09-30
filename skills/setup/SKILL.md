@@ -35,7 +35,7 @@ Die drei Korrekturen, die am meisten kosten, wenn man sie nicht kennt:
 
 | Plugin-README sagt | Verifiziert gilt |
 | --- | --- |
-| „Don't pin a model" | **Doch pinnen:** `-m gpt-5.6-terra -c model_reasoning_effort="high"`. Der Pin läuft unter ChatGPT-Auth einwandfrei; die Warnung zielt auf die alten `*-codex`-Slugs. ⛔ **Nicht `sol`** — reißt an echten Plänen das 10-Minuten-Ceiling (exit 143). Ausnahme: der Exposure-Pass von `code-review`/`audit` läuft bewusst auf `sol`/`medium` (Rolle `exposure-review`, begrenzter Input). |
+| „Don't pin a model" | **Doch pinnen — aber nicht hier, sondern in der Rollen-Config:** `python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec <rolle>` liefert seit 30.09.2026 für jede Codex-Rolle `gpt-6-sol`/`medium` (Nachfolger von `gpt-5.6-terra`; eine echte Plan-Runde ≈ 4:48 min). Der Pin läuft unter ChatGPT-Auth einwandfrei; die Warnung zielt auf die alten `*-codex`-Slugs. Braucht codex-cli ≥ 0.156.0. |
 | Plan als Datei, Codex liest ihn | **Plantext inline in den Prompt.** Codex' Shell-Aufrufe können per Policy blockiert werden und eine frische `PLAN.md` ist oft untracked — dann reviewt Codex den Code, aber nicht den Plan. |
 | `2>/dev/null` | **stderr in eine Datei.** Ein abgelaufener Token liefert exit 0, gültige `thread_id` und eine *leere* Verdict-Datei; der 401 steht nur in stderr. |
 
@@ -62,7 +62,7 @@ kann kein Skript für dich tun.
 | `~/.codex/config.toml` → `[projects.'<pfad>']` | `trust_level = "trusted"` |
 | `.claude/settings.local.json` | **nichts freistellen ausser `Bash(codex --version)`** — auch den Wrapper nicht, solange der Hook nicht verifiziert ist (Schritt 0b). UND: vorhandene Interpreter-Wildcards schliessen, sonst ist jede Regel daneben Dekoration (Schritt 0) |
 | `tools/codex_ro.py` | Wrapper, der read-only hart setzt. **Kopie**, nie Handarbeit — kanonisch liegt er im Plugin unter `scripts/codex_ro.py` |
-| Drift-Pruefung | `python "${CLAUDE_PLUGIN_ROOT}/scripts/wrapper_drift.py" --repo .` — meldet eine zurueckliegende Kopie, `--update` hebt sie an |
+| Drift-Pruefung | `python "${CLAUDE_PLUGIN_ROOT}/scripts/wrapper_drift.py" --repo .` — meldet eine zurueckliegende Kopie; mit `--update --private-root <Projektordner>` hebt sie sie an |
 | PreToolUse-Hook | kommt aus dem Plugin (`hooks/wrapper_guard.py`), nichts pro Repo einzutragen — aber **verifizieren**, bevor man sich darauf beruft |
 | `tools/codex_usage.py` + `tools/fallback_review.py` (optional) | Kontingent-Ausfall: Quota-Reader + Fallback-Reviewer-Kette über `.env`-Profile (Schritt 11) |
 
@@ -115,10 +115,13 @@ Repos genutzt, und eine Korrektur an nur einer Kopie laeuft auseinander (am 28.0
 sieben Kopien, drei Staende, die beiden CRITICAL-Fixes in genau einer davon):
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/wrapper_drift.py" --repo . --update
+python "${CLAUDE_PLUGIN_ROOT}/scripts/wrapper_drift.py" --repo . --update --private-root "<Projektordner>"
 ```
 
 Das legt `tools/codex_ro.py` an bzw. hebt eine vorhandene Kopie auf den kanonischen Stand.
+`--private-root` ist seit 2.6.0 Pflicht: der Ordner, unter dem **nur du** schreibst (z. B. der
+gemeinsame Projektordner). Das Werkzeug prüft ihn so, wie er eingegeben ist, löst ihn nie auf und
+schreibt nur darunter; Windows-ACLs prüft es nicht — die Aussage „nur ich schreibe dort" triffst du.
 Ohne `--update` ist derselbe Aufruf die **Drift-Pruefung**: Exit 1, wenn eine Kopie
 zurueckliegt. Sie gehoert in die Routine, nicht nur ins Setup — `--scan <wurzel>` prueft
 alle Repos unter einem Verzeichnis auf einmal.
@@ -160,14 +163,17 @@ Codex mit „Not inside a trusted directory“.
 ### 1. Voraussetzungen (einmal pro Rechner)
 
 ```bash
-codex --version        # >= 0.130; Stand 08/2026: 0.149.1
+codex --version        # >= 0.156.0 fuer codex; gemessen gegen 0.156.0 (30.09.2026)
 codex login status     # "Logged in using ChatGPT" — Abo, kein API-Key
 ```
 
-Fehlt Codex: `npm install -g @openai/codex@latest`, dann `codex login`.
-`~/.codex/config.toml` Sollzustand: `model = "gpt-5.6-terra"`,
-`model_reasoning_effort = 'medium'` (Alltag; die Angriffsrunde hebt das per `-c` an).
-⛔ `gpt-5.4`/`-mini` verschwinden am 31.08.2026 aus Codex.
+Fehlt Codex: `npm install -g @openai/codex@0.156.0` (eine benannte Version, nie ungepinnt —
+siehe `docs/betrieb.md`, „Codex heben"), dann `codex login`.
+`~/.codex/config.toml` Sollzustand für die **eigene** Arbeit: `model = "gpt-6-sol"`,
+`model_reasoning_effort = "medium"`. Der Wrapper liest diese Datei seit 2.6.0 nicht mehr
+(`--ignore-user-config`); Modell und Effort der Reviews kommen aus der Rollen-Config.
+⛔ `gpt-5.4`/`-mini` verschwanden am 31.08.2026 aus Codex; `gpt-5.6-terra` ist seit 22.09.2026
+durch `gpt-6-sol` abgelöst.
 
 ### 2. Bestandsaufnahme im Ziel-Repo
 
@@ -314,7 +320,7 @@ that is a STOP: tell the human, do not retry with a different value. A
 different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
 mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
 the flag yet. Update it from the plugin
-(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update --private-root <your projects folder>`, see `setup`)
 and rerun. ⛔ Never drop the flag to make the error go away.
 <!-- claudex-target:end -->
 
@@ -337,11 +343,13 @@ Erwartung: Exit 0, `THREAD_ID=…`, und `PING-OK` in `ping-out.txt`. Kein Trust-
 kein Sandbox-Fehler. Exit 2 = abgewiesen (Pfad oder `-c`), Exit 1 = leere Antwort trotz
 Exit 0 beim Kind — der Auth-Fall, der Grund steht dann in `ping-err.txt`.
 
-MCP-Server schaltet der Wrapper selbst ab, und zwar nur die, die diese Installation
-wirklich konfiguriert hat: `-c mcp_servers.<name>.enabled=false` für einen **nicht**
-vorhandenen Server erzeugt einen Server-Eintrag ohne `transport`, woraufhin Codex die
-gesamte Config verweigert (Exit 1, leere Antwortdatei). Genau das hat dem Audit dieses
-Repos die ersten vier Sessions gekostet.
+MCP-Server aus der Nutzer-Config starten seit Wrapper 2.6.0 gar nicht mehr: der Wrapper
+lädt diese Config nicht (`--ignore-user-config`), schaltet Web-Suche, Apps, Plugins und
+weitere Features ab und verweigert den Start, wenn im Repo oder darüber eine
+`.codex/config.toml` liegt. `--disable-mcp` und `CLAUDEX_DISABLE_MCP` werden angenommen und
+als ignoriert gemeldet. (Bis 2.6.0 schaltete er die konfigurierten Server einzeln ab; ein
+Override für einen **nicht** vorhandenen Server ließ Codex die ganze Config verweigern — das
+kostete das erste Audit dieses Repos vier Sessions.)
 
 Dann `git status` zeigen und die geänderten Dateien benennen. Commit nur auf Zuruf.
 
@@ -352,7 +360,7 @@ Fix: [PR #9](https://github.com/chaseai-yt/claudex-loop/pull/9)). Referenz-Repo 
 `s100-scripte`; volles Protokoll dort in `docs/betrieb.md` des Plugins → „Kontingent-Ausfall".
 
 1. **Tools kopieren** — nicht von Hand, sondern mit demselben Werkzeug wie den
-   Wrapper: `python "${CLAUDE_PLUGIN_ROOT}/scripts/wrapper_drift.py" --repo . --update`
+   Wrapper: `python "${CLAUDE_PLUGIN_ROOT}/scripts/wrapper_drift.py" --repo . --update --private-root "<Projektordner>"`
    holt `codex_ro.py`; `--update-optional` zusätzlich `codex_usage.py` (Quota-Reader)
    und `fallback_review.py` (generischer Adapter — jeder OpenAI-kompatible Endpoint,
    Preflight `--check`, Provider-Kette `--chain`, optionaler Modell-Auto-Load für
@@ -456,8 +464,9 @@ sammeln: paralleles Anhängen an dieselbe Datei erzeugt Konflikte.
   **endungslos** und nicht startbar (es braucht `codex.cmd`), und ein absoluter Pfad darf
   nicht noch einmal ans Arbeitsverzeichnis gejoint werden. Der Prompt geht ueber **stdin** —
   das loest das Quoting und liefert zugleich das EOF, ohne das `codex exec` ohne TTY haengt.
-- **`sol` statt `terra`** → Timeout (exit 143) an echten Plänen. `terra`/high liefert
-  dieselbe Schärfe in 1–2 Minuten je Runde.
+- **Modellwahl nach Messung, nicht nach Namen.** Am 30.08.2026 lief `gpt-5.6-sol`/high an
+  echten Plänen in den Timeout (exit 143), `gpt-5.6-terra`/high brauchte 1–2 Minuten. Seit
+  30.09.2026 gilt `gpt-6-sol`/medium, gemessen ≈ 4:48 min je echter Runde bei 600 s Timeout.
 - **`resume` kennt kein `-s`** → read-only beim Resume nur über
   `-c sandbox_mode="read-only"`, sonst erbt der Resume den `config.toml`-Default
   (u. U. `danger-full-access`).

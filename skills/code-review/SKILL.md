@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: "A parameterizable SECOND review gate that runs AFTER the build and after the primary review (the post-build cross-inspection, or whatever review your flow ran first). A fresh read-only Codex session judges the finished work on up to five acceptance dimensions — dod (everything implemented, Definition of Done met), quality (readability, clean-code rules, documentation), security, docs (documentation completeness and docstring coverage of the diff), tests (are the changed paths actually covered, and do the tests fail when the code is broken) — each with its own verdict line, findings arbitrated by Claude, up to two bounded rechecks after fixes. Use when the user says \"/code-review\", \"second review\", \"acceptance review\", \"DoD check\", \"verify the build against the plan\", \"code quality review of what we just built\", \"security review of the change\", or at the end of a claudex-loop/build run when an extra acceptance gate is wanted. Scope is selectable: `scope=dod,quality,security,docs,tests` (default: `dod,quality,security`; add `docs,tests` whenever the diff changes behaviour). NOT a plan review (that is plan-review) and NOT the primary correctness inspection (that is claudex-loop's built-in post-build cross-inspection) — this is the acceptance layer on top. Anything in the diff that faces the network — routes, auth, sessions, webhooks, `ports:`, proxy/tunnel config — additionally gets a separate EXPOSURE PASS on the `exposure-review` role (a stronger model at bounded effort, default gpt-5.6-sol/medium) with its own verdict `EXPOSURE: SAFE/UNSAFE`. It is mandatory, not a scope you can drop."
+description: "A parameterizable SECOND review gate that runs AFTER the build and after the primary review (the post-build cross-inspection, or whatever review your flow ran first). A fresh read-only Codex session judges the finished work on up to five acceptance dimensions — dod (everything implemented, Definition of Done met), quality (readability, clean-code rules, documentation), security, docs (documentation completeness and docstring coverage of the diff), tests (are the changed paths actually covered, and do the tests fail when the code is broken) — each with its own verdict line, findings arbitrated by Claude, up to two bounded rechecks after fixes. Use when the user says \"/code-review\", \"second review\", \"acceptance review\", \"DoD check\", \"verify the build against the plan\", \"code quality review of what we just built\", \"security review of the change\", or at the end of a claudex-loop/build run when an extra acceptance gate is wanted. Scope is selectable: `scope=dod,quality,security,docs,tests` (default: `dod,quality,security`; add `docs,tests` whenever the diff changes behaviour). NOT a plan review (that is plan-review) and NOT the primary correctness inspection (that is claudex-loop's built-in post-build cross-inspection) — this is the acceptance layer on top. Anything in the diff that faces the network — routes, auth, sessions, webhooks, `ports:`, proxy/tunnel config — additionally gets a separate EXPOSURE PASS on the `exposure-review` role (a stronger model at bounded effort, default gpt-6-sol/medium, its own role entry) with its own verdict `EXPOSURE: SAFE/UNSAFE`. It is mandatory, not a scope you can drop."
 ---
 
 # code-review — Post-Build Acceptance Review (second gate)
@@ -28,8 +28,8 @@ This skill does not decide which model runs it. Before anything else, resolve
 `code-review` and `exposure-review` and check the gates:
 
 ```bash
-python scripts/claudex_roles.py --explain
-python scripts/claudex_roles.py --spec exposure-review   # e.g. codex model=gpt-5.6-sol effort=medium sandbox=read-only
+python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --explain
+python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec exposure-review   # e.g. codex model=gpt-6-sol effort=medium sandbox=read-only
 ```
 
 Use the actors it prints — the diff being graded was written by `roles.build`. The
@@ -104,7 +104,7 @@ that is a STOP: tell the human, do not retry with a different value. A
 different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
 mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
 the flag yet. Update it from the plugin
-(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update --private-root <your projects folder>`, see `setup`)
 and rerun. ⛔ Never drop the flag to make the error go away.
 <!-- claudex-target:end -->
 
@@ -251,7 +251,7 @@ skill reviewed its own diff). Otherwise plan-review mechanics apply:
 ```bash
 ROUND=0   # the acceptance round; incremented per recheck, up to MAX_RECHECK
 # Same rule as the exposure pass below: the model comes from the role config.
-SPEC=$(python scripts/claudex_roles.py --spec code-review) || exit 2
+SPEC=$(python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec code-review) || exit 2
 MODEL=$(echo "$SPEC" | sed -n 's/.*model=\([^ ]*\).*/\1/p')
 EFFORT=$(echo "$SPEC" | sed -n 's/.*effort=\([^ ]*\).*/\1/p')
 

@@ -99,6 +99,42 @@ of that plan's review)
         a network path; it passes the lexical UNC check and reaches
         samefile(), the same accepted residual risk as allowed_roots() above
 
+WHAT 2.6.0 CHANGED (2026-09-30, plan docs/plans/2026-09-23-codex-heben-wrapper-2.6.0)
+    Currently measured against codex-cli 0.156.0 -- the one marked line the
+    tests hold MEASURED_CODEX_CLI to; the dated measurements elsewhere in this
+    file (0.147.0, 0.149.1) are history and stay as they were.
+
+    - The reviewer is isolated from everything but the shell. `--ignore-user-config`
+      and `--ignore-rules`, `web_search="disabled"`, and `--disable` for every
+      feature in ISOLATION_DISABLE, on exec AND resume. Measured on 0.156.0:
+      apps, plugins, browser and computer control, multi-agent, image generation
+      and web access are on by default and none of it runs inside the read-only
+      shell sandbox; with the isolation, the web, image, plugin-install and MCP
+      tools are gone and the pinned `-c` keys still apply. The
+      `collaboration.*` tools stay (no switch removes them); a spawned sub-agent
+      was measured to inherit read-only and the isolation.
+    - A reviewed repo cannot steer its own review through `.codex/config.toml`.
+      Measured: in a repo trusted in the user config, Codex loaded that file and
+      obeyed a `developer_instructions` line in it. Under `--ignore-user-config`
+      there are no trust entries and the file was not loaded; as a second line,
+      a `.codex/config.toml` in the working directory or any ancestor refuses
+      the run (project_codex_configs()).
+    - Blind-run evidence comes from stderr AND the event stream. `succeeded in`
+      never appears with `--json` (0 of ~90 real runs), so the old success half
+      was dead and one refusal alone meant exit 3. Execution is now counted
+      from `command_execution` events of the last turn, the stream must end in
+      `turn.completed`, and both files are read line by line under a size cap
+      (see blind_run()).
+    - The CLI version is probed once and shown in the header. A model with a
+      known minimum (MODEL_MIN_CLI) is refused before the run when the version
+      is lower or unreadable: `gpt-6-sol` on 0.149.1 is HTTP 400 on every call.
+    - Every output file is locked for the run (acquire_locks()), and the
+      reparse-point check fails closed (_is_reparse_point()).
+    - On Windows Codex is never started through a batch file: `codex.cmd`
+      runs via cmd.exe, which re-reads the arguments. find_codex() returns
+      [node.exe, codex.js] -- what the npm starter runs -- or a codex.exe, and
+      refuses a .cmd/.bat outright.
+
 ⛔ RESIDUAL GAPS, stated rather than papered over (audit 2026-09-02):
     - On Windows, the repo, `.claudex-tmp/` and the OS temp dir are still ASSUMED
       private, not verified -- `_is_private_dir()` cannot read a directory's
@@ -119,18 +155,29 @@ of that plan's review)
       Removing CLAUDEX_CODEX_BIN closes the environment-override door but not
       this one -- pinning PATH resolution needs a decision about what "the
       trusted Codex install" even means on a given machine, which this fix does
-      not make for you.
+      not make for you. The 2.6.0 version probe starts the same launch list
+      as the run -- on Windows two files, node.exe and codex.js -- but nothing
+      proves that neither was replaced in between.
+    - `collaboration.*` (spawning sub-agents) cannot be switched off. A
+      sub-agent's commands do not appear in the parent's event stream, so a run
+      whose only execution happened in sub-agents and that also shows a stderr
+      refusal is reported as blind -- a false alarm in the safe direction.
 
 Exit codes:
     0    Codex ran and produced a non-empty answer
     1    Codex exited 0 but the answer file is empty -- the classic expired-token
          case: exit 0, a valid thread_id, and the 401 only in stderr
     2    refused: bad arguments, a path outside the allowed roots, a write target
-         that is not a plain file, a file that cannot be read or opened, or a
-         config override that would touch the sandbox
-    3    blind: Codex answered without being able to run a single command, so the
-         answer was written from the prompt alone. Looks healthy from outside --
-         exit 0, a thread_id, a full answer file -- and is not a review
+         that is not a plain file, a file that cannot be read or opened, a
+         config override that would touch the sandbox or the isolation, an
+         output another run holds a lock on, a `.codex/config.toml` in the
+         working directory or above it, or a model the installed CLI is known
+         not to support (or whose CLI version cannot be read)
+    3    blind: nothing provably ran (no command in the event stream's last
+         turn) AND either a sandbox refusal was logged or the evidence itself
+         is unusable (missing, truncated, malformed, over the size cap). Looks
+         healthy from outside -- exit 0, a thread_id, a full answer file -- and
+         is not a review
     124  timeout -- treat as a failure, do not blindly retry
     127  codex executable not found
     else Codex's own exit code
@@ -142,37 +189,114 @@ reads, deletes or creates reports through the codes above instead.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
-WRAPPER_VERSION = "2.5.0"
+WRAPPER_VERSION = "2.6.0"
 
-DEFAULT_MODEL = "gpt-5.6-terra"
+# gpt-5.6-terra was superseded by gpt-6-sol (released 2026-09-22). Measured on
+# codex-cli 0.156.0: a real plan-review round took ~4:48 min at `medium`, well
+# inside the default timeout. The role config (claudex_roles.py --spec) decides
+# what a skill passes; this default only covers a bare call.
+DEFAULT_MODEL = "gpt-6-sol"
+DEFAULT_EFFORT = "medium"
 EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
 
-# MCP servers bring nothing to a plan review, cost startup time, and -- the part
-# that matters -- Codex runs them as separate processes OUTSIDE the shell sandbox.
-# So the default is: disable every server this installation actually has, read from
-# its config. Set CLAUDEX_DISABLE_MCP (comma-separated) or --disable-mcp to name a
-# subset instead. An EMPTY value is refused with exit 2 whenever servers are
-# configured -- it would leave them all enabled, which is a caller weakening this
-# wrapper from its own command line, exactly like --allow-path widening writes or
-# a `-c mcp_servers.*` override. (This comment claimed the opposite until
-# CodeRabbit read it against the code, 2026-08-30.)
+# The codex-cli version every guarantee in this file was last measured against.
+# Held equal to the one marked docstring line by a test; raised only after the
+# positive controls in docs/betrieb.md ("Codex heben") pass on the new version.
+MEASURED_CODEX_CLI = "0.156.0"
+
+# Models the installed CLI must be at least this new for. `gpt-6-sol` on 0.149.1
+# is HTTP 400 "not supported when using Codex with a ChatGPT account" on every
+# call (measured 2026-09-22) -- refusing up front names the fix instead.
+MODEL_MIN_CLI = {"gpt-6-sol": "0.156.0"}
+
+# ⛔ Read-only pins the SHELL. Everything else Codex can load runs beside it:
+# MCP servers from the user config or a trusted project's `.codex/config.toml`,
+# and on 0.156.0 a set of features that are on by default -- apps and
+# connectors, plugins, browser and computer control, multi-agent, image
+# generation, web access. None of that is a reviewer's business. So every call
+# ignores the user config and execpolicy rules, switches web search off and
+# disables these features (measured 2026-09-30: web, image, plugin-install, MCP
+# and goals tools disappear, the shell still reads, the pinned `-c` keys still
+# apply). Upstream: chaseai-yt/claudex-loop#28 and #18.
 #
-# ⛔ Naming a server that is NOT configured is the opposite of harmless, whatever
-# this comment used to claim: `-c mcp_servers.X.enabled=false` SYNTHESISES a server
-# table with no `transport`, and Codex then refuses to load its config at all --
-# exit 1, empty answer file, and an error naming the user's config rather than us.
-# The old default `("n8n", "MCP_DOCKER")` cost this repo's own audit its first four
-# sessions (2026-08-30). Hence installed_mcp_servers(): never name one that is not
-# there. Note: `-c mcp_servers="{}"` does not work either -- only the dotted path
-# per server takes effect.
+# Under `--ignore-user-config` there are no `[mcp_servers]` to switch off one by
+# one -- and naming one that is not defined makes Codex SYNTHESISE an incomplete
+# server table and refuse its whole config (the reason the old per-server logic
+# only ever named installed servers, 2026-08-30). So the per-server overrides are
+# gone with 2.6.0; --disable-mcp and CLAUDEX_DISABLE_MCP are accepted and
+# reported as ignored.
+ISOLATION_DISABLE = (
+    "apps",
+    "plugins",
+    "remote_plugin",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "computer_use",
+    "in_app_browser",
+    "multi_agent",
+    "goals",
+    "image_generation",
+    "skill_mcp_dependency_install",
+    "hooks",
+    "workspace_dependencies",
+    # Reach outward or concern MCP/extensions -- nothing a reviewer needs.
+    "plugin_sharing",
+    "tool_suggest",
+    "skill_search",
+    "auth_elicitation",
+    "tool_call_mcp_elicitation",
+    "realtime_conversation",
+    "in_app_local_automation",
+    "worktrees",
+)
+# Default-on features that were looked at and are fine for a read-only reviewer:
+# the shell itself and its plumbing, output handling, desktop-app UI. Not passed
+# to Codex -- the list exists so that raising the CLI (docs/betrieb.md, "Codex
+# heben") can find a NEW default-on feature that is in neither list.
+ISOLATION_ALLOWED = (
+    "shell_tool",
+    "unified_exec",
+    "unified_exec_tty",
+    "shell_snapshot",
+    "view_image",
+    "sleep_tool",
+    "content_item_kinds",
+    "compaction_image_budget",
+    "enable_request_compression",
+    "fast_mode",
+    "guardian_approval",
+    "guardian_reuse_parent_compaction",
+    "mentions_v2",
+    "secret_auth_storage",
+    "system_proxy_fallback",
+    "unbounded_connection_retries",
+    "code_mode_host",
+    "in_app_chat",
+    "in_app_dictation",
+    "in_app_updates",
+)
+
+# Every output of a run is locked by a sibling file with this suffix.
+LOCK_SUFFIX = ".claudex-lock"
+
+# Upper bound for reading stderr and the event stream. Above it the evidence is
+# unusable, not "probably fine" -- see blind_run().
+EVIDENCE_LIMIT = 64 * 1024 * 1024
+VERSION_PROBE_TIMEOUT = 10
+VERSION_PROBE_MAX_BYTES = 256
 
 # The whole point of the wrapper. Refused as `-c` overrides, including any dotted
 # child key such as `sandbox_workspace_write.network_access`.
@@ -193,6 +317,15 @@ FORBIDDEN_CONFIG_KEYS = (
     # whose whole promise is that pin is the same category of change as swapping
     # sandbox_mode itself.
     "windows",
+    # 2.6.0, reviewer isolation (see ISOLATION_DISABLE): each of these would
+    # undo part of it -- re-enable a feature, turn web search back on, mark a
+    # project trusted (which loads its `.codex/config.toml`), or hand the
+    # reviewer instructions the caller wrote.
+    "features",
+    "web_search",
+    "projects",
+    "developer_instructions",
+    "model_instructions_file",
 )
 
 # ⛔ Without this key, `codex exec` on Windows refuses EVERY shell command --
@@ -217,7 +350,9 @@ WINDOWS_SANDBOX = "unelevated"
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 RESUME_RE = re.compile(r"^[0-9a-fA-F-]{8,}$")
-THREAD_RE = re.compile(r'"thread_id"\s*:\s*"([^"]+)"')
+# What a thread id may look like before it is printed: it comes from the child's
+# stream, and a newline in it could forge a wrapper line such as `OUT=...`.
+THREAD_ID_RE = re.compile(r"^[0-9A-Za-z._-]{1,128}$")
 
 EXIT_EMPTY = 1
 EXIT_REFUSED = 2
@@ -633,17 +768,29 @@ def _is_reparse_point(path: Path) -> bool:
     `Path.is_symlink()` alone lets a directory junction through, and a junction
     aimed at someone else's directory is exactly as dangerous a write target as a
     symlink -- --out-file gets deleted and --err-file gets truncated wherever the
-    leaf name resolves to. is_symlink() is checked first because it also holds on
-    POSIX, where st_file_attributes does not exist.
+    leaf name resolves to.
+
+    ⛔ FAILS CLOSED (2.6.0). Until then any OSError, and a missing
+    st_file_attributes on Windows, answered "not a reparse point" -- the one
+    answer a safety check must not give when it could not look (review of the
+    2.6.0 plan, gpt-6-sol, 2026-09-30). Now every metadata failure counts as
+    "unsafe". The single exception is FileNotFoundError: a target that does not
+    exist yet is the normal case for --out-file and a freshly created directory,
+    and the caller then checks the parent it will create it in.
     """
-    if path.is_symlink():
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if stat.S_ISLNK(st.st_mode):
         return True
     if os.name != "nt":
         return False
-    try:
-        attrs = os.stat(path, follow_symlinks=False).st_file_attributes
-    except (OSError, AttributeError):
-        return False
+    attrs = getattr(st, "st_file_attributes", None)
+    if attrs is None:
+        return True
     return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
@@ -668,7 +815,7 @@ def _has_other_hardlinks(path: Path) -> bool:
         return False
 
 
-def prepare_write_target(path: Path, label: str) -> None:
+def prepare_write_target(path: Path, label: str) -> list[Path]:
     """Refuse a write target that is anything but a plain file, present or absent.
 
     The wrapper deletes --out-file and truncates --err-file. A symlink or
@@ -680,7 +827,8 @@ def prepare_write_target(path: Path, label: str) -> None:
     """
     if _is_reparse_point(path):
         die(
-            f"{label} is a symlink or reparse point (e.g. a Windows junction): {path}\n"
+            f"{label} is a symlink or reparse point (e.g. a Windows junction), or "
+            f"could not be inspected: {path}\n"
             f"  Refusing: this file gets deleted and rewritten, and a symlink or "
             f"junction points that at something else. Name the real path.",
             EXIT_REFUSED,
@@ -694,10 +842,59 @@ def prepare_write_target(path: Path, label: str) -> None:
             f"content too, and this wrapper does not know what that name is.",
             EXIT_REFUSED,
         )
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        die(f"{label}: cannot create the directory for {path}: {exc}", EXIT_REFUSED)
+    return make_parents_checked(path.parent, label)
+
+
+def _remove_made(made: list[Path]) -> None:
+    """Remove directories this call created, innermost first; only empty ones go."""
+    for level in reversed(made):
+        try:
+            level.rmdir()
+        except OSError:
+            pass
+
+
+def make_parents_checked(directory: Path, label: str) -> list[Path]:
+    """Create missing directories ONE level at a time, each re-checked at once.
+
+    `mkdir(parents=True)` creates a whole chain and checks nothing in between; a
+    directory swapped for a junction right after it was made would carry every
+    later level -- and the output file -- somewhere else. So: find the nearest
+    existing ancestor, then create each missing level below it and verify it is
+    a plain directory before the next one is made (review of the 2.6.0 plan,
+    gpt-6-sol, round 7). Returns the directories it created, outermost first, so a
+    run refused afterwards can remove them again.
+    """
+    missing = []
+    made: list[Path] = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for level in reversed(missing):
+        try:
+            os.mkdir(level)
+        except FileExistsError:
+            # Someone else created it in the meantime -- not ours to clean up.
+            pass
+        except OSError as exc:
+            _remove_made(made)
+            die(f"{label}: cannot create the directory {level}: {exc}", EXIT_REFUSED)
+        else:
+            made.append(level)
+        if _is_reparse_point(level) or not level.is_dir():
+            # The caller never receives `made` when this function dies, so the
+            # levels created so far are removed here (closing gate, recheck 2).
+            _remove_made(made)
+            die(
+                f"{label}: the directory just created is a symlink or reparse point "
+                f"now, or not a directory: {level}\n"
+                f"  Refusing: everything below it would land somewhere else.",
+                EXIT_REFUSED,
+            )
+    return made
 
 
 def open_for_write(path: Path, label: str):
@@ -728,40 +925,62 @@ def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
 
 
-MCP_SECTION_RE = re.compile(r"^\s*\[mcp_servers\.(?:\"([^\"]+)\"|'([^']+)'|([^\].]+))\]", re.M)
+def _user_config_paths() -> list[Path]:
+    """The user-level Codex configs: the one under CODEX_HOME and ~/.codex's.
 
-
-def installed_mcp_servers() -> set[str]:
-    """The MCP servers this installation actually configures.
-
-    Only these may be named in a `-c mcp_servers.<name>.enabled=false` override:
-    naming an absent one makes Codex reject its whole config (see the note at the
-    top of this file). Parsed with tomllib from Python 3.11, and with a section
-    regex on 3.10 (the declared floor, where tomllib does not exist yet), which
-    handles every `[mcp_servers.<name>]` spelling the CLI writes. An unreadable or
-    absent config yields the empty set -- there is then nothing to disable, and
-    nothing to break.
+    Both sit on the way up from any working directory under the user profile,
+    and neither is a PROJECT config: the first is what `--ignore-user-config`
+    skips, the second is that same file whenever CODEX_HOME is unset. Exempting
+    only the CODEX_HOME one refused every run under the profile as soon as
+    CODEX_HOME pointed elsewhere (found while building 2.6.0).
     """
-    config = _codex_home() / "config.toml"
-    try:
-        raw = config.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        # UnicodeError too: a config saved as cp1252 with an umlaut in a path is
-        # not exotic on Windows, and a decode error here would be a traceback in
-        # a function whose documented answer is "then there is nothing to
-        # disable". (CodeRabbit, 2026-08-30.)
-        return set()
+    return [_codex_home() / "config.toml", Path.home() / ".codex" / "config.toml"]
 
-    try:
-        import tomllib
-    except ImportError:
-        tomllib = None
-    if tomllib is not None:
+
+def project_codex_configs(start: Path) -> list[Path]:
+    """Every `.codex/config.toml` from `start` up to the filesystem root.
+
+    ⛔ Measured 2026-09-30: in a repo the user config marks as trusted, Codex
+    loads that repo's `.codex/config.toml` -- and a `developer_instructions`
+    line there decided the reviewer's answer. The repo under review steered its
+    own review. `--ignore-user-config` removes the trust entries and the file
+    was then not loaded; this is the second line behind that.
+
+    Not only up to the git root: Codex has configurable `project_root_markers`,
+    and this wrapper also runs outside git (review of the 2.6.0 plan, round 8).
+    A path that cannot be checked counts as a hit. The user-level configs are
+    not project configs (_user_config_paths()).
+    """
+    exempt = []
+    for user_config in _user_config_paths():
         try:
-            return set(tomllib.loads(raw).get("mcp_servers") or {})
-        except Exception:  # a config we cannot parse: fall through to the regex
+            if user_config.exists():
+                exempt.append(user_config)
+        except OSError:
             pass
-    return {next(g for g in match.groups() if g) for match in MCP_SECTION_RE.finditer(raw)}
+    hits = []
+    for directory in (start, *start.parents):
+        candidate = directory / ".codex" / "config.toml"
+        try:
+            os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        except NotADirectoryError:
+            continue
+        except OSError:
+            hits.append(candidate)
+            continue
+        is_user_config = False
+        for user_config in exempt:
+            try:
+                if os.path.samefile(candidate, user_config):
+                    is_user_config = True
+                    break
+            except OSError:
+                pass
+        if not is_user_config:
+            hits.append(candidate)
+    return hits
 
 
 def _within(child: Path, root: Path) -> bool:
@@ -825,6 +1044,11 @@ def check_config_overrides(overrides: list[str]) -> None:
 
 
 def build_argv(args: argparse.Namespace, out_file: Path) -> list[str]:
+    """The child's argv, as a LIST (no command line to inject into): the read-only pin
+    (`-s` on exec, `-c sandbox_mode` on resume), the trust-check flag, the Windows
+    backend, model and effort, the 2.6.0 isolation (user config, rules, web search,
+    ISOLATION_DISABLE), the caller's checked `-c` overrides, then `--json -o`. The
+    prompt is not an argument; it goes over stdin."""
     argv = ["exec"]
     if args.resume:
         # resume knows no -s. Read-only is reachable only via -c there, and since a
@@ -845,14 +1069,13 @@ def build_argv(args: argparse.Namespace, out_file: Path) -> list[str]:
     if os.name == "nt":
         argv += ["-c", f'windows.sandbox="{WINDOWS_SANDBOX}"']
     argv += ["-m", args.model, "-c", f"model_reasoning_effort={args.effort}"]
-    # Only servers this installation has: an override for an absent one makes Codex
-    # reject its entire config. Whatever the caller asked for, this is the filter.
-    installed = installed_mcp_servers()
-    for server in args.disable_mcp:
-        if server in installed:
-            argv += ["-c", f"mcp_servers.{server}.enabled=false"]
-        else:
-            warn(f"MCP server '{server}' is not configured here -- not naming it.")
+    # Reviewer isolation (2.6.0, see ISOLATION_DISABLE): no user config -- and
+    # with it no MCP servers and no project trust --, no execpolicy rules, no
+    # web search, none of the default-on features that act outside the shell.
+    # The pinned keys above are `-c` overrides and still apply (measured).
+    argv += ["--ignore-user-config", "--ignore-rules", "-c", 'web_search="disabled"']
+    for feature in ISOLATION_DISABLE:
+        argv += ["--disable", feature]
     for override in args.config:
         argv += ["-c", override]
     argv += ["--json", "-o", str(out_file)]
@@ -915,7 +1138,35 @@ def bundled_codex() -> str | None:
     return None
 
 
-def find_codex() -> str:
+def _refuse_batch(launch: list[str]) -> list[str]:
+    """Belt for every path that resolves a launch: a batch file is never started."""
+    if Path(launch[0]).suffix.lower() in (".cmd", ".bat"):
+        die(f"refusing to start a batch file: {_escape_path_for_message(launch[0])}\n"
+            f"  A .cmd/.bat runs through cmd.exe, which re-reads the arguments. Install "
+            f"codex so that node.exe and its codex.js, or a codex.exe, can be started directly.",
+            EXIT_NO_CODEX)
+    return launch
+
+
+def _node_launch(starter: Path) -> list[str] | None:
+    """[node.exe, codex.js] for an npm starter `codex.cmd`, or None.
+
+    The starter does nothing but run `node.exe` (the one beside it, else the one on
+    PATH) with `node_modules/@openai/codex/bin/codex.js` from its own directory;
+    this is that, minus cmd.exe. None when the script or node cannot be found --
+    the caller then tries the next source and in the end refuses.
+    """
+    script = starter.parent / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    if not script.is_file():
+        return None
+    beside = starter.parent / "node.exe"
+    node = str(beside) if beside.is_file() else shutil.which("node.exe")
+    if not node:
+        return None
+    return _refuse_batch([node, str(script)])
+
+
+def find_codex() -> list[str]:
     # ⛔ There used to be a CLAUDEX_CODEX_BIN override here: any existing file
     # named through that variable was launched as "Codex", no further check.
     # Audit 2026-09-02, CRITICAL: this wrapper is meant to be allowlisted for
@@ -936,34 +1187,166 @@ def find_codex() -> str:
     # who is not on macOS has to fix PATH now; there is no environment escape
     # hatch left, on purpose.
 
-    # On Windows, `codex` on PATH is an EXTENSIONLESS shell shim from the npm
-    # install; CreateProcess cannot run it ("not a valid Win32 application").
-    # The .cmd wrapper is the one that works.
-    names = ("codex.cmd", "codex.exe") if os.name == "nt" else ("codex",)
-    for name in names:
-        found = shutil.which(name)
+    if os.name != "nt":
+        found = shutil.which("codex")
         if found:
-            return found
+            return [found]
+    else:
+        # ⛔ 2.6.0: never through a batch file. A `.cmd` always runs via cmd.exe,
+        # which re-reads its arguments -- the list this wrapper builds would not
+        # reach Codex unchanged (reported as critical in a consumer repo). The npm
+        # starter `codex.cmd` only calls `node.exe` with the package's `codex.js`,
+        # so the wrapper starts exactly that itself.
+        starter = shutil.which("codex.cmd")
+        if starter:
+            launch = _node_launch(Path(starter))
+            if launch:
+                return launch
+        found = shutil.which("codex.exe")
+        if found:
+            return _refuse_batch([found])
 
     # PATH first, so a deliberate install still wins; the bundle is the fallback.
     bundled = bundled_codex()
     if bundled:
-        return bundled
+        return _refuse_batch([bundled])
 
     where = "the desktop app's install directory"
     if os.name == "nt":
         where = f"%LOCALAPPDATA%\\{WINDOWS_BUNDLED_CODEX_GLOB.replace('/', chr(92))}"
     elif sys.platform == "darwin":
         where = MACOS_BUNDLED_CODEX[0]
+    names = ("codex.cmd with node.exe and its codex.js", "codex.exe") if os.name == "nt" else ("codex",)
     die(
         f"codex not found on PATH (tried: {', '.join(names)}), and not in {where}.\n"
-        f"  Install it: npm install -g @openai/codex@latest\n"
+        f"  Install it: npm install -g @openai/codex@{MEASURED_CODEX_CLI}   (the version this\n"
+        f"  wrapper was measured against -- never an unpinned latest; see docs/betrieb.md)\n"
         f"  There is deliberately no environment override to point this elsewhere —\n"
         f"  CLAUDEX_CODEX_BIN was removed in 2.3.0 because it let an unattended\n"
         f"  call nominate any file as 'Codex' (audit 2026-09-02, CRITICAL).",
         EXIT_NO_CODEX,
     )
     raise AssertionError("unreachable")
+
+
+CLI_VERSION_RE = re.compile(rb"\Acodex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\r?\n?\Z")
+
+
+def parse_cli_version(raw: bytes) -> str | None:
+    """The version from `codex --version` output, or None for anything else.
+
+    Strict on purpose: the output comes from whatever binary PATH resolved, and
+    the caller prints the result. One line, exactly `codex-cli X.Y.Z[-pre]`,
+    nothing before or after it -- anything else is `unreadable`, and the raw
+    text is never shown.
+    """
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", "replace")
+    if len(raw) > VERSION_PROBE_MAX_BYTES:
+        return None
+    match = CLI_VERSION_RE.match(raw)
+    return match.group(1).decode("ascii") if match else None
+
+
+def _cli_key(version: str) -> tuple:
+    """Sort key for a parsed version: numeric parts, then release above pre-release."""
+    core, _, pre = version.partition("-")
+    numbers = tuple(int(part) for part in core.split("."))
+    # A pre-release sorts below its release: 0.156.0-alpha.1 < 0.156.0.
+    return numbers + ((0, pre) if pre else (1, ""))
+
+
+def cli_at_least(found: str, minimum: str) -> bool:
+    """True when `found` is the same as or newer than `minimum` (both parse_cli_version()
+    results). Numeric per component -- 0.1000.0 is newer than 0.156.0 -- and a
+    pre-release of a version is older than that version."""
+    return _cli_key(found) >= _cli_key(minimum)
+
+
+def probe_cli_version(launch, _argv: list[str] | None = None,
+                      timeout: int = VERSION_PROBE_TIMEOUT) -> str | None:
+    """Ask the resolved binary for its version, once, before the run.
+
+    The event stream carries no CLI version (measured, 76 of 76 streams), so the
+    binary is asked directly. Treated like the main launch: the same launch list
+    (on Windows node.exe and codex.js), no shell, stdin closed, its own process group, at most
+    VERSION_PROBE_MAX_BYTES read, and on timeout the same process-tree kill as
+    the run itself. Every failure is None ("unreadable"), never a traceback.
+    `_argv` exists for tests only.
+    """
+    prefix = [launch] if isinstance(launch, str) else list(launch)
+    argv = _argv or [*prefix, "--version"]
+    platform_kwargs = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        if os.name == "nt"
+        else {"start_new_session": True}
+    )
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, **platform_kwargs)
+    except (OSError, ValueError):
+        return None
+    chunks: list[bytes] = []
+
+    def read_head() -> None:
+        """Read at most one byte past the cap; the rest of the output is never read."""
+        try:
+            chunks.append(proc.stdout.read(VERSION_PROBE_MAX_BYTES + 1))
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=read_head, daemon=True)
+    reader.start()
+    reader.join(timeout)
+    finished = False
+    oversized = bool(chunks) and len(chunks[0]) > VERSION_PROBE_MAX_BYTES
+    if not reader.is_alive() and not oversized:
+        try:
+            proc.wait(timeout=max(1, timeout))
+            finished = True
+        except subprocess.TimeoutExpired:
+            pass
+    if not finished:
+        kill_tree(proc)
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            warn("the version probe did not exit even after the kill.")
+    try:
+        proc.stdout.close()
+    except OSError:
+        pass
+    if not finished or proc.returncode != 0 or not chunks:
+        return None
+    return parse_cli_version(chunks[0])
+
+
+def check_model_cli(model: str, version: str | None) -> None:
+    """Refuse a model the installed CLI is known not to support.
+
+    Only for models in MODEL_MIN_CLI, and then fail-closed: an unreadable
+    version is refused as well, because the property the table exists for would
+    otherwise be unproven. Every other model runs; general drift only warns.
+    """
+    minimum = MODEL_MIN_CLI.get(model)
+    if minimum is None:
+        if version is None:
+            warn("the codex-cli version could not be read; running anyway.")
+        elif version != MEASURED_CODEX_CLI:
+            warn(f"codex-cli {version} -- this wrapper was measured against "
+                 f"{MEASURED_CODEX_CLI}; see docs/betrieb.md, \"Codex heben\".")
+        return
+    if version is None or not cli_at_least(version, minimum):
+        found = version or "an unreadable version"
+        die(
+            f"{model} needs codex-cli >= {minimum}, found {found}. Older CLIs answer "
+            f"every call with HTTP 400.\n"
+            f"  npm install -g @openai/codex@{minimum}",
+            EXIT_REFUSED,
+        )
+    if version != MEASURED_CODEX_CLI:
+        warn(f"codex-cli {version} -- this wrapper was measured against "
+             f"{MEASURED_CODEX_CLI}; see docs/betrieb.md, \"Codex heben\".")
 
 
 def diagnose_silent_death(executable: str, returncode: int) -> str:
@@ -1058,77 +1441,291 @@ def kill_tree(proc: subprocess.Popen) -> None:
         warn(f"fallback kill failed, a codex process may still be running: {exc}")
 
 
-# Codex logs every shell attempt to stderr: a refusal as an `exec_command failed`
-# line carrying the reason, a success as `succeeded in <ms>`. Both strings come
-# from Codex's own logging and could change; the tests pin them, and the failure
-# direction of a change is a warning that stops firing -- not a false refusal.
+# A sandbox refusal as Codex logs it to stderr -- an `exec_command failed` line
+# carrying the reason. Measured identical on 0.149.1 and 0.156.0 (J0,
+# 2026-09-30); on neither does a refused command appear in the event stream.
+# The stderr SUCCESS marker the old rule relied on (`succeeded in <ms>`) never
+# appears with --json: 0 of ~90 real runs. Execution is counted from the stream.
 SANDBOX_REFUSAL_RE = re.compile(
-    r"rejected: blocked by policy|CreateProcessWithLogonW failed", re.IGNORECASE)
-COMMAND_SUCCEEDED_RE = re.compile(r"\bsucceeded in \d+\s*ms", re.IGNORECASE)
+    rb"rejected: blocked by policy|CreateProcessWithLogonW failed", re.IGNORECASE)
+
+EXECUTED_STATUSES = ("completed", "failed")
 
 
-def blind_run(err_file: Path) -> str | None:
-    """Reason why this run read nothing at all, or None if it could run commands.
+class StreamEvidence:
+    """What the event stream proves about the run -- see read_stream_evidence()."""
+
+    def __init__(self) -> None:
+        """Nothing proven yet: every flag starts at its fail-closed value."""
+        self.thread_id: str | None = None
+        self.executed = 0          # command_execution items that provably ran, last turn
+        self.unclassified = 0      # command_execution items that could not be classified
+        self.saw_thread = False
+        self.saw_turn = False
+        self.complete = False      # the last turn ended in turn.completed
+        self.turn_failed = False   # the last turn reported turn.failed
+        self.turn_closed = False   # turn.completed/turn.failed seen, no new turn yet
+        self.order_error = False   # events out of the measured order
+        self.bad_lines = 0
+        self.oversized = False
+        self.missing = False
+
+    @property
+    def usable(self) -> bool:
+        """True only for a complete, fully read, well-formed stream: present, under the
+        size cap, every line JSON, a thread and a turn, and the last turn ended in
+        turn.completed."""
+        return (not self.missing and not self.oversized and self.bad_lines == 0
+                and not self.order_error
+                and self.saw_thread and self.saw_turn and self.complete)
+
+    def problem(self) -> str:
+        """Why the stream is not usable, in one line for the exit-3 message; "" if it is."""
+        if self.missing:
+            return "the event stream is missing or unreadable"
+        if self.oversized:
+            return f"the event stream is larger than {EVIDENCE_LIMIT} bytes"
+        if self.bad_lines:
+            return f"{self.bad_lines} line(s) of the event stream are not JSON"
+        if self.order_error:
+            return "the event stream is out of order (thread.started, turn.started, turn.completed)"
+        if not self.saw_thread or not self.saw_turn:
+            return "the event stream has no thread.started/turn.started"
+        if not self.complete:
+            return "the last turn did not end in turn.completed (truncated or failed)"
+        return ""
+
+
+def _bounded_lines(path: Path, limit: int):
+    """Yield (line, over_limit) reading at most `limit` bytes, one line at a time.
+
+    readline() gets an explicit size every time, so no single read -- not even
+    one enormous line -- takes more than what is left of the budget.
+    """
+    with open(path, "rb") as handle:
+        consumed = 0
+        while True:
+            line = handle.readline(limit - consumed + 1)
+            if not line:
+                return
+            consumed += len(line)
+            if consumed > limit:
+                yield line, True
+                return
+            yield line, False
+
+
+def read_stream_evidence(stream_file: Path, limit: int | None = None) -> StreamEvidence:
+    """One bounded pass over the event stream: thread id and execution evidence.
+
+    Counted as EXECUTED: `item.completed` whose item is a `command_execution`
+    with an integer `exit_code` (`type(v) is int` -- JSON true is not a process)
+    and status `completed` or `failed`. A non-zero exit still ran: the sandbox let
+    the process start. Only the LAST turn counts (resume safety); a
+    `command_execution` that does not fit is `unclassified`, never executed.
+    Every other item type is ignored -- model text in particular can say
+    anything. Measured contract (76 of 76 real streams, 0.149.1 and 0.156.0):
+    one `thread.started`, one `turn.started`, ending in `turn.completed`.
+    """
+    limit = EVIDENCE_LIMIT if limit is None else limit
+    ev = StreamEvidence()
+    try:
+        for raw, over in _bounded_lines(stream_file, limit):
+            if over:
+                ev.oversized = True
+                break
+            if not raw.strip():
+                continue
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                ev.bad_lines += 1
+                continue
+            if not isinstance(event, dict):
+                ev.bad_lines += 1
+                continue
+            kind = event.get("type")
+            if kind == "thread.started":
+                if ev.saw_turn:
+                    ev.order_error = True
+                ev.saw_thread = True
+                if ev.thread_id is None and isinstance(event.get("thread_id"), str):
+                    ev.thread_id = event["thread_id"]
+            elif kind == "turn.started":
+                ev.saw_turn = True
+                ev.turn_closed = False
+                ev.complete = False
+                ev.turn_failed = False
+                ev.executed = 0
+                ev.unclassified = 0
+            elif kind == "turn.completed":
+                if not ev.saw_turn:
+                    ev.order_error = True
+                ev.complete = ev.saw_turn and not ev.turn_failed
+                ev.turn_closed = True
+            elif kind == "turn.failed":
+                ev.turn_failed = True
+                ev.complete = False
+                ev.turn_closed = True
+            elif isinstance(kind, str) and kind.startswith("item.") and ev.turn_closed:
+                # A closed turn takes no more items: an event after turn.completed
+                # would otherwise count as execution nobody asked about (closing
+                # gate of 2.6.0, recheck 1, reproduced by the reviewer).
+                ev.order_error = True
+            elif kind == "item.completed" and ev.saw_turn:
+                item = event.get("item")
+                if isinstance(item, dict) and item.get("type") == "command_execution":
+                    code = item.get("exit_code")
+                    if type(code) is int and item.get("status") in EXECUTED_STATUSES:
+                        ev.executed += 1
+                    else:
+                        ev.unclassified += 1
+    except OSError:
+        ev.missing = True
+    return ev
+
+
+def count_stderr_refusals(err_file: Path, limit: int | None = None) -> tuple[int, bool]:
+    """(sandbox refusals in stderr, whether all of stderr could be read).
+
+    Line by line over the WHOLE file up to the limit -- the old reader kept only
+    the last 200 KiB, so a refusal early in a long log was lost. A missing file
+    is not an accusation: (0, True).
+    """
+    limit = EVIDENCE_LIMIT if limit is None else limit
+    if not err_file.exists():
+        return 0, True
+    refusals = 0
+    try:
+        for raw, over in _bounded_lines(err_file, limit):
+            if over:
+                return refusals, False
+            if SANDBOX_REFUSAL_RE.search(raw):
+                refusals += 1
+    except OSError:
+        return refusals, False
+    return refusals, True
+
+
+def blind_run(err_file: Path, stream_file: Path, evidence: StreamEvidence | None = None) -> str | None:
+    """Reason why this run must not count as a review, or None.
 
     ⛔ THE FAILURE THIS CATCHES IS SILENT. When the sandbox backend refuses every
     command, Codex still exits 0 and still writes a fluent answer -- produced from
-    the prompt alone, by a model that never opened a file. The answer file is not
-    empty, so none of the checks above fire, and the caller records a verdict from
-    a reviewer that reviewed nothing. That is the worst possible outcome for a
-    review tool: not a missing answer, but a confident one with nothing behind it.
+    the prompt alone, by a model that never opened a file. Nothing else here
+    notices, and a verdict from a reviewer that reviewed nothing gets recorded.
 
-    The rule is deliberately "refusals AND no successes", not "any refusal". A
-    model that reaches for one illegal command, gets told no, and then does the
-    job properly has produced a real review; failing that run would make the
-    wrapper block normal work, and a control that blocks normal work gets
-    switched off. Only a run where NOTHING executed is blind.
+    Blind = NOTHING provably ran in the last turn AND (a sandbox refusal was
+    logged, OR the evidence is unusable, OR a command could not be classified).
+    Not "any refusal": a model that reaches for one illegal command, is told no,
+    and then does the job has produced a real review -- blocking that would make
+    the wrapper block normal work, and such a control gets switched off. And not
+    "no command": 12 of 72 real runs answered legitimately with none (resume
+    rounds, exposure passes with the content in the prompt). Execution that
+    happened only in a sub-agent is invisible here and, with a refusal, reads as
+    blind -- a false alarm in the safe direction, documented as such.
     """
-    if not err_file.exists():
+    ev = evidence if evidence is not None else read_stream_evidence(stream_file)
+    refusals, stderr_whole = count_stderr_refusals(err_file)
+    if ev.executed > 0:
+        if not ev.usable or not stderr_whole or ev.unclassified:
+            problem = (ev.problem() or ("stderr exceeds the size limit" if not stderr_whole else
+                       f"{ev.unclassified} command event(s) that cannot be classified"))
+            warn(
+                f"the run executed commands, but part of its evidence is unusable ({problem}) "
+                f"-- read {stream_file} before relying on the answer."
+            )
         return None
-    try:
-        text = err_file.read_text(encoding="utf-8", errors="replace")[-200_000:]
-    except OSError:
-        return None
-    refusals = len(SANDBOX_REFUSAL_RE.findall(text))
-    if not refusals or COMMAND_SUCCEEDED_RE.search(text):
+    reasons = []
+    if refusals:
+        reasons.append(f"{refusals} refused (stderr)")
+    if not ev.usable:
+        reasons.append(ev.problem())
+    if not stderr_whole:
+        reasons.append(f"stderr exceeds {EVIDENCE_LIMIT} bytes or cannot be read")
+    if ev.unclassified:
+        reasons.append(f"{ev.unclassified} command event(s) that cannot be classified")
+    if not reasons:
         return None
     hinweis = (
-        f"  On Windows this is openai/codex#42172: without `[windows] sandbox` "
-        f"no backend is selected and every command is refused. This wrapper "
-        f"pins `windows.sandbox=\"{WINDOWS_SANDBOX}\"` -- if you see this anyway, "
-        f"the Codex build no longer accepts it.\n"
-        if os.name == "nt" else
-        "  The sandbox refused to start any process. Check the platform's "
-        "sandbox helper (Landlock on Linux, seatbelt on macOS).\n"
+        f"  On Windows a refusal is usually openai/codex#42172: without `[windows] "
+        f"sandbox` no backend is selected and every command is refused. This "
+        f"wrapper pins `windows.sandbox=\"{WINDOWS_SANDBOX}\"` -- if you see this "
+        f"anyway, the Codex build no longer accepts it.\n"
+        if os.name == "nt" and refusals else
+        "  A refusal here means the sandbox would not start any process -- check "
+        "the platform's sandbox helper (Landlock on Linux, seatbelt on macOS).\n"
+        if refusals else
+        "  Without usable evidence a run that read nothing cannot be told apart "
+        "from one that did.\n"
     )
     return (
-        f"the reviewer could not run a single command ({refusals} refused, none "
-        f"succeeded) -- it answered WITHOUT reading anything, and that answer is "
-        f"not a review.\n" + hinweis + f"  Details: {err_file}"
+        # A refused command never appears in the stream (J0, 0.149.1 and 0.156.0),
+        # so the stream count is 0 by construction -- stated, not implied (J5).
+        f"the reviewer did not provably run a single command ({'; '.join(reasons)}; "
+        f"0 refused (stream); 0 executed (stream)) -- the answer may have been written WITHOUT reading "
+        f"anything, and it is not a review.\n" + hinweis
+        + f"  Details: {err_file} and {stream_file}"
     )
 
 
-def read_thread_id(stream_file: Path) -> str | None:
-    if not stream_file.exists():
-        return None
-    try:
-        text = stream_file.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        warn(f"could not read the event stream ({exc}); no thread id reported.")
-        return None
-    for line in text.splitlines():
-        if '"type":"thread.started"' in line.replace(" ", ""):
-            match = THREAD_RE.search(line)
-            if match:
-                return match.group(1)
-    match = THREAD_RE.search(text)
-    return match.group(1) if match else None
+def acquire_locks(paths: list[Path]) -> list[Path]:
+    """Lock every output of this run, in a fixed order, or refuse the run.
+
+    Two calls naming the same --err-file (or the same answer file) would each
+    truncate the other's evidence; a second run could even name the first run's
+    lock as its own --out-file and delete it (review of the 2.6.0 plan, round 7).
+    A lock is a sibling file created with O_CREAT|O_EXCL; any existing lock means
+    exit 2 with nothing touched, and the locks this call already took are
+    returned. A lock left behind by a crash is reported, and removed by hand only.
+    """
+    taken: list[Path] = []
+    for path in sorted({Path(str(p) + LOCK_SUFFIX) for p in paths}):
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            release_locks(taken)
+            try:
+                holder = path.read_text(encoding="utf-8", errors="replace")[:200]
+            except OSError:
+                holder = "(unreadable)"
+            die(
+                f"another run holds {path}: {_escape_path_for_message(holder.strip())}\n"
+                f"  Refusing: sharing an output would let the two runs overwrite each "
+                f"other's evidence. If no run is active, the lock is left over from a "
+                f"crash -- check, then delete it by hand.",
+                EXIT_REFUSED,
+            )
+        except OSError as exc:
+            release_locks(taken)
+            die(f"cannot create the lock {path}: {exc}", EXIT_REFUSED)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"pid {os.getpid()} since {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+        taken.append(path)
+    return taken
+
+
+def release_locks(locks: list[Path]) -> None:
+    """Remove the given locks. A lock that is already gone is fine; one that cannot be
+    removed is reported, never swallowed -- the next run would refuse on it."""
+    for path in locks:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            warn(f"could not remove the lock {path}: {exc} -- delete it by hand.")
 
 
 # --- entry point ----------------------------------------------------------------
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse the wrapper's own options. Refusals that depend on more than one option
+    (paths, overrides, model and version) happen in main(); here only the deprecated
+    MCP switches are reported as ignored."""
     parser = argparse.ArgumentParser(
         prog="codex_ro.py",
         description="Run codex exec read-only; refuse anything that would open the sandbox.",
@@ -1144,7 +1741,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "answer file, and the 401 lives only in stderr.",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"default {DEFAULT_MODEL}")
-    parser.add_argument("--effort", default="high", choices=EFFORT_CHOICES)
+    parser.add_argument("--effort", default=DEFAULT_EFFORT, choices=EFFORT_CHOICES)
     parser.add_argument("--timeout", type=int, default=600, metavar="SECONDS")
     parser.add_argument(
         "-c",
@@ -1164,7 +1761,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--disable-mcp",
         metavar="NAMES",
-        help="comma-separated MCP servers to switch off; default from CLAUDEX_DISABLE_MCP",
+        help="ignored since 2.6.0: the user config (and with it every MCP server) is "
+        "not loaded at all. Accepted so older calls keep working.",
     )
     parser.add_argument(
         "--expect-workdir",
@@ -1177,37 +1775,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--version", action="version", version=f"codex_ro.py {WRAPPER_VERSION}")
     args = parser.parse_args(argv)
 
-    raw_mcp = args.disable_mcp
-    if raw_mcp is None:
-        raw_mcp = os.environ.get("CLAUDEX_DISABLE_MCP")
-    if raw_mcp is None:
-        # Default: every server this installation has. build_argv() filters again,
-        # so an explicit list can never name one that is not there either.
-        args.disable_mcp = sorted(installed_mcp_servers())
-    else:
-        args.disable_mcp = [name.strip() for name in raw_mcp.split(",") if name.strip()]
-        if not args.disable_mcp and installed_mcp_servers():
-            # Refused, not warned about. The audit fixed the two other ways a
-            # caller could weaken this wrapper from its own command line
-            # (--allow-path widening writes, -c mcp_servers.*), and an empty
-            # --disable-mcp is the third door to the same room: Codex runs MCP
-            # servers as separate processes OUTSIDE the sandbox. A warning on
-            # stderr is not a control -- nobody reads stderr on a call that
-            # succeeded. (CodeRabbit, 2026-08-30.)
-            die(
-                "an empty --disable-mcp / CLAUDEX_DISABLE_MCP would leave this "
-                "installation's MCP servers enabled, and Codex runs those outside "
-                "the read-only sandbox this wrapper exists to pin.\n"
-                f"  configured here: {', '.join(sorted(installed_mcp_servers()))}\n"
-                "  Name the ones you want off, or drop the flag to disable all of "
-                "them. Whoever genuinely needs them on calls codex directly -- and "
-                "answers the permission prompt.",
-                EXIT_REFUSED,
-            )
+    # 2.6.0: MCP is not switched off server by server any more -- the user
+    # config that defines the servers is not loaded at all (--ignore-user-config,
+    # see ISOLATION_DISABLE). An empty value used to be refused because it left
+    # servers on; there is nothing left for either spelling to turn on or off.
+    if args.disable_mcp is not None or os.environ.get("CLAUDEX_DISABLE_MCP") is not None:
+        warn(
+            "--disable-mcp / CLAUDEX_DISABLE_MCP is ignored since 2.6.0: the user config "
+            "is not loaded, so no MCP server from it starts at all."
+        )
     return args
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Refuse, confine, probe, lock, run, judge -- in that order, and nothing is
+    created or deleted before every refusal has had its chance. Returns the exit code
+    documented in the module docstring; never raises a traceback."""
     args = parse_args(argv)
 
     # 1. Refuse anything that would touch the sandbox or the approval policy.
@@ -1249,6 +1832,22 @@ def main(argv: list[str] | None = None) -> int:
             EXIT_REFUSED,
         )
         raise AssertionError("unreachable")
+
+    # 1a. A project config anywhere above the working directory could steer the
+    #     reviewer (measured 2026-09-30). --ignore-user-config already keeps it
+    #     from loading; this is the second line, and it refuses before anything
+    #     is created.
+    project_configs = project_codex_configs(resolved_cwd)
+    if project_configs:
+        listed = "\n    ".join(_escape_path_for_message(str(p)) for p in project_configs)
+        die(
+            "a project Codex config sits in or above the working directory:\n"
+            f"    {listed}\n"
+            "  A reviewed repo must not configure its own reviewer -- a "
+            "`developer_instructions` line there was measured to decide the answer.\n"
+            "  Check the file, then remove or rename it. There is no override.",
+            EXIT_REFUSED,
+        )
 
     # 1b. Outside a git repo: warn, do not refuse.
     #
@@ -1309,7 +1908,12 @@ def main(argv: list[str] | None = None) -> int:
     if not prompt or not prompt.strip():
         die("neither --prompt nor --prompt-file provided (or the prompt is empty).", EXIT_REFUSED)
 
-    executable = find_codex()
+    launch = find_codex()
+    executable = launch[-1]
+    # One probe of the SAME resolved launch the run will start (A3). A model with a
+    # known minimum is refused here, before any file is created or deleted.
+    cli_version = probe_cli_version(launch)
+    check_model_cli(args.model, cli_version)
     argv_child = build_argv(args, out_file)
     stream_file = Path(str(out_file) + ".stream.json")
 
@@ -1322,8 +1926,36 @@ def main(argv: list[str] | None = None) -> int:
         clashes = [other for other, p in targets.items() if other != label and p == path]
         if clashes:
             die(f"{label} and {clashes[0]} are the same file: {path}", EXIT_REFUSED)
-    for label, path in targets.items():
-        prepare_write_target(path, label)
+        if _case_key(path.name).endswith(_case_key(LOCK_SUFFIX)):
+            die(f"{label} names a lock file ({LOCK_SUFFIX}); choose another name: {path}",
+                EXIT_REFUSED)
+    created: list[Path] = []
+    try:
+        for label, path in targets.items():
+            created += prepare_write_target(path, label)
+        locks = acquire_locks(list(targets.values()))
+    except SystemExit:
+        # A refused run leaves the tree as it found it -- whichever refusal it
+        # was: remove, innermost first, the (still empty) directories this call
+        # itself created. Never one another session created meanwhile
+        # (make_parents_checked() reports only its own successful mkdir).
+        for directory in sorted(set(created), key=lambda d: len(d.parts), reverse=True):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        raise
+    try:
+        return _run_locked(args, launch, argv_child, cli_version, cwd, repo_root,
+                           prompt, out_file, err_file, stream_file)
+    finally:
+        release_locks(locks)
+
+
+def _run_locked(args, launch, argv_child, cli_version, cwd, repo_root,
+                prompt, out_file, err_file, stream_file) -> int:
+    """Everything that touches the outputs, run while their locks are held."""
+    executable = launch[-1]
     if out_file.exists():
         try:
             out_file.unlink()
@@ -1342,6 +1974,10 @@ def main(argv: list[str] | None = None) -> int:
         f"#   cwd: {_escape_path_for_message(cwd)}   "
         f"({'git repo' if repo_root is not None else 'no git repo'})"
     )
+    # Which CLI actually runs -- the stream does not say (A3). Only the parsed
+    # version is printed, never the probe's raw output.
+    drift = "" if cli_version == MEASURED_CODEX_CLI else f"   (measured against {MEASURED_CODEX_CLI})"
+    print(f"#   codex-cli {cli_version or 'unreadable'}{drift}")
 
     # 4. Run. stdout (the --json event stream) and stderr go straight to files, so
     #    only stdin is a pipe -- no risk of a full-pipe deadlock, and communicate()
@@ -1356,13 +1992,19 @@ def main(argv: list[str] | None = None) -> int:
     with open_for_write(stream_file, "the event stream") as stream_handle, open_for_write(
         err_file, "--err-file"
     ) as err_handle:
-        proc = subprocess.Popen(
-            [executable, *argv_child],
-            stdin=subprocess.PIPE,
-            stdout=stream_handle,
-            stderr=err_handle,
-            **platform_kwargs,
-        )
+        try:
+            proc = subprocess.Popen(
+                [*launch, *argv_child],
+                stdin=subprocess.PIPE,
+                stdout=stream_handle,
+                stderr=err_handle,
+                **platform_kwargs,
+            )
+        except OSError as exc:
+            # The binary answered the version probe a moment ago; if it cannot be
+            # started now it vanished or was replaced -- an exit code, not a traceback.
+            die(f"codex could not be started: {_escape_path_for_message(executable)}: "
+                f"{exc.__class__.__name__}", EXIT_NO_CODEX)
         try:
             proc.communicate(prompt.encode("utf-8"), timeout=args.timeout)
         except subprocess.TimeoutExpired:
@@ -1377,15 +2019,20 @@ def main(argv: list[str] | None = None) -> int:
                 EXIT_TIMEOUT,
             )
 
-    # 5. Report.
-    thread_id = read_thread_id(stream_file)
-    if thread_id:
-        print(f"THREAD_ID={thread_id}")
+    # 5. Report. One bounded pass over the stream yields the thread id AND the
+    #    execution evidence -- the old separate reader loaded the whole stream
+    #    before any limit applied (review of the 2.6.0 plan, round 8).
+    evidence = read_stream_evidence(stream_file)
+    if evidence.thread_id and THREAD_ID_RE.match(evidence.thread_id):
+        print(f"THREAD_ID={evidence.thread_id}")
+    elif evidence.thread_id:
+        warn(f"the stream carries a malformed thread id; not printed: "
+             f"{_escape_path_for_message(evidence.thread_id[:80])}")
 
     # Before anything is reported as an answer: did the reviewer get to read?
     # This check comes FIRST because the run it catches looks entirely healthy --
     # exit 0, a thread_id, a full answer file.
-    blind = blind_run(err_file)
+    blind = blind_run(err_file, stream_file, evidence)
     if blind:
         warn(blind)
         return EXIT_BLIND

@@ -1,0 +1,4 @@
+Reading prompt from stdin...
+2026-09-16T12:39:39.022517Z ERROR codex_core::tools::router: error=exec_command failed for `"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command <command removed>`: CreateProcess { message: "Rejected(\"`<command removed>` rejected: blocked by policy\")" }
+2026-09-16T12:39:46.033722Z ERROR codex_core::tools::router: error=exec_command failed for `"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command <command removed>`: CreateProcess { message: "Rejected(\"`<command removed>` rejected: blocked by policy\")" }
+2026-09-16T12:39:50.566620Z ERROR codex_core::tools::router: error=exec_command failed for `"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command <command removed>`: CreateProcess { message: "Rejected(\"`<command removed>` rejected: blocked by policy\")" }

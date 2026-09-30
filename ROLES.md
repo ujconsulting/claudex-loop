@@ -61,11 +61,11 @@ roles:
 
 actors:
   codex:
-    model: gpt-5.6-terra
-    effort: high
+    model: gpt-6-sol
+    effort: medium
     sandbox: read-only
     roles:                              # per-role model/effort only, never the sandbox
-      exposure-review: { model: gpt-5.6-sol, effort: medium }
+      exposure-review: { model: gpt-6-sol, effort: medium }
   claude: { fresh_subagent: true }
   fallback: [lmstudio]
 
@@ -90,7 +90,7 @@ Resolve and check before any run:
 ```bash
 python scripts/claudex_roles.py --explain   # table + gates, exit 1 if violated
 python scripts/claudex_roles.py --role build    # -> claude
-python scripts/claudex_roles.py --spec exposure-review   # -> codex model=gpt-5.6-sol effort=medium sandbox=read-only
+python scripts/claudex_roles.py --spec exposure-review   # -> codex model=gpt-6-sol effort=medium sandbox=read-only
 ```
 
 **Every skill resolves its actor this way and refuses to start on a non-zero
@@ -124,13 +124,18 @@ the other or ballast, and both are worth knowing.
 
 ## Why the exposure review has its own model
 
-`build` has two graders. `code-review` reads the whole diff against the plan on the
-everyday reviewer (`terra`/high — `sol` at high effort ran a 120-line plan with repo
-context into the ten-minute ceiling). `exposure-review` reads far less — only the
-components that face the network, entire, with the config that publishes them — and
-asks one question: standing outside the machine, what can I reach? A bounded input is
-what makes the stronger model affordable at medium effort, and a different model is
-what makes the pass a second opinion instead of a longer first one.
+`build` has two graders. `code-review` reads the whole diff against the plan.
+`exposure-review` reads far less — only the components that face the network, entire,
+with the config that publishes them — and asks one question: standing outside the
+machine, what can I reach?
+
+Until 2026-09-30 the two ran on different models:
+`gpt-5.6-terra`/high and `gpt-5.6-sol`/medium until 2026-09-30. The different model
+was what made the exposure pass a second opinion rather than a longer first one. Since `gpt-6-sol` superseded both, every
+Codex role runs `gpt-6-sol`/medium, so that argument no longer holds: the second opinion
+now comes from a fresh session with a narrower input and a single question, not from a
+different model. The override entry stays so the pass can be set apart again — a
+different model or a higher effort — without touching the resolver.
 
 The override lives under the actor (`actors.codex.roles.<role>`) and may set `model`
 and `effort` only. The sandbox is a property of the actor, and `adversary_read_only`

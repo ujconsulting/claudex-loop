@@ -1,6 +1,6 @@
 ---
 name: audit
-description: "First-pass review of a codebase nobody ever reviewed — no diff, no plan, no baseline. Slices the repo into reviewable pieces, runs the deterministic tooling first, then has a fresh read-only session judge each slice on quality, security, docs, tests and conformance to the repo's own documented rules. Produces a prioritised baseline file so every later review only has to look at the delta instead of re-raising the same debt. Use when the user says \"/audit\", \"initial code review\", \"nobody ever reviewed this\", \"audit this repo\", \"wie steht es um die Codequalitaet\", \"Sicherheitsluecken finden\", or when onboarding an inherited codebase. NOT for reviewing a change — that is code-review, which is anchored to a diff and a plan. Every component reachable from outside the machine — ports, proxy hosts, tunnels, webhooks, public DNS — additionally gets its own exposure session on the `exposure-review` role (stronger model, bounded effort, default gpt-5.6-sol/medium) with a per-component verdict `EXPOSURE: SAFE/UNSAFE` recorded in the baseline. NOT a penetration test and NOT a substitute for a real security process on high-stakes code."
+description: "First-pass review of a codebase nobody ever reviewed — no diff, no plan, no baseline. Slices the repo into reviewable pieces, runs the deterministic tooling first, then has a fresh read-only session judge each slice on quality, security, docs, tests and conformance to the repo's own documented rules. Produces a prioritised baseline file so every later review only has to look at the delta instead of re-raising the same debt. Use when the user says \"/audit\", \"initial code review\", \"nobody ever reviewed this\", \"audit this repo\", \"wie steht es um die Codequalitaet\", \"Sicherheitsluecken finden\", or when onboarding an inherited codebase. NOT for reviewing a change — that is code-review, which is anchored to a diff and a plan. Every component reachable from outside the machine — ports, proxy hosts, tunnels, webhooks, public DNS — additionally gets its own exposure session on the `exposure-review` role (stronger model, bounded effort, default gpt-6-sol/medium, its own role entry) with a per-component verdict `EXPOSURE: SAFE/UNSAFE` recorded in the baseline. NOT a penetration test and NOT a substitute for a real security process on high-stakes code."
 ---
 
 # Audit — the first pass over code nobody reviewed
@@ -30,12 +30,12 @@ produced, so it has no producer to be paired against. Every other adversary rule
 holds — read-only, foreign context, never the orchestrator.
 
 ```bash
-python scripts/claudex_roles.py --explain
+python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --explain
 ```
 
 Use the actor printed for `audit`. **A non-zero exit means stop.** Where this document
 says "the reviewer", read it as that resolved actor. The exposure sessions (Step 3b)
-run on `exposure-review` — `python scripts/claudex_roles.py --spec exposure-review`
+run on `exposure-review` — `python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec exposure-review`
 prints its model and effort; pass them to the wrapper, never pick them here.
 
 ## Tunables (read from skill args, else default)
@@ -80,7 +80,7 @@ that is a STOP: tell the human, do not retry with a different value. A
 different exit 2, `unrecognized arguments: --expect-workdir`, is not a scope
 mismatch — this repo's `tools/codex_ro.py` predates 2.5.0 and does not know
 the flag yet. Update it from the plugin
-(`python <plugin>/scripts/wrapper_drift.py --repo . --update`, see `setup`)
+(`python <plugin>/scripts/wrapper_drift.py --repo . --update --private-root <your projects folder>`, see `setup`)
 and rerun. ⛔ Never drop the flag to make the error go away.
 <!-- claudex-target:end -->
 
