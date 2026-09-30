@@ -30,6 +30,10 @@ deeper is not reported, and silence from `--scan` is therefore not proof that a
 repo is level -- name it with `--repo` if it lives further down. (The docs claimed
 "every repo under ROOT" until the audit of 2026-08-30.)
 
+Line endings do not count: a copy is compared and written in its canonical form
+(CRLF -> LF, see canonical_bytes()), because Git for Windows' core.autocrlf made
+the same file LF in one checkout and CRLF in the next (T17, 2026-09-30).
+
 Exit code 0 when every copy matches, 1 when at least one does not, 2 when the
 call itself is refused. `--update` rewrites drifted REQUIRED copies and installs
 missing ones; drifted OPTIONAL copies need `--update-optional` as well, because
@@ -91,8 +95,20 @@ VERSION_RE = re.compile(r'^WRAPPER_VERSION\s*=\s*"([^"]+)"', re.MULTILINE)
 LEVEL, DRIFTED, MISSING = "level", "drifted", "missing"
 
 
+def canonical_bytes(path: Path) -> bytes:
+    """The file's content in its one canonical form: CRLF turned into LF, nothing else.
+
+    A lone CR stays -- that is a real difference in content and must show as drift.
+    Why at all: with core.autocrlf=true (Git for Windows' default) the same file sat
+    as LF in one place and CRLF in the next, and raw bytes reported 26 identical
+    copies as drifted (T17, 2026-09-30).
+    """
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
 def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    """Short sha256 of the canonical form -- line endings never count as drift."""
+    return hashlib.sha256(canonical_bytes(path)).hexdigest()[:12]
 
 
 def version_of(path: Path) -> str:
@@ -231,12 +247,15 @@ def write_atomically(source: Path, destination: Path, private_root: Path | None 
     folder) is re-checked immediately before mkstemp, before a single byte is
     written and before the replace. The staging file is written in full and its
     content verified BEFORE it replaces the target, and the target once more
-    after. A swap caught after mkstemp leaves an EMPTY file behind wherever the
+    after -- both byte-exact. Since T17 the bytes written are the source's
+    canonical form (LF), whatever line endings the plugin checkout carries. A swap caught after mkstemp leaves an EMPTY file behind wherever the
     folder then pointed; it is removed through the same path when still reachable.
     """
     folder = destination.parent
     top = private_root if private_root is not None else folder
-    data = source.read_bytes()
+    # Written in canonical form (LF); the checks below stay byte-exact against
+    # exactly these bytes -- normalisation happens once, here, never in a check.
+    data = canonical_bytes(source)
     expected = hashlib.sha256(data).hexdigest()
     _check_chain(top, folder, "before staging")
     fd, name = tempfile.mkstemp(dir=folder, prefix=".claudex-", suffix=".tmp")

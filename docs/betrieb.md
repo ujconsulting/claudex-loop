@@ -566,6 +566,17 @@ laufenden Angreifer mit Schreibrecht unter dem Ordner schützt das nicht — geg
 vorhandene Junction schon. `--scripts-dir` ist zusammen mit `--update` verboten: eine Kopie
 entsteht nur aus dem installierten Plugin.
 
+**Zeilenenden zählen nicht als Drift (T17, 30.09.2026).** Git for Windows setzt systemweit
+`core.autocrlf=true`; ohne `.gitattributes` lag dieselbe Datei im Plugin-Cache mit CRLF, in der
+Arbeitskopie mal so, mal so, und im Projekt-Repo nach dem nächsten Checkout wieder anders — und
+`wrapper_drift.py` verglich rohe Bytes: 26 identische Kopien standen als `DRIFT` da. Seitdem an
+beiden Enden: das Plugin-Repo trägt `* text=auto eol=lf` (jeder Checkout, auch die Installation,
+ist LF), und `wrapper_drift.py` vergleicht und schreibt die kanonische Form (`\r\n` → `\n`, ein
+einzelnes `\r` bleibt ein Unterschied). Die Prüfung des Geschriebenen bleibt byte-genau. Auch
+Python im Textmodus (`write_text()` ohne `newline=`) schreibt auf Windows CRLF — gemessen beim
+Bau von T17; wer den Bash-Shim `hooks/claudex-python.sh` anfasst, prüft ihn danach
+(`tests/test_line_endings.py` tut es).
+
 **Wie Codex gestartet wird (2.6.0).** Unter Windows nie über `codex.cmd`: eine Batch-Datei
 läuft über `cmd.exe`, das die Argumente noch einmal auswertet. Der Wrapper startet stattdessen
 `node.exe` (neben dem npm-Starter, sonst aus dem PATH) mit

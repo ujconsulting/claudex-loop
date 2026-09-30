@@ -1,0 +1,5 @@
+# One line-ending form everywhere (T17, 2026-09-30). Git for Windows sets
+# core.autocrlf=true system-wide; without this file every checkout -- the plugin
+# install included -- turned LF into CRLF, the bash shim among them, and
+# wrapper_drift.py reported identical copies as drifted.
+* text=auto eol=lf
