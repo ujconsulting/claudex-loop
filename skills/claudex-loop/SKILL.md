@@ -152,6 +152,9 @@ _Locked via claudex-loop — by Claude + <user>_
 ## Assumptions
 <the confirmed ledger — with sources>
 
+## Verification
+<how the build proves it works: commands, inputs, expected result. Prove it on the ordinary output of the program that produces the input — real files, real calls, the cases users actually hit — not only on hand-written fixtures shaped like the rule under test. When existing behaviour changes, run old and new code over the same inputs and name the intended differences; any other difference is a finding>
+
 ## Risks / open questions
 <anything still genuinely open>
 
@@ -357,7 +360,7 @@ forever at ~0% CPU under a non-interactive driver without it.
 1. Read `$SCRATCH_DIR/codex-verdict-r$ROUND.txt`; append to `LOG_FILE`: `## Round <n> — Codex` + the full critique.
 2. Grep the **last non-blank line** for the verdict:
    - `VERDICT: APPROVED` → break to Resolution (converged).
-   - `VERDICT: REVISE` → Claude decides **what's actually worth acting on** (Claude is final arbiter — Codex advises, doesn't command). Revise `PLAN_FILE`. Append `### Claude's response` to `LOG_FILE`: what changed, what was rejected, why. Increment round.
+   - `VERDICT: REVISE` → Claude decides **what's actually worth acting on** (Claude is final arbiter — Codex advises, doesn't command). Revise `PLAN_FILE` — and for every change a disposition makes, change or mark as superseded **every** passage that still states the old behaviour, acceptance criteria and `## Verification` included: search the whole plan for the replaced condition (the flag, field or rule name) before sending the revision. A passage left standing hands the next reviewer, the builder and the inspector a plan that says both. Append `### Claude's response` to `LOG_FILE`: what changed, what was rejected, why. Increment round.
    - **Anything else — a missing verdict, a malformed one, or an empty file — is an
      INVALID ROUND, not a quiet no-op.** There was no third branch here until the audit
      of 2026-08-30, so a reply that ended without a verdict simply fell through: logged,
@@ -437,7 +440,7 @@ If the user picks Codex: invoke the `build` skill with `SPEC_FILE=PLAN.md` and t
 The doctrine is *whoever made the thing never checks the thing* — that applies to Claude's code too. After Claude implements and the proof gates pass:
 
 1. Launch a **fresh read-only Codex session** (`codex exec -s read-only`, NEW thread — not the Phase 2 thread; the reviewer should see the code cold, not through its own plan critiques). Give it: `PLAN.md`, the base commit, and the code diff. Ask for PR-style findings — correctness, spec fidelity, edge cases, nothing outside scope — no verdict line needed; this is advisory review, not a gate loop.
-2. Claude arbitrates each finding: accept (fix it, rerun affected tests) or reject *with a logged reason*. Cap at `MAX_INSPECTION_ROUNDS=2` (initial review + one reinspection after accepted fixes).
+2. Claude arbitrates each finding: accept (fix it, rerun affected tests) or reject *with a logged reason*. Cap at `MAX_INSPECTION_ROUNDS=2` (initial review + one reinspection after accepted fixes). **When accepting a finding changes what the build must do** (not just how it does it), edit `PLAN.md` to match in the same pass, with the same whole-plan search as a Phase 2 revision — the reinspection and the closing gate judge the build against that file, and a note in the log or in the inspector's prompt does not reach them. Log each such edit as `post-approval plan change` and list it at the human gate as its own line item: the Phase 2 approval covered the old text, not this one.
 3. Append to `LOG_FILE` under `## Post-build inspection`: findings verbatim, Claude's dispositions, rounds used. Present the summary alongside the final diff at the human gate — and the summary's content is a contract, not a vibe: **every REJECTED finding from any inspection round appears as its own line item at the gate, with Claude's one-line rationale.** The findings the human most needs to audit are exactly the ones Claude overruled; an aggregate ("23 findings, 19 fixed") hides them at the one moment a human is looking. Accepted-and-fixed findings may be summarized in aggregate.
 
 Opt-out: `inspect=off` at invocation or the user declining at Resolution. Skipping silently is not allowed — the log must show either the inspection or the explicit opt-out. (Cost: one ~2-5 min Codex invocation at the end of the build; forgetting to ask for review is exactly the failure mode this default exists to prevent.)

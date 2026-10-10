@@ -151,6 +151,9 @@ _Round 0 — initial draft by Claude_
 ## Key decisions & tradeoffs
 <the contestable choices — name them explicitly so Codex has something to bite>
 
+## Verification
+<how the build proves it works: commands, inputs, expected result. Prove it on the ordinary output of the program that produces the input — real files, real calls, the cases users actually hit — not only on hand-written fixtures shaped like the rule under test. When existing behaviour changes, run old and new code over the same inputs and name the intended differences; any other difference is a finding>
+
 ## Risks / open questions
 <what you're unsure about>
 
@@ -257,7 +260,7 @@ caller `-c` touching the sandbox, `profile` or `mcp_servers`.
 1. Read `$SCRATCH_DIR/codex-verdict-r$ROUND.txt`. Append to `LOG_FILE`: `## Round <n> — Codex` + the full critique.
 2. Grep the **last non-blank line** for the verdict token.
    - `VERDICT: APPROVED` → break the loop, go to Step 3 (converged).
-   - `VERDICT: REVISE` → Claude reads the critique, decides **what's actually worth acting on** (Claude has final say — Codex advises, it does not command). Revise `PLAN_FILE`. Append to `LOG_FILE`: `### Claude's response` + what you changed and what you rejected and why. Increment `ROUND`.
+   - `VERDICT: REVISE` → Claude reads the critique, decides **what's actually worth acting on** (Claude has final say — Codex advises, it does not command). Revise `PLAN_FILE` — and for every change a disposition makes, change or mark as superseded **every** passage that still states the old behaviour, acceptance criteria and `## Verification` included: search the whole plan for the replaced condition (the flag, field or rule name) before sending the revision. A passage left standing hands the next reviewer, the builder and the inspector a plan that says both. Append to `LOG_FILE`: `### Claude's response` + what you changed and what you rejected and why. Increment `ROUND`.
    - **Neither — missing, malformed, or an empty file → INVALID ROUND.** Log it as such with the reply verbatim, read the stderr file, and stop to tell the user. It does not count towards `MAX_ROUNDS` and it never counts as an approval.
    - **Wrapper exit 3 → INVALID ROUND, whatever the verdict says.** The reviewer's shell was refused every command and it read no file; the verdict came from the prompt alone. Log `## Round <n> — INVALID (exit 3, reviewer read nothing)`.
 3. If `ROUND > MAX_ROUNDS` → break to Step 3 (deadlock).

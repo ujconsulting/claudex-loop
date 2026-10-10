@@ -132,7 +132,7 @@ SPEC: Read <SPEC_FILE> at the repo root. It is a frozen, already-reviewed spec.
 KEY PATHS: <files/dirs Codex will touch or must read first>
 CONSTRAINTS: <"don't touch X", style rules, deps that must not change>
 NON-GOALS: <explicitly out of scope — from the plan's Out of scope section>
-PROOF: Run `<PROOF_CMD>` and include its full output in your report.
+PROOF: Run `<PROOF_CMD — from the plan's Verification section when it has one, its real-output inputs and old-vs-new comparison included>` and include its full output in your report.
 OUTPUT: End with a report — files changed (one line each: path + what/why),
   proof output, and any deviations from the spec with reasons.
 EOF
