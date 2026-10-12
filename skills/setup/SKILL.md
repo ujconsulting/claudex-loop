@@ -35,7 +35,7 @@ Die drei Korrekturen, die am meisten kosten, wenn man sie nicht kennt:
 
 | Plugin-README sagt | Verifiziert gilt |
 | --- | --- |
-| „Don't pin a model" | **Doch pinnen — aber nicht hier, sondern in der Rollen-Config:** `python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec <rolle>` liefert seit 30.09.2026 für jede Codex-Rolle `gpt-6-sol`/`medium` (Nachfolger von `gpt-5.6-terra`; eine echte Plan-Runde ≈ 4:48 min). Der Pin läuft unter ChatGPT-Auth einwandfrei; die Warnung zielt auf die alten `*-codex`-Slugs. Braucht codex-cli ≥ 0.156.0. |
+| „Don't pin a model" | **Doch pinnen — aber nicht hier, sondern in der Rollen-Config:** `python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec <rolle>` liefert seit 30.09.2026 für jede Codex-Rolle `gpt-6.1-sol`/`medium` (seit 11.10.2026 Nachfolger von `gpt-6-sol`; mit `gpt-6-sol` war eine echte Plan-Runde ≈ 4:48 min). Der Pin läuft unter ChatGPT-Auth einwandfrei; die Warnung zielt auf die alten `*-codex`-Slugs. Braucht codex-cli ≥ 0.162.1. |
 | Plan als Datei, Codex liest ihn | **Plantext inline in den Prompt.** Codex' Shell-Aufrufe können per Policy blockiert werden und eine frische `PLAN.md` ist oft untracked — dann reviewt Codex den Code, aber nicht den Plan. |
 | `2>/dev/null` | **stderr in eine Datei.** Ein abgelaufener Token liefert exit 0, gültige `thread_id` und eine *leere* Verdict-Datei; der 401 steht nur in stderr. |
 
@@ -163,13 +163,13 @@ Codex mit „Not inside a trusted directory“.
 ### 1. Voraussetzungen (einmal pro Rechner)
 
 ```bash
-codex --version        # >= 0.156.0 fuer codex; gemessen gegen 0.156.0 (30.09.2026)
+codex --version        # >= 0.162.1 fuer codex; gemessen gegen 0.162.1 (12.10.2026)
 codex login status     # "Logged in using ChatGPT" — Abo, kein API-Key
 ```
 
-Fehlt Codex: `npm install -g @openai/codex@0.156.0` (eine benannte Version, nie ungepinnt —
+Fehlt Codex: `npm install -g @openai/codex@0.162.1` (eine benannte Version, nie ungepinnt —
 siehe `docs/betrieb.md`, „Codex heben"), dann `codex login`.
-`~/.codex/config.toml` Sollzustand für die **eigene** Arbeit: `model = "gpt-6-sol"`,
+`~/.codex/config.toml` Sollzustand für die **eigene** Arbeit: `model = "gpt-6.1-sol"`,
 `model_reasoning_effort = "medium"`. Der Wrapper liest diese Datei seit 2.6.0 nicht mehr
 (`--ignore-user-config`); Modell und Effort der Reviews kommen aus der Rollen-Config.
 ⛔ `gpt-5.4`/`-mini` verschwanden am 31.08.2026 aus Codex; `gpt-5.6-terra` ist seit 22.09.2026

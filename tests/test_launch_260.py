@@ -23,6 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import codex_ro  # noqa: E402
 
 
+# These tests replay codex-cli 0.156.0 recordings (tests/fixtures/codex-0.156/). The default
+# model gpt-6.1-sol needs codex-cli >= 0.162.1 (MODEL_MIN_CLI) and would be refused before
+# the run, so the classes that drive main() pin the model those recordings belong to.
+PIN_RECORDED_MODEL = unittest.mock.patch.object(codex_ro, "DEFAULT_MODEL", "gpt-6-sol")
+
+
 class _NpmLayout:
     """A fake npm global prefix: the starter, the package, optionally node.exe beside it."""
 
@@ -87,6 +93,7 @@ class WindowsLaunchTests(_NpmLayout, unittest.TestCase):
                 self.assertEqual(caught.exception.code, codex_ro.EXIT_NO_CODEX)
 
 
+@PIN_RECORDED_MODEL
 class LaunchListTests(unittest.TestCase):
     """Every platform: the resolved launch is a list, and main() starts that list."""
 

@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a12f43-df08-7cf0-93b0-f5a50a172c7e"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll run `git rev-parse HEAD`.\n"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Command blocked by policy; no output available."}}
+{"type":"turn.completed","usage":{"input_tokens":39593,"cached_input_tokens":25088,"cache_write_input_tokens":0,"output_tokens":84,"reasoning_output_tokens":15}}

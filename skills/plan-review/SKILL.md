@@ -26,7 +26,7 @@ Reference: `ROLES.md`.
 ## Prerequisites (verify once, fast)
 
 - Codex CLI installed **and alive**: `codex --version` must actually PRINT a version
-  (need ≥ 0.156.0 for codex — the version this plugin is measured against; `gpt-6-sol`
+  (need ≥ 0.162.1 for codex — the minimum for the default `gpt-6.1-sol`; `gpt-6.1-sol`
   is HTTP 400 on older CLIs, and the wrapper refuses it there up front). **Empty output with a
   non-zero exit is neither a hang nor an auth failure** — it is a dead binary, and
   retrying it burns the round. Exit 137 (SIGKILL) on macOS means a stale npm-global
@@ -54,8 +54,8 @@ Reference: `ROLES.md`.
   the user asks"* while `setup` and `docs/betrieb.md` both recorded the verified
   configuration as a pin (2026-08-30: `gpt-5.6-terra`/high, because `gpt-5.6-sol` ran
   into the 10-minute ceiling on real plans) — following the wrong half of that made normal
-  reviews time out (audit 2026-08-30). Since 2026-09-30 the role config says
-  `gpt-6-sol`/medium, measured at ~4:48 min for a real round. One place decides; this is not it. (Pinning
+  reviews time out (audit 2026-08-30). Since 2026-10-11 the role config says
+  `gpt-6.1-sol`/medium (`gpt-6-sol`/medium before, measured at ~4:48 min for a real round). One place decides; this is not it. (Pinning
   `gpt-5.x-codex` variants still fails on ChatGPT-account auth — that is a model-name
   constraint, and it belongs in the role config too.)
 - **Echo the resolved model before Round 1** so the user can confirm, together with the

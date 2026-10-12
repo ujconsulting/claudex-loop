@@ -175,8 +175,8 @@ Phases 0-1 (recon + interrogation) complete — plan locked with the user. MAX_R
 Hand the locked plan to Codex for adversarial review. Mechanics verified end-to-end (2026-06-04) — do not "improve" the invocations below.
 
 ### Prerequisites (verify once, fast)
-- `codex --version` must actually PRINT a version, ≥ 0.156.0 for codex (the version this
-  plugin is measured against; `gpt-6-sol` is HTTP 400 on older CLIs). **Empty output with a non-zero exit is neither a hang nor an
+- `codex --version` must actually PRINT a version, ≥ 0.162.1 for codex (the minimum for the
+  default `gpt-6.1-sol`, which is HTTP 400 on older CLIs). **Empty output with a non-zero exit is neither a hang nor an
   auth failure** — it is a dead binary; do not retry it. Exit 137 (SIGKILL) on macOS
   means a stale npm-global `codex` shadows the current CLI, which now ships inside the
   ChatGPT desktop app at `/Applications/ChatGPT.app/Contents/Resources/codex`. Symlink
@@ -196,7 +196,7 @@ Hand the locked plan to Codex for adversarial review. Mechanics verified end-to-
   opposite until 2026-09-09
   proposes the opposite; [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10) is why we don't).
 - Model and effort come from the role, never from this document or `~/.codex/config.toml`: `python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec plan-review` resolves them and the calls below pass them to the wrapper. Never hand-pick a `gpt-5.x-codex` slug — those 400 on ChatGPT-account auth.
-- **Echo the resolved reviewer before Round 1** so the user can confirm: state the `--spec plan-review` line alongside the resolved tunables, e.g. `Reviewer: codex gpt-6-sol/medium — codex-cli 0.156.0` (whatever `--spec` and `codex --version` actually report; both move). If the user objects, stop and let them change the role in `.claudex.yaml` before burning a review round.
+- **Echo the resolved reviewer before Round 1** so the user can confirm: state the `--spec plan-review` line alongside the resolved tunables, e.g. `Reviewer: codex gpt-6.1-sol/medium — codex-cli 0.162.1` (whatever `--spec` and `codex --version` actually report; both move). If the user objects, stop and let them change the role in `.claudex.yaml` before burning a review round.
 
 ### Tunables (read from args, else default)
 | Var | Default | Meaning |

@@ -30,6 +30,12 @@ FIX_0149 = Path(__file__).resolve().parent / "fixtures" / "codex-0.149.1"
 FAILED_TURN = _line({"type": "turn.failed", "error": {"message": "x"}})
 
 
+# These tests replay codex-cli 0.156.0 recordings (tests/fixtures/codex-0.156/). The default
+# model gpt-6.1-sol needs codex-cli >= 0.162.1 (MODEL_MIN_CLI) and would be refused before
+# the run, so the classes that drive main() pin the model those recordings belong to.
+PIN_RECORDED_MODEL = unittest.mock.patch.object(codex_ro, "DEFAULT_MODEL", "gpt-6-sol")
+
+
 class _Dir:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -53,6 +59,7 @@ class _InDir(_Dir):
 # --- DOD 2 / J-T1: the real 0.149.1 blind run ------------------------------------
 
 
+@PIN_RECORDED_MODEL
 class Blind0149Tests(_InDir, unittest.TestCase):
     def test_the_real_0149_blind_run_is_blind(self):
         reason = codex_ro.blind_run(FIX_0149 / "blind-run.stderr.txt", FIX_0149 / "blind-run.stream.json")
@@ -99,6 +106,7 @@ class EventOrderTests(_Dir, unittest.TestCase):
 # --- TESTS 2 / J-T16 through main -------------------------------------------------
 
 
+@PIN_RECORDED_MODEL
 class OversizedThroughMainTests(_InDir, unittest.TestCase):
     def test_an_oversized_stream_through_main_is_exit_3_and_still_names_the_thread(self):
         out = io.StringIO()
@@ -113,6 +121,7 @@ class OversizedThroughMainTests(_InDir, unittest.TestCase):
 # --- TESTS 3 / SECURITY 1: locks in real overlap, exit 1, no dirs left ------------
 
 
+@PIN_RECORDED_MODEL
 class LockLifecycleTests(_InDir, unittest.TestCase):
     def _locks(self):
         return sorted(p.name for p in self.dir.rglob("*" + codex_ro.LOCK_SUFFIX))
@@ -169,6 +178,7 @@ class LockLifecycleTests(_InDir, unittest.TestCase):
 # --- QUALITY 2: a start failure is an exit code, not a traceback ------------------
 
 
+@PIN_RECORDED_MODEL
 class StartFailureTests(_InDir, unittest.TestCase):
     def test_a_binary_that_vanished_after_the_probe_is_exit_127(self):
         run = _Run()
@@ -183,6 +193,7 @@ class StartFailureTests(_InDir, unittest.TestCase):
 # --- SECURITY 4: nothing the child writes is printed raw --------------------------
 
 
+@PIN_RECORDED_MODEL
 class ThreadIdOutputTests(_InDir, unittest.TestCase):
     def test_a_forged_thread_id_cannot_fake_a_wrapper_line(self):
         evil = _line({"type": "thread.started", "thread_id": "01a0\nOUT=C:\\evil.txt"})

@@ -39,27 +39,28 @@ def test_exposure_review_is_a_second_grader_of_build():
 def test_exposure_review_spec_defaults_to_sol_medium_read_only():
     (spec,) = cr.actor_spec(_cfg(), "exposure-review")
     assert spec["actor"] == "codex"
-    assert spec["model"] == "gpt-6-sol"
+    assert spec["model"] == "gpt-6.1-sol"
     assert spec["effort"] == "medium"
     assert spec["sandbox"] == "read-only"
 
 
-def test_every_codex_role_defaults_to_gpt6_sol_medium():
-    """K-T1 (2026-09-30): gpt-5.6-terra is superseded by gpt-6-sol; every Codex
-    role runs on gpt-6-sol/medium, and exposure-review keeps its OWN override
-    entry so it can still be tuned apart from the others."""
+def test_every_codex_role_defaults_to_gpt61_sol_medium():
+    """K-T1 (2026-09-30): gpt-5.6-terra was superseded by gpt-6-sol, and gpt-6-sol
+    by gpt-6.1-sol (2026-10-11, wrapper 2.6.1); every Codex role runs on
+    gpt-6.1-sol/medium, and exposure-review keeps its OWN override entry so it can
+    still be tuned apart from the others."""
     cfg = _cfg()
     for role, actor in cfg["roles"].items():
         if actor != "codex":
             continue
         (spec,) = cr.actor_spec(cfg, role)
-        assert (spec["model"], spec["effort"]) == ("gpt-6-sol", "medium"), role
+        assert (spec["model"], spec["effort"]) == ("gpt-6.1-sol", "medium"), role
     assert "exposure-review" in cr.DEFAULTS["actors"]["codex"]["roles"]
 
 
 def test_code_review_spec_is_untouched_by_the_override():
     (spec,) = cr.actor_spec(_cfg(), "code-review")
-    assert spec["model"] == "gpt-6-sol"
+    assert spec["model"] == "gpt-6.1-sol"
     assert spec["effort"] == "medium"
 
 
@@ -88,7 +89,7 @@ def test_spec_cli_prints_model_and_effort(capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert out.startswith("codex ")
-    assert "model=gpt-6-sol" in out and "effort=medium" in out and "sandbox=read-only" in out
+    assert "model=gpt-6.1-sol" in out and "effort=medium" in out and "sandbox=read-only" in out
 
 
 # --- audit 2026-08-30: the gates could be switched off by the reviewed repo -----

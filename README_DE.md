@@ -105,7 +105,7 @@ roles:
   plan-review: codex    # Dual draft:  plan: [claude, codex] + plan-review: cross
   build: claude
   code-review: codex
-  exposure-review: codex   # second grader of build — gpt-6-sol/medium by default, see ROLES.md
+  exposure-review: codex   # second grader of build — gpt-6.1-sol/medium by default, see ROLES.md
   docs: claude
   docs-review: codex
   audit: codex
@@ -188,6 +188,10 @@ eigenen Autor. Alles ist samt Nachweis aufgeschrieben in
 der **zurückgewiesenen** Befunde und der Stellen, an denen dem Rat eines Prüfers
 bewusst nicht gefolgt wurde.
 
+## Umstieg auf 2.6.1 — gpt-6.1-sol, codex-cli 0.162.1
+
+2.6.1 stellt den Default von `gpt-6-sol` auf `gpt-6.1-sol` um (Effort bleibt `medium`), im Wrapper und in `claudex_roles.py`. **Es braucht codex-cli ≥ 0.162.1**; auf 0.156.0 wurde `gpt-6.1-sol` mit HTTP 400 beantwortet (10.10.2026), und der Wrapper weist es auf jeder älteren CLI ab (Exit 2). `gpt-6-sol` behält sein eigenes Minimum (0.156.0) für alle, die es in `.claudex.yaml` festschreiben. Der Wrapper ist jetzt gegen codex-cli 0.162.1 gemessen (Preflight und Abnahme nach docs/betrieb.md Abschnitt 8 am 12.10.2026 bestanden, Protokoll in `docs/plans/2026-10-11-gpt-6.1-sol-wrapper-2.6.1/`): sechs neue, standardmäßig eingeschaltete Features sind eingeordnet (`browser_annotation_api`, `daemon_auto_start`, `in_app_voice` abgeschaltet; `ultrafast_mode`, `api_key_model_discovery`, `write_stdin_approval` bleiben an), und drei eingebaute MCP-Ressourcen-Werkzeuge, die 0.162.1 mitbringt, sind unter der Abschottung nachweislich leer. Die Blind-Probe endet weiter mit Exit 3. Erst die CLI heben (`npm install -g @openai/codex@0.162.1`), dann die Kopien von `tools/codex_ro.py`.
+
 ## Umstieg auf 2.6.0 — Codex 0.156.0, gpt-6-sol, ein abgeschotteter Prüfer
 
 `gpt-5.6-terra` wurde am 22.09.2026 durch `gpt-6-sol` abgelöst; jede Codex-Rolle steht jetzt auf
@@ -195,7 +199,7 @@ bewusst nicht gefolgt wurde.
 beantwortet `gpt-6-sol` bei jedem Aufruf mit HTTP 400**, also kommt die CLI zuerst:
 
 ```bash
-npm install -g @openai/codex@0.156.0
+npm install -g @openai/codex@0.156.0   # 2.6.0, 2026-09-30 (today: see 2.6.1 above)
 ```
 
 **Was absichtlich stoppt:**
@@ -317,13 +321,13 @@ Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles
 
 ## Voraussetzungen
 
-- **Codex CLI ≥ 0.156.0** — `npm install -g @openai/codex@0.156.0`, eine benannte Version, nie
-  ungepinnt. `gpt-6-sol` ist auf älteren CLIs HTTP 400, und der Wrapper weist es dort vorab ab;
+- **Codex CLI ≥ 0.162.1** (11.10.2026) — `npm install -g @openai/codex@0.162.1`, eine benannte Version, nie
+  ungepinnt. `gpt-6.1-sol` braucht sie (`gpt-6-sol` ≥ 0.156.0); ältere CLIs antworten mit HTTP 400, und der Wrapper weist es dort vorab ab;
   seine Kopfzeile zeigt die gefundene Version. Unter Windows braucht Codex ab 0.147 außerdem einen
   Wrapper **ab 2.4.0**, sonst liest der Reviewer lautlos nichts (siehe [Sicherheit](#sicherheit)).
 - **Angemeldet** — einmal `codex login` (jedes ChatGPT-Konto: Free/Plus/Pro/Max)
 - **Modell und Aufwand kommen aus den Rollen, nicht aus deiner Codex-Konfiguration** —
-  `python scripts/claudex_roles.py --spec <role>` löst sie auf (`gpt-6-sol/medium` für
+  `python scripts/claudex_roles.py --spec <role>` löst sie auf (`gpt-6.1-sol/medium` für
   jede prüfende Rolle, den Exposure-Pass eingeschlossen), und die Review-Skills
   geben sie an den Wrapper weiter; je Rolle überschreibbar in `.claudex.yaml`
   ([ROLES.md](ROLES.md)). Nur `build` läuft, wenn Codex baut, auf deinem
@@ -358,7 +362,7 @@ Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles
 
 Zum Überschreiben beim Aufruf z. B. `rounds=3` mitgeben.
 
-⛔ **Warum `gpt-6-sol`/`medium`:** es hat `gpt-5.6-terra` am 22.09.2026 abgelöst, und eine echte Plan-Review-Runde dauerte auf codex-cli 0.156.0 ≈ 4:48 min — innerhalb des 600-s-Timeouts. (Der frühere Pin auf `terra` bestand, weil `gpt-5.6-sol` bei hohem Effort am 30.08.2026 in diese Decke lief.) Ein Pin funktioniert unter ChatGPT-Authentifizierung einwandfrei — abgelehnt werden nur die älteren `*-codex`-Slugs.
+⛔ **Warum `gpt-6.1-sol`/`medium`:** es hat `gpt-6-sol` am 10.10.2026 abgelöst (gemessen auf codex-cli 0.162.1: ein Lesezugriff führte wirklich einen Befehl aus). `gpt-6-sol` hatte `gpt-5.6-terra` am 22.09.2026 abgelöst, und eine echte Plan-Review-Runde dauerte damit auf codex-cli 0.156.0 ≈ 4:48 min — innerhalb des 600-s-Timeouts. (Der frühere Pin auf `terra` bestand, weil `gpt-5.6-sol` bei hohem Effort am 30.08.2026 in diese Decke lief.) Ein Pin funktioniert unter ChatGPT-Authentifizierung einwandfrei — abgelehnt werden nur die älteren `*-codex`-Slugs.
 
 ## Wenn Codex leerläuft (Fallback-Prüfer)
 
@@ -396,9 +400,9 @@ Pfadargumente sind eingegrenzt, und **Schreibziele enger als Lesezugriffe**: Der
 **`--expect-workdir DIR`: der Scope wird zugesichert, nie gewählt.** Das Arbeitsverzeichnis entscheidet über mehr als den geprüften Scope — es entscheidet, welche `AGENTS.md` Codex ungefragt in den Prompt zieht, ist also selbst ein Egress-Parameter, und bis 2.5.0 zeigte nichts das an. Vorfall 11.09.2026: Acht Review-Runden liefen mit dem cwd des Wrappers im Produktiv-Doku-Repo statt im vorgesehenen Wegwerf-Repo, und nichts sagte es. `DIR` muss ein **absoluter** Pfad sein; der Wrapper vergleicht ihn mit seinem eigenen Arbeitsverzeichnis und verweigert — Exit 2 — bei jeder Abweichung, bevor Codex gefunden wird, bevor irgendeine Datei angelegt wird und bevor die Verdikt-Datei der Vorrunde gelöscht wird. Es ist eine **ASSERTION, not a SELECTOR** — it can only refuse, es ändert nie, wo Codex läuft (Default: unset, behaviour as in 2.4.0). Jede andere Schreibweise desselben Orts wird absichtlich abgewiesen — Symlink- oder Junction-Alias, 8.3-Kurzname, `subst`-/Netzlaufwerk-Alias, ein Arbeitsverzeichnis, das selbst über einen Link erreicht wird. Der Wert wird verglichen, **wie er getippt wurde**: toleriert werden nur Groß-/Kleinschreibung und Schrägstrichrichtung (Windows) sowie ein Schluss-Separator — `<cwd>\sub\..`, ein Schlusspunkt oder -leerzeichen und das laufwerksrelative `\repo` werden abgewiesen wie jeder Alias (die erste Fassung schickte den Wert durch `abspath()` und akzeptierte sie alle — gefunden vom Abschluss-Review, nicht von den Tests). Ein relativer Wert, `.`, ein leerer Wert oder jeder UNC-/Gerätepfad (`\\srv\share`, `//srv/share`, `\\?\…`) wird abgewiesen, bevor überhaupt das Dateisystem angefasst wird. Ein verbundenes Netzlaufwerk wird nicht als Netzpfad erkannt — ein akzeptiertes Restrisiko. Die Kopfzeile des Wrappers nennt jetzt immer das Verzeichnis, in dem er tatsächlich lief:
 
 ```
-# codex read-only | exec (new) | gpt-6-sol/medium | timeout 600s | wrapper 2.6.0
+# codex read-only | exec (new) | gpt-6.1-sol/medium | timeout 600s | wrapper 2.6.1
 #   cwd: D:\…\throwaway-repo   (git repo)
-#   codex-cli 0.156.0
+#   codex-cli 0.162.1
 ```
 
 Der einzige unterstützte Weg, einen Review auf ein gewähltes Repo zu richten, ist eine Sitzung, die **in genau diesem Verzeichnis startet** — ein `cd` mitten in der Sitzung hält zwischen Werkzeugaufrufen nicht, und der Guard verweigert den einen Aufruf, der beides verbinden würde (gemessen, siehe [`docs/audit/2026-09-11-scope.md`](./docs/audit/2026-09-11-scope.md)). Die Skills nehmen dafür `target=<absoluter Pfad>` entgegen und fragen nach, wenn es fehlt — nie aus `$PWD` abgeleitet; `--expect-workdir "$TARGET"` ist das Netz unter dieser Disziplin, kein Ersatz dafür:

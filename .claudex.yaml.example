@@ -15,12 +15,12 @@ roles:
 
 actors:
   codex:
-    model: gpt-6-sol       # replaced gpt-5.6-terra on 2026-09-22; ~4:48 min per real plan round
+    model: gpt-6.1-sol     # 2026-10-10: gpt-6-sol superseded by gpt-6.1-sol, measured on codex-cli 0.162.1
     effort: medium
     sandbox: read-only     # the ONLY accepted value; anything else is refused outright
     roles:                 # per-role model/effort; the sandbox cannot be overridden here
       exposure-review:
-        model: gpt-6-sol   # same as the actor today; its own entry so it can differ again
+        model: gpt-6.1-sol # same as the actor today; its own entry so it can differ again
         effort: medium
   claude:
     fresh_subagent: true   # as a reviewer, never the orchestrator that built it

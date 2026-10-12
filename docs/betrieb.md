@@ -111,9 +111,9 @@ wo man startet: die Pfadeinsperrung des Wrappers (read/write roots) hängt am
 dieses cwd immer:
 
 ```
-# codex read-only | exec (new) | gpt-6-sol/medium | timeout 600s | wrapper 2.6.0
+# codex read-only | exec (new) | gpt-6.1-sol/medium | timeout 600s | wrapper 2.6.1
 #   cwd: D:\…\wegwerf-repo   (git repo)          <- oder "(kein git repo)"
-#   codex-cli 0.156.0                             <- mit "(measured against …)" bei Abweichung
+#   codex-cli 0.162.1                             <- mit "(measured against …)" bei Abweichung
 ```
 
 Greenfield (noch kein Repo): einfach loslegen, der Wrapper warnt nur; `git init` ist
@@ -219,8 +219,9 @@ dafür einen Detektor mit (Schritt 0).
 
 ## 3. Modell, Abschottung und MCP
 
-**Modell: `gpt-6-sol`/`medium` für jede Codex-Rolle** (seit 30.09.2026; `gpt-5.6-terra` wurde
-am 22.09.2026 durch `gpt-6-sol` abgelöst). Gemessen auf codex-cli 0.156.0: eine echte
+**Modell: `gpt-6.1-sol`/`medium` für jede Codex-Rolle** (seit 11.10.2026; `gpt-6-sol` wurde am 10.10.2026 durch
+`gpt-6.1-sol` abgelöst, gemessen auf codex-cli 0.162.1 — ein Befehl lief wirklich; davor
+`gpt-5.6-terra` → `gpt-6-sol` am 22.09.2026). Mit `gpt-6-sol` gemessen auf codex-cli 0.156.0: eine echte
 Plan-Review-Runde ≈ **4:48 min** mit 48 Befehlen — innerhalb des 600-s-Timeouts. Modell und
 Effort kommen aus `claudex_roles.py --spec <rolle>`, nie aus dem Skill. ⛔ codex-cli 0.149.1
 beantwortet `gpt-6-sol` bei jedem Aufruf mit HTTP 400; der Wrapper weist das vorab mit Exit 2
@@ -270,6 +271,9 @@ Modell, Effort) gelten weiter. Upstream: chaseai-yt/claudex-loop#28 und #18.
 | `realtime_conversation` | abgeschaltet |
 | `in_app_local_automation` | abgeschaltet |
 | `worktrees` | abgeschaltet |
+| `browser_annotation_api` | abgeschaltet (neu in 0.162.1, Browser-Familie) |
+| `daemon_auto_start` | abgeschaltet (neu in 0.162.1, Hintergrundprozess) |
+| `in_app_voice` | abgeschaltet (neu in 0.162.1, Sprachdialog wie `realtime_conversation`) |
 
 | Feature | im Wrapper |
 |---|---|
@@ -293,6 +297,19 @@ Modell, Effort) gelten weiter. Upstream: chaseai-yt/claudex-loop#28 und #18.
 | `in_app_chat` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
 | `in_app_dictation` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
 | `in_app_updates` | bleibt an (Shell, Ausgabe, App-Oberfläche) |
+| `ultrafast_mode` | bleibt an (neu in 0.162.1, Geschwindigkeitsmodus wie `fast_mode`) |
+| `api_key_model_discovery` | bleibt an (neu in 0.162.1, Modellauflösung) |
+| `write_stdin_approval` | bleibt an (neu in 0.162.1, Freigabe-Sperre wie `guardian_approval` — abschalten nähme Schutz weg) |
+
+**Neu in 0.162.1 — drei eingebaute MCP-Ressourcen-Werkzeuge** (gemessen 12.10.2026, Wrapper
+2.6.1): innerhalb von `functions.exec` stehen jetzt neben `apply_patch`, `exec_command`,
+`view_image`, `write_stdin` und `clock__curr_time` auch `list_mcp_resources`,
+`list_mcp_resource_templates` und `read_mcp_resource` — im Haupt-Lauf, im Sub-Agenten und nach
+Resume. Kein Feature-Schalter entfernt sie. Sie sind leer: unter `--ignore-user-config` ist kein
+MCP-Server definiert, beide Listen-Aufrufe antworteten `{"resources":[]}` bzw.
+`{"resourceTemplates":[]}`, und eine Projekt-`.codex/config.toml`, die Server definieren könnte,
+weist der Wrapper mit Exit 2 ab. Bei jedem Heben wird deshalb geprüft, dass beide Listen leer
+bleiben; ist eine nicht leer, blockiert das wie ein nicht eingeordnetes Feature.
 
 Beim **Heben der CLI** (§8) wird `codex features list` gegen beide Tabellen gelegt: ein
 Feature, das stable und `true` ist und in keiner steht, blockiert das Anheben der Messversion,
@@ -361,7 +378,7 @@ Frage, wie viele Funde man begründet zurückweisen konnte.
 
 | | |
 |---|---|
-| `codex --version` | muss eine Version **ausgeben**; gefordert ≥ 0.156.0 (für `gpt-6-sol`), gemessen mit 0.156.0 — die Wrapper-Kopfzeile zeigt die gefundene |
+| `codex --version` | muss eine Version **ausgeben**; gefordert ≥ 0.162.1 (für `gpt-6.1-sol`; `gpt-6-sol` ≥ 0.156.0), Wrapper vollständig gemessen mit 0.162.1 (`MEASURED_CODEX_CLI`, gehoben 12.10.2026) — die Wrapper-Kopfzeile zeigt die gefundene |
 | `codex login status` | `Logged in using ChatGPT` (Abo, **kein** API-Key) |
 | Python | 3.10+ für Wrapper, Drift-Prüfung und Hook |
 | Plugin | `claudex-loop@claudex-loop`, enabled |
@@ -507,11 +524,11 @@ fehlende Plan-Schritte (`DOD: INCOMPLETE | SECURITY: FAIL`, 3 Befunde).
 ## 8. Codex heben — Vorgang mit Nachmessung
 
 Jede Garantie des Wrappers ist eine Messung gegen eine bestimmte CLI-Version
-(`MEASURED_CODEX_CLI` = `0.156.0`, dieselbe Zahl steht in genau einer markierten Zeile
+(`MEASURED_CODEX_CLI` = `0.162.1`, dieselbe Zahl steht in genau einer markierten Zeile
 des Modul-Docstrings). Die CLI hebt sich nicht selbst, und sie wird **nie** ungepinnt gehoben:
 
 ```bash
-npm install -g @openai/codex@0.156.0
+npm install -g @openai/codex@0.162.1
 ```
 
 (mit der neuen, benannten Version statt der Messversion). Danach zwei Stufen:

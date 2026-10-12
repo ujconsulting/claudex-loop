@@ -100,7 +100,7 @@ roles:
   plan-review: codex    # Dual draft:  plan: [claude, codex] + plan-review: cross
   build: claude
   code-review: codex
-  exposure-review: codex   # second grader of build — gpt-6-sol/medium by default, see ROLES.md
+  exposure-review: codex   # second grader of build — gpt-6.1-sol/medium by default, see ROLES.md
   docs: claude
   docs-review: codex
   audit: codex
@@ -179,6 +179,10 @@ Everything is written up with its verification in
 the findings that were **rejected**, and where a reviewer's advice was deliberately not
 followed.
 
+## Upgrading to 2.6.1 — gpt-6.1-sol, codex-cli 0.162.1
+
+2.6.1 changes the default model from `gpt-6-sol` to `gpt-6.1-sol` (effort stays `medium`), in the wrapper and in `claudex_roles.py`. **It needs codex-cli ≥ 0.162.1**; on 0.156.0 `gpt-6.1-sol` was answered with HTTP 400 (2026-10-10), and the wrapper refuses it on any older CLI (exit 2). `gpt-6-sol` keeps its own minimum (0.156.0) for anyone who pins it in `.claudex.yaml`. The wrapper is now measured against codex-cli 0.162.1 (preflight and acceptance of docs/betrieb.md section 8 passed 2026-10-12, log in `docs/plans/2026-10-11-gpt-6.1-sol-wrapper-2.6.1/`): six new default-on features are classified (`browser_annotation_api`, `daemon_auto_start`, `in_app_voice` switched off; `ultrafast_mode`, `api_key_model_discovery`, `write_stdin_approval` stay on), and three built-in MCP resource tools that 0.162.1 adds are measured empty under the isolation. The blind probe still ends in exit 3. Raise the CLI first (`npm install -g @openai/codex@0.162.1`), then update the copies of `tools/codex_ro.py`.
+
 ## Upgrading to 2.6.0 — Codex 0.156.0, gpt-6-sol, an isolated reviewer
 
 `gpt-5.6-terra` was superseded by `gpt-6-sol` on 2026-09-22; every Codex role now defaults to
@@ -186,7 +190,7 @@ followed.
 `gpt-6-sol` with HTTP 400 on every call**, so the CLI comes first:
 
 ```bash
-npm install -g @openai/codex@0.156.0
+npm install -g @openai/codex@0.156.0   # 2.6.0, 2026-09-30 (today: see 2.6.1 above)
 ```
 
 **What stops on purpose:**
@@ -360,13 +364,13 @@ with everything in place.
 
 ## Prerequisites
 
-- **Codex CLI ≥ 0.156.0** — `npm install -g @openai/codex@0.156.0`, a named version, never an
-  unpinned latest. `gpt-6-sol` is HTTP 400 on older CLIs, and the wrapper refuses it there up
+- **Codex CLI ≥ 0.162.1** (2026-10-11) — `npm install -g @openai/codex@0.162.1`, a named version, never an
+  unpinned latest. `gpt-6.1-sol` needs it (`gpt-6-sol` ≥ 0.156.0); older CLIs answer with HTTP 400, and the wrapper refuses it there up
   front; its header shows the version it found. On Windows, Codex 0.147 and later also needs
   wrapper **2.4.0 or newer**, or the reviewer silently reads nothing (see [Safety](#safety)).
 - **Authenticated** — `codex login` once (any ChatGPT account: Free/Plus/Pro/Max)
 - **Model and effort come from the roles, not from your Codex config** —
-  `python scripts/claudex_roles.py --spec <role>` resolves them (`gpt-6-sol/medium` for
+  `python scripts/claudex_roles.py --spec <role>` resolves them (`gpt-6.1-sol/medium` for
   every reviewing role, the exposure pass included) and the review skills
   pass them to the wrapper; override per role in `.claudex.yaml` ([ROLES.md](ROLES.md)).
   Only `build`, when Codex builds, runs on your config default. Avoid the
@@ -400,8 +404,8 @@ with everything in place.
 
 Pass e.g. `rounds=3` when invoking to override.
 
-⛔ **Why `gpt-6-sol`/`medium`:** it superseded `gpt-5.6-terra` on 2026-09-22, and a real
-plan-review round took ~4:48 min on codex-cli 0.156.0 — inside the 600 s timeout. (The
+⛔ **Why `gpt-6.1-sol`/`medium`:** it superseded `gpt-6-sol` on 2026-10-10 (measured on codex-cli 0.162.1: a read-only call really executed a command). `gpt-6-sol` had superseded `gpt-5.6-terra` on 2026-09-22, and a real
+plan-review round took ~4:48 min with it on codex-cli 0.156.0 — inside the 600 s timeout. (The
 earlier pin to `terra` existed because on 2026-08-30 `gpt-5.6-sol` at high effort ran into
 that ceiling.) A pin works fine under ChatGPT auth — only the older `*-codex` slugs are rejected.
 
@@ -441,9 +445,9 @@ Path arguments are confined, and **write targets more tightly than reads**: the 
 **`--expect-workdir DIR`: the scope is asserted, never selected.** The working directory decides more than what gets reviewed — it decides which `AGENTS.md` Codex loads into the prompt unasked, so it is itself an egress parameter, and until 2.5.0 nothing displayed it. Incident 2026-09-11: eight review rounds ran with the wrapper's cwd in a production documentation repo instead of the intended throwaway one, and nothing said so. `DIR` must be an **absolute** path; the wrapper compares it against its own working directory and refuses — exit 2 — on any difference, before Codex is located, before any file is created, and before the previous round's verdict file is deleted. It is an **ASSERTION, not a SELECTOR**: it can only refuse, it never changes where Codex runs (default: unset, behaviour as in 2.4.0). Every other spelling of the same place is refused on purpose — a symlink or junction alias, an 8.3 short name, a `subst`/mapped-drive alias, a working directory itself reached through a link. The value is compared **as typed**: case and slash direction (Windows) and one trailing separator are the only tolerance, so `<cwd>\sub\..`, a trailing dot or space and a drive-rooted `\repo` are refused like any alias (the first build ran the value through `abspath()` and accepted all of them — found by the closing review gate, not by the tests). A relative value, `.`, an empty value, or any UNC/device path (`\\srv\share`, `//srv/share`, `\\?\…`) is refused before the filesystem is touched at all. A mapped network drive is not recognised as a network path — an accepted residual risk. The wrapper's header now always names the directory it actually ran in:
 
 ```
-# codex read-only | exec (new) | gpt-6-sol/medium | timeout 600s | wrapper 2.6.0
+# codex read-only | exec (new) | gpt-6.1-sol/medium | timeout 600s | wrapper 2.6.1
 #   cwd: D:\…\throwaway-repo   (git repo)
-#   codex-cli 0.156.0
+#   codex-cli 0.162.1
 ```
 
 The only supported way to point a review at a chosen repo is a session **started** in that directory — a `cd` mid-session does not persist between tool calls, and the guard denies the one call that would combine both (measured, see [`docs/audit/2026-09-11-scope.md`](./docs/audit/2026-09-11-scope.md)). The skills take `target=<absolute path>` for this and ask when it is missing, never deriving it from `$PWD`; `--expect-workdir "$TARGET"` is the net under that discipline, not a replacement for it:

@@ -33,7 +33,7 @@ SLUG_WARNING = re.compile(r"-codex\b|\*-codex|gpt-5\.x")
 MODEL_LINE = re.compile(r"""\bmodel\s*[:=]\s*["']?(gpt-[\w.\-]+)""")
 SPEC_LINE = re.compile(r"model=(gpt-[\w.\-]+)\s+effort=(\w+)")
 HEADER_LINE = re.compile(r"\|\s*(gpt-[\w.\-]+)/(\w+)\s*\|\s*timeout")
-MIN_CLI = re.compile(r"(?:≥|>=)\s*0\.(\d{3})(?:\.\d+)?")
+MIN_CLI = re.compile(r"(?:≥|>=)\s*(0\.\d{3}(?:\.\d+)?)")
 INSTALL = re.compile(r"@openai/codex@([\w.\-]+)")
 
 
@@ -84,7 +84,8 @@ class StructuredDefaultsTests(unittest.TestCase):
                 continue
             for found in MIN_CLI.findall(line):
                 with self.subTest(file=f"{path.parent.name}/{path.name}", line=number):
-                    self.assertEqual(f"0.{found}.0", minimum, line.strip())
+                    full = found if found.count(".") == 2 else found + ".0"
+                    self.assertEqual(full, minimum, line.strip())
 
 
 class ResolverPathTests(unittest.TestCase):

@@ -28,6 +28,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import codex_ro  # noqa: E402
 
 
+# These tests replay codex-cli 0.156.0 recordings (tests/fixtures/codex-0.156/). The default
+# model gpt-6.1-sol needs codex-cli >= 0.162.1 (MODEL_MIN_CLI) and would be refused before
+# the run, so the classes that drive main() pin the model those recordings belong to.
+PIN_RECORDED_MODEL = unittest.mock.patch.object(codex_ro, "DEFAULT_MODEL", "gpt-6-sol")
+
+
 class ConfigOverrideTests(unittest.TestCase):
     """The wrapper's whole reason to exist: no override may touch the sandbox."""
 
@@ -1325,6 +1331,7 @@ class ResolveInRootsCwdFailureTests(unittest.TestCase):
             )
 
 
+@PIN_RECORDED_MODEL
 class ExpectWorkdirMainIntegrationTests(unittest.TestCase):
     """--expect-workdir wired through main(): header, allowed_roots, out-file
     survival, the whole ordering. Codex itself never starts here -- find_codex
@@ -1485,6 +1492,7 @@ class ExpectWorkdirMainIntegrationTests(unittest.TestCase):
             self._assert_no_bare_exception(["--prompt", "x", "--out-file", "relative-out.txt"])
 
 
+@PIN_RECORDED_MODEL
 class ExpectWorkdirRegressionTests(unittest.TestCase):
     """R1/R2: hold today already (no --expect-workdir logic to speak of yet for
     R1's shape), listed as regression per CLAUDE.md rule 6, not "first red"."""

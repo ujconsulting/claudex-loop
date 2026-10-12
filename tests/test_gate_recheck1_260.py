@@ -29,6 +29,12 @@ REFUSAL = ("2026-09-30T08:27:13Z ERROR codex_core::tools::router: error=exec_com
            "CreateProcess { message: \"Rejected(`pwsh` rejected: blocked by policy)\" }\n")
 
 
+# These tests replay codex-cli 0.156.0 recordings (tests/fixtures/codex-0.156/). The default
+# model gpt-6.1-sol needs codex-cli >= 0.162.1 (MODEL_MIN_CLI) and would be refused before
+# the run, so the classes that drive main() pin the model those recordings belong to.
+PIN_RECORDED_MODEL = unittest.mock.patch.object(codex_ro, "DEFAULT_MODEL", "gpt-6-sol")
+
+
 class _InDir:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -174,6 +180,7 @@ class OverlapTests(unittest.TestCase):
             self.assertEqual([p for p in dest.parent.iterdir() if p.name.startswith(".claudex-")], [])
 
 
+@PIN_RECORDED_MODEL
 class BoundedReadsThroughMainTests(_InDir, unittest.TestCase):
     """TESTS 3: J-T16 end to end -- every read of the stream is bounded, through main()."""
 

@@ -60,6 +60,12 @@ def CMD(exit_code=0, status="completed"):
 COLLAB = _line({"type": "item.completed", "item": {"id": "i2", "type": "collab_tool_call"}})
 
 
+# These tests replay codex-cli 0.156.0 recordings (tests/fixtures/codex-0.156/). The default
+# model gpt-6.1-sol needs codex-cli >= 0.162.1 (MODEL_MIN_CLI) and would be refused before
+# the run, so the classes that drive main() pin the model those recordings belong to.
+PIN_RECORDED_MODEL = unittest.mock.patch.object(codex_ro, "DEFAULT_MODEL", "gpt-6-sol")
+
+
 class _Dir:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -350,8 +356,8 @@ class MeasuredVersionTests(unittest.TestCase):
         self.assertNotIn("@openai/codex@latest", source)
 
     def test_version_and_defaults(self):
-        self.assertEqual(codex_ro.WRAPPER_VERSION, "2.6.0")
-        self.assertEqual(codex_ro.DEFAULT_MODEL, "gpt-6-sol")
+        self.assertEqual(codex_ro.WRAPPER_VERSION, "2.6.1")
+        self.assertEqual(codex_ro.DEFAULT_MODEL, "gpt-6.1-sol")
         self.assertEqual(codex_ro.parse_args(["--prompt", "x", "--out-file", "o"]).effort, "medium")
 
 
@@ -577,6 +583,74 @@ class _Run:
         return False
 
 
+class DefaultModelMainTests(_Dir, unittest.TestCase):
+    """Wrapper 2.6.1: the NEW default end to end, without the recording pin. gpt-6.1-sol
+    needs codex-cli >= 0.162.1 (measured 2026-10-11; 0.156.0 answered HTTP 400)."""
+
+    def setUp(self):
+        super().setUp()
+        self.previous = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, self.previous)
+
+    def _main(self, *extra):
+        return codex_ro.main(["--prompt", "review this", "--out-file", "o.txt", *extra])
+
+    def _model_and_effort(self, cmd):
+        i = cmd.index("-m")
+        return cmd[i + 1], cmd[i + 3]
+
+    def test_a_default_exec_passes_the_new_model_on_the_measured_cli(self):
+        with _Run(version="0.162.1") as run:
+            self.assertEqual(self._main(), 0)
+        self.assertEqual(self._model_and_effort(run.calls[-1]),
+                         ("gpt-6.1-sol", "model_reasoning_effort=medium"))
+
+    def test_a_default_resume_passes_the_new_model_too(self):
+        with _Run(version="0.162.1") as run:
+            self.assertEqual(self._main("--resume", "01a00000-0000-7000-8000-000000000000"), 0)
+        cmd = run.calls[-1]
+        self.assertIn("resume", cmd)
+        self.assertEqual(self._model_and_effort(cmd), ("gpt-6.1-sol", "model_reasoning_effort=medium"))
+
+    def test_an_older_prerelease_or_unreadable_cli_refuses_before_anything_exists(self):
+        for version in ("0.156.0", "0.162.0", "0.162.1-alpha.1", None):
+            with self.subTest(version=version):
+                with _Run(version=version) as run:
+                    with self.assertRaises(SystemExit) as caught:
+                        self._main()
+                self.assertEqual(caught.exception.code, codex_ro.EXIT_REFUSED)
+                self.assertEqual(run.calls, [])
+                self.assertFalse((self.dir / "o.txt").exists())
+                self.assertFalse((self.dir / "o.txt.stream.json").exists())
+
+    def test_the_refusal_names_the_install_line_of_the_new_minimum(self):
+        err = io.StringIO()
+        with unittest.mock.patch.object(sys, "stderr", err), self.assertRaises(SystemExit):
+            codex_ro.check_model_cli("gpt-6.1-sol", "0.156.0")
+        self.assertIn("npm install -g @openai/codex@0.162.1", err.getvalue())
+
+    def test_the_real_0_162_blind_run_is_exit_3_with_the_new_default(self):
+        """Blind probe of 2026-10-12 (own CODEX_HOME without [windows]): the refusal is only in
+        stderr, the stream has no command -- the wrapper must still call that exit 3."""
+        fixtures = Path(__file__).resolve().parent / "fixtures" / "codex-0.162"
+        stream = (fixtures / "blind-run.stream.json").read_text(encoding="utf-8")
+        stderr = (fixtures / "blind-run.stderr.txt").read_text(encoding="utf-8")
+        with _Run(stream=stream, stderr=stderr, answer="Command blocked by policy.\n", version="0.162.1"):
+            self.assertEqual(self._main(), codex_ro.EXIT_BLIND)
+
+    def test_the_real_0_162_normal_run_passes_with_the_new_default(self):
+        fixtures = Path(__file__).resolve().parent / "fixtures" / "codex-0.162"
+        stream = (fixtures / "normal-run.stream.json").read_text(encoding="utf-8")
+        with _Run(stream=stream, version="0.162.1"):
+            self.assertEqual(self._main(), 0)
+
+    def test_the_table_carries_both_measured_minimums(self):
+        self.assertEqual(codex_ro.MODEL_MIN_CLI,
+                         {"gpt-6-sol": "0.156.0", "gpt-6.1-sol": "0.162.1"})
+
+
+@PIN_RECORDED_MODEL
 class MainTests(_Dir, unittest.TestCase):
     def setUp(self):
         super().setUp()

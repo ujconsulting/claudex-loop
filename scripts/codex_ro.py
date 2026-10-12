@@ -100,9 +100,11 @@ of that plan's review)
         samefile(), the same accepted residual risk as allowed_roots() above
 
 WHAT 2.6.0 CHANGED (2026-09-30, plan docs/plans/2026-09-23-codex-heben-wrapper-2.6.0)
-    Currently measured against codex-cli 0.156.0 -- the one marked line the
+    Currently measured against codex-cli 0.162.1 -- the one marked line the
     tests hold MEASURED_CODEX_CLI to; the dated measurements elsewhere in this
-    file (0.147.0, 0.149.1) are history and stay as they were.
+    file (0.147.0, 0.149.1, 0.156.0) are history and stay as they were. Raised
+    2026-10-12 with wrapper 2.6.1 after preflight and acceptance in docs/betrieb.md
+    section 8 (docs/plans/2026-10-11-gpt-6.1-sol-wrapper-2.6.1).
 
     - The reviewer is isolated from everything but the shell. `--ignore-user-config`
       and `--ignore-rules`, `web_search="disabled"`, and `--disable` for every
@@ -201,25 +203,29 @@ import threading
 import time
 from pathlib import Path
 
-WRAPPER_VERSION = "2.6.0"
+WRAPPER_VERSION = "2.6.1"
 
-# gpt-5.6-terra was superseded by gpt-6-sol (released 2026-09-22). Measured on
-# codex-cli 0.156.0: a real plan-review round took ~4:48 min at `medium`, well
-# inside the default timeout. The role config (claudex_roles.py --spec) decides
-# what a skill passes; this default only covers a bare call.
-DEFAULT_MODEL = "gpt-6-sol"
+# gpt-5.6-terra was superseded by gpt-6-sol (released 2026-09-22); gpt-6-sol was
+# in turn superseded by gpt-6.1-sol (2026-10-10/11, measured on codex-cli 0.162.1:
+# a read-only call really executed a command). The earlier plan-review round
+# time of ~4:48 min at `medium` was measured with gpt-6-sol on 0.156.0. The role
+# config (claudex_roles.py --spec) decides what a skill passes; this default only
+# covers a bare call.
+DEFAULT_MODEL = "gpt-6.1-sol"
 DEFAULT_EFFORT = "medium"
 EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
 
 # The codex-cli version every guarantee in this file was last measured against.
 # Held equal to the one marked docstring line by a test; raised only after the
 # positive controls in docs/betrieb.md ("Codex heben") pass on the new version.
-MEASURED_CODEX_CLI = "0.156.0"
+MEASURED_CODEX_CLI = "0.162.1"
 
 # Models the installed CLI must be at least this new for. `gpt-6-sol` on 0.149.1
 # is HTTP 400 "not supported when using Codex with a ChatGPT account" on every
 # call (measured 2026-09-22) -- refusing up front names the fix instead.
-MODEL_MIN_CLI = {"gpt-6-sol": "0.156.0"}
+# gpt-6.1-sol: minimum 0.162.1, the version it was measured on (2026-10-10/11);
+# 0.156.0 answered it with HTTP 400 on 2026-10-10.
+MODEL_MIN_CLI = {"gpt-6-sol": "0.156.0", "gpt-6.1-sol": "0.162.1"}
 
 # ⛔ Read-only pins the SHELL. Everything else Codex can load runs beside it:
 # MCP servers from the user config or a trusted project's `.codex/config.toml`,
@@ -261,6 +267,11 @@ ISOLATION_DISABLE = (
     "realtime_conversation",
     "in_app_local_automation",
     "worktrees",
+    # New default-on in codex-cli 0.162.1 (classified 2026-10-12, wrapper 2.6.1): browser
+    # family, a background daemon, a voice conversation -- nothing a reviewer needs.
+    "browser_annotation_api",
+    "daemon_auto_start",
+    "in_app_voice",
 )
 # Default-on features that were looked at and are fine for a read-only reviewer:
 # the shell itself and its plumbing, output handling, desktop-app UI. Not passed
@@ -287,6 +298,12 @@ ISOLATION_ALLOWED = (
     "in_app_chat",
     "in_app_dictation",
     "in_app_updates",
+    # New default-on in codex-cli 0.162.1 (classified 2026-10-12, wrapper 2.6.1): a speed
+    # mode like fast_mode, model resolution plumbing, and an approval gate like
+    # guardian_approval -- switching that one off would remove a protection, not add one.
+    "ultrafast_mode",
+    "api_key_model_discovery",
+    "write_stdin_approval",
 )
 
 # Every output of a run is locked by a sibling file with this suffix.
