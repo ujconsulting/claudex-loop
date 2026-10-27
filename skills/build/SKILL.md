@@ -138,10 +138,31 @@ OUTPUT: End with a report — files changed (one line each: path + what/why),
 EOF
 ```
 
-## Step 2 — Launch Codex (fresh session, capture `thread_id`)
+## Step 2 — Isolate, then launch Codex (fresh session, capture `thread_id`)
+
+⛔ **The builder gets the shell and the files, nothing that acts elsewhere.** `--yolo`
+means no sandbox and no approvals, so every MCP server, plugin, app, hook and
+computer/browser control the user configured for Codex would run with it, unprompted.
+Measured on 2026-10-27 (codex-cli 0.162.1): a plain build here would have loaded
+`n8n`, `node_repl`, `codex_app` and `cua_repl`. Upstream found the same gap in its
+runner ([#43](https://github.com/chaseai-yt/claudex-loop/issues/43),
+[#45](https://github.com/chaseai-yt/claudex-loop/pull/45)).
 
 ```bash
-codex exec --yolo --json -o "$SCRATCH_DIR/codex-build-r$ROUND.txt" - <"$P" \
+python "${CLAUDE_PLUGIN_ROOT}/scripts/build_isolation.py" >"$SCRATCH_DIR/build-isolation.txt" \
+  2>"$SCRATCH_DIR/build-isolation-stderr.txt"
+mapfile -t ISO <"$SCRATCH_DIR/build-isolation.txt"
+```
+
+**A non-zero exit means stop** — it printed no flags because it could not trust the
+MCP listing; read the stderr file and tell the user. Never launch without `"${ISO[@]}"`.
+It switches off every enabled MCP server by name, plus apps, plugins, hooks,
+computer and browser control and `notify`; image generation and the model from
+`~/.codex/config.toml` stay. A build that genuinely needs one MCP server gets
+`--allow-mcp <name>` — say so at kickoff and log it under `## Act 3 — Build`.
+
+```bash
+codex exec --yolo "${ISO[@]}" --json -o "$SCRATCH_DIR/codex-build-r$ROUND.txt" - <"$P" \
   2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" | grep '"type":"thread.started"'
 ```
 
@@ -174,7 +195,8 @@ P2=$(mktemp "$SCRATCH_DIR/fix-prompt.XXXXXX")
 
 # resume has no --yolo and no -C: run from the repo dir and spell the long flag,
 # or Codex inherits config.toml's sandbox (possibly read-only) and can't write.
-codex exec resume "$THREAD_ID" --dangerously-bypass-approvals-and-sandbox --json \
+# The isolation is per process, not per thread: pass the SAME "${ISO[@]}" again.
+codex exec resume "$THREAD_ID" --dangerously-bypass-approvals-and-sandbox "${ISO[@]}" --json \
   -o "$SCRATCH_DIR/codex-build-r$ROUND.txt" - <"$P2" \
   2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" >/dev/null
 ```

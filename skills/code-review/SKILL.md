@@ -53,6 +53,7 @@ Reference: `ROLES.md`.
 | `BASELINE_FILE` | newest `docs/audit/*-baseline.md`, else none | Known pre-existing debt from an `audit` run. Everything listed there is NOT this change's fault: raise it again only where the change makes it worse or touches that code. Without this, every review of a legacy repo re-litigates the same findings and the real ones drown. |
 | `EXPOSURE` | `auto` | `auto` = classify the diff (Step 1, item 6); `yes` = run the exposure pass regardless; `no` = an explicit, logged claim that nothing in the diff faces the network. `no` is refused when the classification says otherwise. |
 | `THIRD_REVIEWER` | `off` | An **optional** extra pass by a reviewer that is neither the producer nor the primary adversary. `off` (default) = this gate is Codex-only and complete as it stands. `coderabbit` = additionally run the CodeRabbit CLI over the same diff and fold its findings into Step 3's arbitration. Anything else is refused rather than guessed at. |
+| `SECURITY_PREFILTER` | `on` | With `security` in `scope`: run Claude Code's `security-review` over the change **before** Codex is asked (Step 0). Advisory only — see there. `off` skips it, logged. |
 | `EXPOSURE_FILES` | from classification | Comma-list of the exposed files/components to hand the exposure pass in full. Pass it when the auto-list is wrong; the log records both. |
 
 | `SCRATCH_DIR` | harness scratchpad, else `<repo>/.claudex-tmp/` | Disposable staging for the assembled prompt, the `-o` capture and stderr. ⛔ Never `/tmp`. |
@@ -109,6 +110,30 @@ and rerun. ⛔ Never drop the flag to make the error go away.
 <!-- claudex-target:end -->
 
 ## Flow
+
+### Step 0 — Security pre-filter (same provider, advisory, before Codex)
+
+Only when `scope` contains `security` and `SECURITY_PREFILTER` is `on`. Invoke Claude
+Code's built-in skill `security-review` over the change (it reviews the pending
+changes of the current branch against `BASE_REF`). It is cheap, and it clears the
+obvious — a hard-coded key, an unquoted shell argument, a missing auth check —
+before Codex quota and rechecks are spent on it.
+
+⛔ **It filters; it does not grade.** When Claude built the change, this is the maker
+looking at its own work, which is exactly what the doctrine forbids as a verdict:
+
+- It is **never a `SECURITY` verdict** and **never counts as a pass**. "No findings"
+  is not evidence of anything; the Codex pass below runs in full regardless.
+- Log it the moment it returns: `## Security pre-filter (security-review, same
+  provider, advisory)` + its report verbatim + Claude's dispositions (`accepted →
+  <what changed>` / `rejected → <why>`). Fix the accepted ones **now**, so Step 1
+  assembles the diff with the fixes in it.
+- Its findings are **not shown to the reviewer** — not in the verify prompt, not in
+  a recheck. Codex reads the change cold; handed the maker's list, it would check
+  that list instead of the change.
+- Not available (another host, the skill missing) or `SECURITY_PREFILTER=off`: log
+  `## Security pre-filter — skipped (<reason>)` and go on. A skipped pre-filter costs
+  nothing but the head start; it never blocks the gate.
 
 ### Step 1 — Assemble the evidence (Claude, no user input needed)
 
@@ -524,6 +549,8 @@ gate, and leave the marker on `pending`.
 
 - Fresh session for the initial pass — never reuse the plan-review or build
   thread; rechecks resume the verify thread only.
+- The `security-review` pre-filter (Step 0) is advisory: it never sets or replaces the
+  `SECURITY` verdict, and its findings never reach the Codex prompt.
 - Codex is read-only every call (`-s read-only`; resume: `-c sandbox_mode="read-only"`).
 - Diff and spec go INLINE in the prompt; repo access is context, not the
   delivery mechanism.

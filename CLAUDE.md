@@ -14,6 +14,7 @@ automatically; read it before reviewing anything here.
 | `scripts/codex_ro.py` | The read-only wrapper. **Canonical copy** — repos receive it as `tools/codex_ro.py`, and `scripts/wrapper_drift.py` reports copies that fell behind. |
 | `scripts/claudex_roles.py` | Who produces and who grades. Two unswitchable gates. |
 | `scripts/fallback_review.py` | The reviewer chain when the Codex quota is out. The egress boundary. |
+| `scripts/build_isolation.py` | Isolation flags for the Codex build: every user MCP server off by name, apps, plugins, hooks, computer/browser control off. Fails closed. |
 | `hooks/wrapper_guard.py` | PreToolUse guard: an allowlisted wrapper call stays ONE command. |
 | `hooks/claudex-python.sh` | Interpreter shim. Denies wrapper calls when it cannot run the guard. |
 | `skills/*/SKILL.md` | The doctrine documents. **Executable** — a `bash` block is an instruction, not an illustration. |
@@ -83,6 +84,7 @@ covering them:
 | `tests` | Linux · macOS · Windows, Python 3.10 and 3.13 | `pytest` only |
 | `tests-without-pyyaml` | Linux | `pytest` with PyYAML proven absent |
 | `shell` · `workflows` · `secrets` | Linux only | shellcheck · actionlint · gitleaks |
+| `python-security` | Linux only | bandit (medium+ severity) · pip-audit (the frozen dev environment) |
 
 Windows is in the matrix because that is where this plugin is actually used and the
 wrapper carries Windows-specific code. `claudex_roles.py --explain` is **not** in CI —

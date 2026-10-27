@@ -84,6 +84,8 @@ Phase 3 closes with `code-review`, the acceptance gate on the finished diff — 
 
 `code-review` gained `docs` and `tests` because a gate that never asks "is this documented" and "would the tests fail if the code were wrong" leaves the two cheapest defects in place. Add them whenever the diff changes behaviour.
 
+With `security` in scope, Claude Code's own `security-review` runs first as a **pre-filter** (`SECURITY_PREFILTER=on`, since 2026-10-27): cheap, and it clears the obvious before Codex quota is spent. It never sets the `SECURITY` verdict and never counts as a pass — when Claude built the change it is the maker looking at its own work — and its findings are not shown to Codex, which reads the change cold.
+
 `audit` exists because `code-review` needs a diff and a plan, and an inherited repo has neither. It slices the repo, runs the deterministic tooling **first** so the model spends its attention where linters cannot reach, and produces a **baseline** — after which every later `code-review` only judges the delta instead of re-raising the same debt.
 
 `docs-backfill` writes what the gates found missing. Claude writes, a fresh read-only session grades: a generator that emits docstrings and ships them has nobody checking whether they are *true*, and a confidently wrong docstring is worse than a missing one.
@@ -429,6 +431,8 @@ Two gates decide *where* it writes, both from [upstream PR #12](https://github.c
 
 - **Codex's diff must be the only diff in the tree it builds in.** For the user's own uncommitted work that means commit or stash; for a parallel agent's live work it means a detached worktree, because stashing pulls work out from under a running session. Never "the subtree I care about is clean, so I'll launch anyway."
 - **A spec citing findings by absolute path escapes that worktree.** `D:\...\repo\src\foo.py:210` resolves to the *original* checkout, and a `--yolo` Codex edits it — the isolation is gone and nothing says so. The skill greps the spec for absolute paths and, when it finds any, names the forbidden prefixes literally in the prompt contract.
+
+**The builder gets the shell and the files, nothing that acts elsewhere** (since 2026-10-27). `--yolo` means no sandbox and no approvals, and until then every MCP server, plugin, app, hook and computer/browser control from the user's Codex config came with it — measured on one machine: `n8n`, `node_repl`, `codex_app` and `cua_repl`, all callable unprompted. [`scripts/build_isolation.py`](./scripts/build_isolation.py) now lists the enabled servers with `codex mcp list --json --disable apps --disable plugins`, switches each off by name, adds `--disable` for apps, plugins, hooks and computer/browser control plus `-c notify=[]`, and passes them to `exec` and `resume` alike. It prints nothing and exits 2 when the listing cannot be trusted, and the build does not start. Image generation and the model from `~/.codex/config.toml` stay; a build that needs one server gets `--allow-mcp <name>`, logged. Upstream found the same gap in its runner ([#43](https://github.com/chaseai-yt/claudex-loop/issues/43), [#45](https://github.com/chaseai-yt/claudex-loop/pull/45)).
 
 ### The read-only wrapper — and why it isn't enough on its own
 

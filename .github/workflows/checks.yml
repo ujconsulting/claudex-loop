@@ -95,6 +95,34 @@ jobs:
         with:
           args: -color
 
+  python-security:
+    # Deterministic security checks, added 2026-10-27. Measured locally before
+    # wiring them in, both directions:
+    #   bandit -ll   repo: exit 0 (12 LOW hits, all B404/B603/B607 -- the wrapper's
+    #                own subprocess calls, which are what it exists for; 0 MEDIUM+)
+    #                a file with yaml.load(): exit 1
+    #   pip-audit    the project's dev environment: no known vulnerabilities
+    #                pyyaml==5.3: exit 1 (PYSEC-2020-96, PYSEC-2021-142)
+    # The environment is frozen BEFORE the auditors are installed, so their own
+    # dependencies are not what gets judged.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip
+      - run: pip install ".[dev]"
+      - name: Freeze the project environment
+        run: pip freeze --exclude-editable | grep -vi '^claudex-loop' > "$RUNNER_TEMP/project-freeze.txt"
+      - run: pip install "bandit==1.9.4" "pip-audit==2.10.1"
+      - name: bandit (medium and high severity)
+        run: bandit -r scripts hooks -ll -q
+      - name: pip-audit (project dependencies)
+        run: pip-audit -r "$RUNNER_TEMP/project-freeze.txt" --no-deps --progress-spinner off
+
   secrets:
     runs-on: ubuntu-latest
     steps:
