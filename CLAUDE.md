@@ -14,6 +14,8 @@ automatically; read it before reviewing anything here.
 | `scripts/codex_ro.py` | The read-only wrapper. **Canonical copy** — repos receive it as `tools/codex_ro.py`, and `scripts/wrapper_drift.py` reports copies that fell behind. |
 | `scripts/claudex_roles.py` | Who produces and who grades. Two unswitchable gates. |
 | `scripts/fallback_review.py` | The reviewer chain when the Codex quota is out. The egress boundary. |
+| `agents/claudex-reader.md`, `agents/claudex-hunter.md` | Plugin agents for Claude reviewers (`Read, Grep, Glob`) and hunt analysts (no tools). Their `tools:` lines are measured boundaries — `tests/test_agents.py` holds them. |
+| `scripts/hunt_run.py` (+ `hunt_snapshot.py`, `redact_payload.py`, `verify_record.py`, `vendor_skill.py`, `hunt_io.py`) | The security hunt of `audit` Step 3c: pinned Cloudflare skill snapshot, frozen redacted input, cold bound verification, append-only ledger. `config/gitleaks.toml` is the plugin-owned scanner config. |
 | `scripts/build_isolation.py` | Isolation flags for the Codex build: every user MCP server off by name, apps, plugins, hooks, computer/browser control off. Fails closed. |
 | `hooks/wrapper_guard.py` | PreToolUse guard: an allowlisted wrapper call stays ONE command. |
 | `hooks/claudex-python.sh` | Interpreter shim. Denies wrapper calls when it cannot run the guard. |

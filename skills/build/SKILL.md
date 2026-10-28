@@ -25,6 +25,11 @@ assignment violates a gate (a maker set to grade its own work, or an adversary
 role with an open sandbox), and no run may start on it. Where this document says
 "Codex" or "Claude" below, read it as the resolved actor for that role.
 Reference: `ROLES.md`.
+
+When an adversary role resolves to `claude`, it runs as the plugin agent `claudex-reader` (`Read`, `Grep`, `Glob` only: no shell, no write, no network, no MCP
+connector) — never as a sub-agent with the session's tools. Measured 2026-10-27: a
+sub-agent without a tool list reached the session's write-capable claude.ai connectors
+through ToolSearch; `claudex-reader` reached none. See `ROLES.md`.
 ## Prerequisites (verify once, fast)
 
 - `codex --version` must actually PRINT a version, ≥ 0.162.1 for codex (the minimum for the
@@ -178,7 +183,9 @@ Codex's report is advisory — **and so is any QA, self-review or verification s
 
 Verify yourself:
 
-1. `git status -sb` + read the FULL diff (`git diff`). Judge it like a contributor PR: correctness, spec fidelity, style match with surrounding code, nothing touched outside scope.
+1. `git status -sb` + read the FULL diff with `git diff HEAD` — **not** plain `git diff`, which shows only unstaged changes and hides anything Codex staged (upstream [#18](https://github.com/chaseai-yt/claudex-loop/pull/18)). Untracked files from `git status` are read too. If `git diff --cached` is non-empty, Codex staged something although it must not commit: where index and working tree differ (`git diff --name-only` for those paths), the commit would carry the index. Decide which state you review: `git restore --staged <path>` puts the index back to **`HEAD`** (it does *not* copy the working tree), after which `git diff HEAD` shows the working-tree change alone; log which you did. Judge it like a contributor PR: correctness, spec fidelity, style match with surrounding code, nothing touched outside scope.
+
+   **Pin what you reviewed** (the same binding as the post-build inspection in `claudex-loop`): once the diff read is done, stage exactly the reviewed paths (`git add <path> …` — never `-A`), check that `git diff --name-only -- <those paths>` prints nothing, and record `git write-tree` as `REVIEWED_TREE` in `LOG_FILE`. Every fix round re-stages and re-pins.
 2. **Trace every changed test back to a spec line.** A green suite proves the code does what its tests say; it does not prove the tests were asked for. The failure mode to hunt is **unrequested code paired with a test asserting it** — that combination reads as verified and sails through a proof run. List the tests the diff added, and for each name the spec item it covers. A test with no spec line behind it is the tell: either Codex solved a problem the spec had already settled differently, or it invented a requirement. Both are findings.
 3. Run `PROOF_CMD` yourself (or the focused tests for the changed area). Codex's pasted output doesn't count as proof.
 4. **Read the "Deviations" section as a claim, not a summary.** `Deviations: None` is common on builds that did deviate — a spec step that turns out impossible gets quietly resolved the right way and never reported. Where the diff diverges from the spec text, decide whether the spec or the code was wrong, and log which.
@@ -212,6 +219,7 @@ Re-verify (Step 3) after each round. After `MAX_FIX_ROUNDS` failed rounds: STOP 
 Present: 3-bullet summary of what was built, files-changed list, proof-test output (pass/fail, verbatim tail), rounds used, any spec deviations. Ask: *"Codex built it, proof passes, diff reviewed. Commit?"*
 
 - Commit ONLY on yes — and Claude writes the commit, never Codex.
+- **Right before the commit:** `git diff --name-only -- <paths>` empty and `git write-tree` equal to the last `REVIEWED_TREE`. A different tree means something changed after the review — re-read it or show it at the gate as unreviewed; never commit it as reviewed.
 - Rejected → ask what's wrong, route back to Step 4 (or take over directly if fix rounds are spent).
 
 ## Hard rules

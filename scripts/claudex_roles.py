@@ -43,7 +43,21 @@ PAIRS = {
     "plan": ("plan-review",),
     "build": ("code-review", "exposure-review"),
     "docs": ("docs-review",),
+    # The security hunt (audit Step 3c, plan A of 2026-10-27): Claude analysts in the
+    # tool-less `claudex-hunter` agent produce findings, `security-verify` grades each one
+    # cold. Opt-in per config -- see HUNT_PAIR and hunt_configured().
+    "hunt": ("security-verify",),
 }
+# The hunt pair is OPTIONAL: it only counts when "hunt" holds write_access. A
+# .claudex.yaml written before 2026-10-27 that sets its own write_access list replaces
+# the default list on merge, so without this every such repo would fail every gate the
+# day the plugin updates. Instead the pair is simply "not configured" there, and only
+# the hunt roles refuse to resolve (tests/test_roles_hunt.py).
+HUNT_PAIR = "hunt"
+# The hunt runs in claudex-hunter agents, i.e. its producer IS Claude. A config that
+# names another actor would make producer_never_reviews compare against a role that is
+# not what actually executes.
+HUNT_ACTOR = "claude"
 PRODUCER_ROLES = tuple(PAIRS.keys())
 PAIRED_ADVERSARY_ROLES = tuple(r for rs in PAIRS.values() for r in rs)
 
@@ -68,6 +82,8 @@ DEFAULTS = {
         "docs": "claude",
         "docs-review": "codex",
         "audit": "codex",
+        "hunt": HUNT_ACTOR,
+        "security-verify": "codex",
     },
     "actors": {
         "codex": {
@@ -91,10 +107,37 @@ DEFAULTS = {
     },
     "rules": {
         "producer_never_reviews": True,
-        "write_access": ["plan", "build", "docs"],
+        "write_access": ["plan", "build", "docs", "hunt"],
         "adversary_read_only": True,
     },
 }
+
+
+HUNT_DECLARED = "_hunt_declared"
+
+
+def _hunt_missing(rules: dict) -> list[str]:
+    """What keeps the hunt pair switched off, in words a user can act on (closing gate C1:
+    the message used to blame write_access even when the role declarations were missing)."""
+    missing = []
+    if not rules.get(HUNT_DECLARED, True):
+        missing.append(f"the config file does not declare both '{HUNT_PAIR}' and "
+                       f"'{PAIRS[HUNT_PAIR][0]}' under roles")
+    if HUNT_PAIR not in (rules.get("write_access") or []):
+        missing.append(f"rules.write_access does not list '{HUNT_PAIR}'")
+    return missing
+
+
+def hunt_configured(rules: dict) -> bool:
+    """True when the optional hunt pair is part of this config (see HUNT_PAIR).
+
+    Two conditions: `hunt` holds write_access, AND -- when a config file was loaded --
+    that file names both hunt roles itself. A legacy file that overrides only some roles
+    inherits the new ones from DEFAULTS on merge; it must not get the hunt switched on by
+    that (inspection round 1, finding 18). The flag is computed in load(), never read
+    from the file.
+    """
+    return bool(rules.get(HUNT_DECLARED, True)) and HUNT_PAIR in (rules.get("write_access") or [])
 
 
 class ConfigError(Exception):
@@ -206,8 +249,16 @@ def _merge(base: dict, over: dict) -> dict:
 
 def load(start: Path | None = None) -> tuple[dict, Path | None]:
     path = find_config(start)
-    cfg = _merge(DEFAULTS, _load_yaml(path)) if path else dict(DEFAULTS)
+    raw = _load_yaml(path) if path else {}
+    cfg = _merge(DEFAULTS, raw) if path else dict(DEFAULTS)
     _validate_shape(cfg)
+    raw_roles = raw.get("roles") if isinstance(raw, dict) else None
+    declared = path is None or (isinstance(raw_roles, dict)
+                                and all(r in raw_roles for r in (HUNT_PAIR, *PAIRS[HUNT_PAIR])))
+    # Computed here and written over anything the file said: the subject of a review does
+    # not get to declare its own configuration state (finding 18).
+    cfg = dict(cfg)
+    cfg["rules"] = {**cfg.get("rules", {}), HUNT_DECLARED: declared}
     return cfg, path
 
 
@@ -267,6 +318,16 @@ def _validate_shape(cfg: dict) -> None:
                     f"second draft here to cross-check against"
                 )
             continue
+        if isinstance(roles[role], list):
+            # An empty list resolved to "no actor" and passed every gate; a list for a
+            # hunt role compared a string producer against a list reviewer and never
+            # matched (inspection round 2, finding 29).
+            if not roles[role]:
+                raise ConfigError(f"role '{role}': an empty actor list names nobody")
+            if role in (HUNT_PAIR,) + PAIRS[HUNT_PAIR]:
+                raise ConfigError(
+                    f"role '{role}': the security hunt takes exactly ONE actor, not a list"
+                )
         actors = roles[role] if isinstance(roles[role], list) else [roles[role]]
         for a in actors:
             if a not in KNOWN_ACTORS:
@@ -311,15 +372,26 @@ def check(cfg: dict) -> list[str]:
     """
     roles, rules = cfg["roles"], cfg.get("rules", {})
     return (
-        _producer_never_reviews(roles)
+        _producer_never_reviews(roles, rules)
         + _adversaries_are_read_only(cfg, roles)
         + _write_access_matches_the_roles(rules)
+        + _hunt_runs_as_claude(roles, rules)
     )
 
 
-def _producer_never_reviews(roles: dict) -> list[str]:
+def _hunt_runs_as_claude(roles: dict, rules: dict) -> list[str]:
+    if not hunt_configured(rules) or roles.get(HUNT_PAIR) == HUNT_ACTOR:
+        return []
+    return [
+        f"'{HUNT_PAIR}' is {roles.get(HUNT_PAIR)!r}, but the hunt runs in claudex-hunter "
+        f"agents -- its producer is '{HUNT_ACTOR}'. Any other value would make "
+        f"producer_never_reviews check a role that is not what executes."
+    ]
+
+
+def _producer_never_reviews(roles: dict, rules: dict | None = None) -> list[str]:
     problems: list[str] = []
-    for producer, reviewer in _pairs():
+    for producer, reviewer in _pairs(rules):
         made_by, graded_by = roles[producer], roles[reviewer]
         if isinstance(made_by, list):
             # Dual draft: each draft is graded by the other author, so the
@@ -346,7 +418,7 @@ def _producer_never_reviews(roles: dict) -> list[str]:
                 f"'{reviewer}' is 'cross' but '{producer}' has a single author "
                 f"-- there is nothing to cross-check."
             )
-        elif made_by == graded_by:
+        elif made_by == graded_by or (isinstance(graded_by, list) and made_by in graded_by):
             problems.append(
                 f"'{made_by}' both produces '{producer}' and grades it as "
                 f"'{reviewer}' -- the maker never grades the thing."
@@ -378,14 +450,36 @@ def _write_access_matches_the_roles(rules: dict) -> list[str]:
     for role in ALL_ROLES:
         if role in ADVERSARY_ROLES and role in allowed:
             problems.append(f"'{role}' is an adversary role and cannot hold write_access.")
-        if role in PRODUCER_ROLES and role not in allowed:
+        # A missing "hunt" is not a violation: it is how a config leaves the optional
+        # hunt pair out (see HUNT_PAIR).
+        if role in PRODUCER_ROLES and role not in allowed and role != HUNT_PAIR:
             problems.append(f"'{role}' produces an artefact but lacks write_access.")
     return problems
 
 
-def _pairs() -> list[tuple[str, str]]:
-    """Flatten PAIRS to (producer, reviewer) tuples, one per grader."""
-    return [(p, r) for p, rs in PAIRS.items() for r in rs]
+def _pairs(rules: dict | None = None) -> list[tuple[str, str]]:
+    """Flatten PAIRS to (producer, reviewer) tuples, one per grader.
+
+    The hunt pair only takes part when the config holds it (hunt_configured); with
+    rules=None every pair is listed (used where only the shape matters).
+    """
+    out = []
+    for p, rs in PAIRS.items():
+        if p == HUNT_PAIR and rules is not None and not hunt_configured(rules):
+            continue
+        out.extend((p, r) for r in rs)
+    return out
+
+
+def hunt_role_refusal(cfg: dict, role: str) -> str | None:
+    """Why `role` may not be resolved in this config, or None."""
+    hunt_roles = (HUNT_PAIR,) + PAIRS[HUNT_PAIR]
+    if role in hunt_roles and not hunt_configured(cfg.get("rules", {})):
+        return (f"role {role!r} is not configured: {'; '.join(_hunt_missing(cfg.get('rules', {})))}. "
+                f"To use the security hunt, declare '{HUNT_PAIR}: {HUNT_ACTOR}' and "
+                f"'{PAIRS[HUNT_PAIR][0]}: <actor>' under roles and list '{HUNT_PAIR}' in "
+                f"rules.write_access; every other role is unaffected.")
+    return None
 
 
 def _actors_for(roles: dict, role: str) -> list[str]:
@@ -432,6 +526,12 @@ def main(argv: list[str] | None = None) -> int:
 
     problems = check(cfg)
 
+    for asked in (args.role, args.spec):
+        refusal = hunt_role_refusal(cfg, asked) if asked else None
+        if refusal:
+            print(f"claudex-roles: {refusal}", file=sys.stderr)
+            return 2
+
     if args.role:
         if args.role not in ALL_ROLES:
             print(f"claudex-roles: unknown role {args.role!r}", file=sys.stderr)
@@ -467,7 +567,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"config: {path or 'built-in defaults (no .claudex.yaml found)'}")
     print()
-    for producer, reviewer in _pairs():
+    for producer, reviewer in _pairs(cfg.get("rules", {})):
         made = cfg["roles"][producer]
         made_s = " + ".join(made) if isinstance(made, list) else made
         graded = ", ".join(
@@ -476,6 +576,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         note = "  (cross-check)" if cfg["roles"][reviewer] == "cross" else ""
         print(f"  {producer:<6} {made_s:<16} -> {reviewer:<16} {graded}{note}")
+    if not hunt_configured(cfg.get("rules", {})):
+        print(f"  {HUNT_PAIR:<6} {'-':<16} -> {PAIRS[HUNT_PAIR][0]:<16} "
+              f"not configured ({'; '.join(_hunt_missing(cfg.get('rules', {})))})")
     for role in STANDALONE_ADVERSARY_ROLES:
         graded = ", ".join(_actors_for(cfg["roles"], role))
         print(f"  {'(bestand)':<6} {'-':<16} -> {role:<16} {graded}")

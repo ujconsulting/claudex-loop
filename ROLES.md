@@ -43,6 +43,16 @@ enters as a **fresh subagent** with no build context, receiving the spec and dif
 inlined exactly as Codex would. The gate enforces this: an adversary role
 assigned to `claude` without `fresh_subagent: true` is rejected.
 
+**Which sub-agent.** A fresh context is not yet a clean one: a sub-agent without a tool list
+inherits every tool of the session, MCP connectors included. Measured 2026-10-27 in a fresh
+`claude -p` session: such a sub-agent found the write-capable claude.ai connectors (Notion,
+Gmail, Drive, …) through ToolSearch. A Claude reviewer therefore runs as the plugin agent
+**`claudex-reader`** (`agents/claudex-reader.md`, `tools: Read, Grep, Glob` — measured: exactly
+those three, no ToolSearch, no MCP). The security hunt's analysts run as **`claudex-hunter`**
+(`tools: ""` — measured: no tools at all; they work only on embedded, redacted excerpts). Both
+names are plugin constants, not `.claudex.yaml` settings. What this does **not** cover: the main
+session keeps its own tools — the `security-review` pre-filter and a Claude build run there.
+
 ## Configuration
 
 `.claudex.yaml` in the repo root, else `~/.claude/claudex.yaml`, else built-in
@@ -58,6 +68,8 @@ roles:
   docs:        claude
   docs-review: codex
   audit:       codex   # standalone adversary: no producer to pair with
+  hunt:        claude  # security hunt producer (claudex-hunter agents); must be claude
+  security-verify: codex  # grades each hunt finding cold
 
 actors:
   codex:
@@ -70,7 +82,7 @@ actors:
   fallback: [lmstudio]
 
 rules:
-  write_access: [plan, build, docs]
+  write_access: [plan, build, docs, hunt]
 ```
 
 **`producer_never_reviews` and `adversary_read_only` are not in that block, and
@@ -151,6 +163,23 @@ to compare. **Every other adversary rule still applies:** read-only, never in
 `write_access`, and never the orchestrator (`claude` only with
 `fresh_subagent: true`). The resolver enforces all three and rejects `cross` here,
 because there is no second draft to cross-check against.
+
+## The security hunt pair (`hunt` → `security-verify`)
+
+`audit`'s optional Step 3c (`SECURITY_HUNT`) produces findings of its own, so it is a
+**producer** — not a variant of `audit`, which stays a standalone adversary. The hunt runs in
+`claudex-hunter` agents, so `hunt` must resolve to `claude`; any other value is refused, because
+`producer_never_reviews` would otherwise compare against a role that is not what executes.
+`security-verify` grades every finding cold (default `codex`, read-only) and may never be the
+same actor as `hunt`.
+
+The pair is **optional**. It takes part only when `hunt` is listed in `rules.write_access`
+(the default) **and**, if a config file is loaded at all, that file names both `hunt` and
+`security-verify` under `roles` itself. A file written before 2026-10-27 does neither: there
+the hunt is reported as *not configured*, `--explain` stays green, and only `--spec`/`--role`
+for `hunt` or `security-verify` refuse (exit 2). Merging the new default roles into an old file
+does not count as naming them — otherwise the plugin update would switch the hunt on in repos
+that never asked for it. To enable it, add both roles and `hunt` in `write_access`.
 
 ## The two gates
 

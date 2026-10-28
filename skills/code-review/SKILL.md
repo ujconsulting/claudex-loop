@@ -39,6 +39,11 @@ assignment violates a gate (a maker set to grade its own work, or an adversary
 role with an open sandbox), and no run may start on it. Where this document says
 "Codex" or "Claude" below, read it as the resolved actor for that role.
 Reference: `ROLES.md`.
+
+When an adversary role resolves to `claude`, it runs as the plugin agent `claudex-reader` (`Read`, `Grep`, `Glob` only: no shell, no write, no network, no MCP
+connector) — never as a sub-agent with the session's tools. Measured 2026-10-27: a
+sub-agent without a tool list reached the session's write-capable claude.ai connectors
+through ToolSearch; `claudex-reader` reached none. See `ROLES.md`.
 ## Tunables (read from skill args, else default)
 
 | Var | Default | Meaning |
@@ -134,11 +139,36 @@ looking at its own work, which is exactly what the doctrine forbids as a verdict
 - Not available (another host, the skill missing) or `SECURITY_PREFILTER=off`: log
   `## Security pre-filter — skipped (<reason>)` and go on. A skipped pre-filter costs
   nothing but the head start; it never blocks the gate.
+- It runs in the **main session, with the main session's tools** (it needs `git diff`),
+  not in `claudex-reader`. That is a named residual, not a confinement: the pre-filter
+  is not isolated from the session's MCP connectors.
 
 ### Step 1 — Assemble the evidence (Claude, no user input needed)
 
 1. `git diff <BASE_REF>...HEAD` (plus `git status --short` for untracked files
    that belong to the change). If the diff is empty, stop — nothing to verify.
+   **Staged, not yet committed** — the normal case after `build` Step 3 and the claudex-loop
+   inspection, which stage the work and pin `git write-tree` *before* this gate: the change
+   is `git diff --cached <BASE_REF>`, not `...HEAD` (which would show nothing, or only older
+   commits). Then bind the gate to the tree, as the inspection does:
+
+   ```bash
+   git diff --name-only                  # must be empty: unstaged edits are not reviewed
+   GATE_TREE=$(git write-tree)           # record it in LOG_FILE with the gate result
+   git diff --cached "$BASE_REF"         # the evidence
+   ```
+
+   Before the commit, compare the index with `$GATE_TREE` **path by path**. The gate itself
+   writes `LOG_FILE` (and `SPEC_FILE`'s marker, and `BASELINE_FILE` when it updates one) —
+   those are the only paths allowed to differ:
+
+   ```bash
+   git diff --cached --name-only "$GATE_TREE"   # vs the index; may list ONLY the gate's own files
+   ```
+
+   Any other path in that list means the commit would carry bytes this gate never saw —
+   rerun the gate on the new tree. Do not re-pin `$GATE_TREE` to make the list empty:
+   the gate's own files differing is expected, everything else is not.
 2. Read `SPEC_FILE` (and `DOD_FILE` if given). **If `scope` contains `dod` and the plan's
    marker names a due point** (`claudex-gate: pending; due-after: <step>`), say one sentence
    before anything is sent: *"Per the plan the closing gate is due after `<step>`. Is

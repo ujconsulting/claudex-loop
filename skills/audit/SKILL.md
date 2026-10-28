@@ -38,6 +38,11 @@ says "the reviewer", read it as that resolved actor. The exposure sessions (Step
 run on `exposure-review` — `python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec exposure-review`
 prints its model and effort; pass them to the wrapper, never pick them here.
 
+When an adversary role resolves to `claude`, it runs as the plugin agent `claudex-reader` (`Read`, `Grep`, `Glob` only: no shell, no write, no network, no MCP
+connector) — never as a sub-agent with the session's tools. Measured 2026-10-27: a
+sub-agent without a tool list reached the session's write-capable claude.ai connectors
+through ToolSearch; `claudex-reader` reached none. See `ROLES.md`.
+
 ## Tunables (read from skill args, else default)
 
 | Var | Default | Meaning |
@@ -48,6 +53,8 @@ prints its model and effort; pass them to the wrapper, never pick them here.
 | `LOG_FILE` | `docs/audit/<YYYY-MM-DD>-audit-log.md` | Reviewer output verbatim + dispositions. |
 | `SEVERITY_FLOOR` | `low` | Drop findings below this. Raise it on a large legacy repo to keep the first pass finishable. |
 | `EXPOSED` | auto | Comma-list of the components that face the network, or `none` as an explicit claim. Auto = mapped in Step 1 from ports, proxy/tunnel config, DNS and the repo's own inventory, listed for confirmation. **Unknown counts as exposed.** |
+| `SECURITY_HUNT` | `off` | `quick` \| `standard` \| `deep`: run the attack-class hunt of Step 3c (Cloudflare `security-audit` method). Costly; off unless asked. |
+| `SECURITY_HUNT_BUDGET` | _none_ | Agent calls the hunt may spend. **Required** for `standard` and `deep`; the hunt stops at it and reports what was not covered. |
 
 Echo the resolved values and the slice list before the first call.
 
@@ -272,6 +279,141 @@ CRITICAL here — an unauthenticated reachable route, a forgeable identity heade
 secret in a response — goes to the user **immediately**, before the rest of the audit
 continues; that is the one exception to "the audit does not fix anything".
 
+### Step 3c — Security hunt (`SECURITY_HUNT`, off by default)
+
+An attack-class hunt after the Cloudflare `security-audit` method, on a **frozen,
+redacted snapshot**, with every finding verified cold by the other model. Plan:
+`docs/plans/2026-10-27-sicherheitskette/PLAN.md` (approved in review round 7). Only when
+`SECURITY_HUNT` is not `off`; `standard`/`deep` need `SECURITY_HUNT_BUDGET`.
+
+Roles: the hunt is the producer role `hunt` (always `claude`), the verifier the paired
+adversary `security-verify`. A config without the pair refuses here and the step is
+skipped with that reason — `--spec` exits 2:
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec hunt || exit 2
+VERIFY_SPEC=$(python "${CLAUDE_PLUGIN_ROOT}/scripts/claudex_roles.py" --spec security-verify) || exit 2
+VERIFY_MODEL=$(echo "$VERIFY_SPEC" | sed -n 's/.*model=\([^ ]*\).*/\1/p')
+VERIFY_EFFORT=$(echo "$VERIFY_SPEC" | sed -n 's/.*effort=\([^ ]*\).*/\1/p')
+```
+
+**1. Prepare** — one exclusive run directory, the verified copy of the pinned skill, the
+frozen snapshot (regular text files only, links/junctions/FIFOs/binary/oversized refused,
+read by a supervised worker with a hard deadline), redacted before any model sees it, and
+the durable ledger under `docs/audit/`. Taboo-scope paths from `AGENTS.md` go in as
+`--exclude` globs. A non-zero exit means stop: nothing is half-prepared. The output's
+`coverage.status` says what an earlier run is worth: `current` (the original bytes are
+unchanged — its units may be skipped), `historical` (something changed — a hint for
+ordering, never coverage; hunt every unit again) or `none`.
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" prepare --repo "$TARGET" --scratch "$SCRATCH_DIR" \
+  --exclude "<taboo glob>"
+```
+
+Read `run_dir` and `coverage` from the JSON it prints. ⛔ No shell redirect (`>`) into the
+scratch or run directory anywhere in this step: a redirect follows a planted link and
+truncates its target before any check runs. Two kinds of file, two rules:
+
+- **What the hunt produces** — snapshot, manifests, bundles, prompts, dispatches, ledger,
+  report, coverage descriptor — is created by `hunt_run.py` itself, exclusively, through
+  `hunt_io`.
+- **What you hand it** — agent answers, candidate records, coverage list, findings — you
+  write with the Write tool into the directories `prepare` created: `<run-dir>/work/`
+  (answers, `coverage.json`, `findings.json`) and `<run-dir>/records/`; the verifier's
+  answers come from the wrapper's own checked `--out-file` into `<run-dir>/answers/`.
+  `hunt_run.py` reads every such file only through `hunt_io` below the run directory, so a
+  link, a junction or a FIFO planted there refuses at read time instead of being followed.
+
+**2. Hunt** — follow the method of the pinned skill, and read its text **only** through
+`skill-file`: every call re-verifies the run's copy against the pinned manifest and prints
+exactly the verified bytes (start with `skills/security-audit/SKILL.md`). Phases 1–4 of that
+method, with these changes:
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" skill-file --run "$RUN_DIR" --path skills/security-audit/SKILL.md
+```
+
+- every hunter, critic and candidate checker is a **`claudex-loop:claudex-hunter`** agent —
+  no tools at all. Each agent's input is the output of `bundle` and nothing else: the
+  unit's snapshot files, each re-checked against the manifest, numbered (`   12| …`),
+  refused above a fixed size — split the unit then. Never hand-built from `input/`, never
+  from the live repository, never with a file path the agent could open.
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" bundle --run "$RUN_DIR" --path app/db.py --path app/search.py \
+  --out-name "$UNIT.bundle.txt"
+```
+
+It prints the path of the new file below `<run-dir>/work/`; an existing name, a link or a
+name that is not a plain `[A-Za-z0-9._-]` file name refuses. `$UNIT` is a plain identifier
+of your choosing (letters, digits, `.`, `_`, `-`), never a path.
+- **log every agent answer at once**, before you summarize it: write it to a file in the
+  run directory and append it (`log-agent`, role `recon|hunter|critic|checker`) — verbatim,
+  redacted, in the ledger. A step that fails to log stops the hunt.
+- target code is **not executed**. What would need execution stays `needs_validation`.
+  `[REDACTED:<rule>]` is removed secret material; a conclusion resting on it stays
+  unconfirmed.
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" log-agent --run "$RUN_DIR" --role hunter --unit "$UNIT" \
+  --response "$RUN_DIR/work/$UNIT.answer.txt"
+```
+
+Write each candidate as a record `{id, title, claim, attack, hunt_status, ranges:[{path,
+from_line, to_line}]}` to `<run-dir>/records/<id>.json` — `hunt_status` is the hunt's own
+`confirmed` or `needs_validation`; `ranges` name the excerpts the verifier will see (paths
+must be snapshot members). The hunt's severity and reasoning stay in your notes; they never
+go to the verifier.
+
+**3. Verify every `confirmed` and `needs_validation` record** — replaces Cloudflare's
+Phase 5 by the other model. `request` writes the cold prompt and its **dispatch** (what was
+actually sent, ranges clipped to the file) and refuses if the prompt still holds a secret;
+the wrapper runs as for every review (`--expect-workdir "$TARGET"`); `judge` parses the one
+JSON answer against the stored dispatch — not against the record, which may have changed —
+and appends it to the ledger at once. Anything malformed, with duplicate keys, mis-bound,
+outside the sent lines, timed out or blind (exit 3) is `UNRESOLVED`. If the ledger line
+cannot be redacted, `judge` fails and records nothing: stop.
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" request --run "$RUN_DIR" --record "$RUN_DIR/records/$ID.json"
+python tools/codex_ro.py --expect-workdir "$TARGET" --model "$VERIFY_MODEL" --effort "$VERIFY_EFFORT" \
+  --prompt-file "$RUN_DIR/requests/$ID.txt" --out-file "$RUN_DIR/answers/$ID.txt" \
+  --err-file "$RUN_DIR/answers/$ID.stderr.txt"
+python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" judge --run "$RUN_DIR" --record-id "$ID" \
+  --answer "$RUN_DIR/answers/$ID.txt" --exit-code "$WRAPPER_EXIT"
+```
+
+`$WRAPPER_EXIT` is the exit status the wrapper call **itself** returned, as the tool reports
+it for that one call — the wrapper call stays a single command (the guard refuses anything
+chained to it), so read the status there and substitute it literally. Never a value from an
+earlier record, never a default: without the status of this record's wrapper call, do not
+call `judge` — the record stays `UNRESOLVED`. 124 (timeout) and 3 (blind run) are statuses
+like any other and `judge` turns them into `UNRESOLVED`.
+
+⛔ **What the redaction does and does not do.** It covers everything *we send* the
+verifier. The read-only verifier can still read the repository itself, as in every Codex
+review — the working directory is not a read boundary. A real one comes with the
+container plan (`PLAN-B-container.md`), not before; do not claim otherwise in the baseline.
+
+**4. Publish** — the report and the ledger stay in `docs/audit/` under the run's own names;
+the coverage list and the private original-content manifest go to
+`~/.claudex/hunt-coverage/`, bound by a completion descriptor written last. A later run
+treats coverage as current only if that descriptor validates and the original manifest is
+unchanged; otherwise it is historical and every unit is hunted again.
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" publish --run "$RUN_DIR" \
+  --coverage "$RUN_DIR/work/coverage.json" --findings "$RUN_DIR/work/findings.json"
+```
+
+Baseline status per record: hunt `confirmed` + `VERIFIED` → finding with severity; hunt
+`needs_validation` + `VERIFIED` → stays `needs_validation` (a blocker is not lifted by
+agreement); `REFUTED` → **disputed**, put to the user with both positions; everything else →
+open question without severity; a `VERIFIED` record whose evidence lies on a redacted line →
+`needs_validation`. The hunt never writes `LOG_FILE` or `BASELINE_FILE` itself — its
+verbatim record is the ledger; Step 5 links to it.
+
 ### Step 4 — Triage (the part that decides whether this was worth doing)
 
 Append each reviewer report **verbatim** to `LOG_FILE` as it arrives, then triage every
@@ -302,6 +444,9 @@ Write `BASELINE_FILE`:
 5. **Coverage** — slices audited, slices excluded, dimensions run, tools that ran and
    tools that were missing.
 6. **Tool versions and date.** A baseline without them cannot be compared to the next one.
+7. **Security hunt** (only if Step 3c ran) — link to its report and ledger, the counts per
+   baseline status, the pinned skill commit, and the run's `manifest_id`. The ledger is the
+   hunt's verbatim reviewer record; it is not copied into `LOG_FILE`.
 
 Then tell the user the numbers plainly: findings by severity, how many were rejected and
 why, and what was not looked at.

@@ -141,8 +141,10 @@ def test_cross_with_a_single_author_is_refused():
 
 
 def test_cross_with_no_authors_is_refused():
-    problems = cr.check(_cfg(roles={"plan": [], "plan-review": "cross"}))
-    assert problems
+    # Since inspection round 2 (finding 29) an empty actor list is refused at shape
+    # validation already -- earlier than the gate, never later.
+    with pytest.raises(cr.ConfigError, match="empty"):
+        _cfg(roles={"plan": [], "plan-review": "cross"})
 
 
 def test_cross_with_the_same_author_twice_is_refused():

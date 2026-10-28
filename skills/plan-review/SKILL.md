@@ -23,6 +23,11 @@ assignment violates a gate (a maker set to grade its own work, or an adversary
 role with an open sandbox), and no run may start on it. Where this document says
 "Codex" or "Claude" below, read it as the resolved actor for that role.
 Reference: `ROLES.md`.
+
+When an adversary role resolves to `claude`, it runs as the plugin agent `claudex-reader` (`Read`, `Grep`, `Glob` only: no shell, no write, no network, no MCP
+connector) — never as a sub-agent with the session's tools. Measured 2026-10-27: a
+sub-agent without a tool list reached the session's write-capable claude.ai connectors
+through ToolSearch; `claudex-reader` reached none. See `ROLES.md`.
 ## Prerequisites (verify once, fast)
 
 - Codex CLI installed **and alive**: `codex --version` must actually PRINT a version

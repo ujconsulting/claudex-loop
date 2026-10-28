@@ -1,0 +1,8 @@
+# Plugin-owned gitleaks configuration for the security hunt's redaction
+# (scripts/redact_payload.py). Passed with -c, so a .gitleaks.toml inside the repository
+# under review is never loaded: the subject of a review does not get to tune the scanner
+# that decides what leaves the machine.
+title = "claudex-loop hunt redaction"
+
+[extend]
+useDefault = true

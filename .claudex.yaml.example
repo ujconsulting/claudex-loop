@@ -12,6 +12,8 @@ roles:
   docs:        claude
   docs-review: codex
   audit:       codex     # standalone adversary - judges code nobody here produced
+  hunt:        claude    # security hunt (audit Step 3c): claudex-hunter agents; must be claude
+  security-verify: codex # grades every hunt finding cold; never the same actor as hunt
 
 actors:
   codex:
@@ -27,7 +29,8 @@ actors:
   fallback: [lmstudio]     # when the assigned actor is out of quota - user decides, never automatic
 
 rules:
-  write_access: [plan, build, docs] # only these may open a sandbox
+  write_access: [plan, build, docs, hunt] # only these may open a sandbox; without "hunt" the
+                                          # security hunt is simply not configured
 
 # producer_never_reviews and adversary_read_only are NOT listed here on purpose:
 # they are always on and cannot be set false. Writing `producer_never_reviews:

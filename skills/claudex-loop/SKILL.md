@@ -32,6 +32,11 @@ assignment violates a gate (a maker set to grade its own work, or an adversary
 role with an open sandbox), and no run may start on it. Where this document says
 "Codex" or "Claude" below, read it as the resolved actor for that role.
 Reference: `ROLES.md`.
+
+When an adversary role resolves to `claude`, it runs as the plugin agent `claudex-reader` (`Read`, `Grep`, `Glob` only: no shell, no write, no network, no MCP
+connector) — never as a sub-agent with the session's tools. Measured 2026-10-27: a
+sub-agent without a tool list reached the session's write-capable claude.ai connectors
+through ToolSearch; `claudex-reader` reached none. See `ROLES.md`.
 ## PHASE 0 — RECON (Claude alone)
 
 Before asking the user a single question, determine the terrain and gather what can be gathered without them.
@@ -439,7 +444,15 @@ If the user picks Codex: invoke the `build` skill with `SPEC_FILE=PLAN.md` and t
 
 The doctrine is *whoever made the thing never checks the thing* — that applies to Claude's code too. After Claude implements and the proof gates pass:
 
-1. Launch a **fresh read-only Codex session** (`codex exec -s read-only`, NEW thread — not the Phase 2 thread; the reviewer should see the code cold, not through its own plan critiques). Give it: `PLAN.md`, the base commit, and the code diff. Ask for PR-style findings — correctness, spec fidelity, edge cases, nothing outside scope — no verdict line needed; this is advisory review, not a gate loop.
+0. **Pin what is inspected — the index, not the working tree** (upstream [#18](https://github.com/chaseai-yt/claudex-loop/pull/18)). The commit takes the index; content staged there can differ from the working tree the inspector saw, and then the commit carries bytes nobody inspected. So, before launching:
+   - stage **your own** changed paths explicitly (`git add <path> …` — never `-A`, parallel sessions), then `git diff --name-only -- <those paths>` must print nothing: an unstaged edit left over means a divergent index — stage it or revert it, never inspect around it;
+   - record the staged tree: `git write-tree` → `INSPECTED_TREE`, in `LOG_FILE` under `## Post-build inspection`;
+   - the change the inspector gets is `git diff --cached <base>` — the staged state, exactly what will be committed.
+
+   **Again before the commit** (and after every accepted fix, which re-stages): `git diff --name-only -- <paths>` empty and `git write-tree` equal to the `INSPECTED_TREE` of the last inspection round. A different tree means something changed after the last inspection: reinspect (within `MAX_INSPECTION_ROUNDS`) or show it at the human gate as uninspected — never commit it as inspected.
+1. Launch a **fresh read-only Codex session** through the wrapper (`claudex_roles.py --spec code-review` for model and effort; NEW thread — not the Phase 2 thread; the reviewer should see the code cold, not through its own plan critiques). Give it: `PLAN.md`, the base commit, the builder's identity and the staged diff from step 0, inlined. Its prompt is the inspection prompt below — **not** the plan-review prompt, which judges a plan, not a change (upstream [#39](https://github.com/chaseai-yt/claudex-loop/pull/39)). No verdict line needed; this is advisory review, not a gate loop.
+
+   > You are the independent code inspector; <builder> built these changes and you did not. You are read-only. Compare the implementation in the diff below against the plan's acceptance criteria and its `## Verification` section, item by item, and say which criterion each finding breaks. Open every added or changed file in full, not only the diff hunks. Find correctness, security, edge-case and spec-fidelity defects, behaviour changes the plan did not ask for, and tests whose assertions merely confirm the implementation instead of the requirement — a test that would still pass if the code were wrong is a finding. Trace the callers of every changed function. Verify every guarantee asserted in a new or changed comment against the code beneath it. Findings numbered, each anchored to file:line with a one-line fix; nothing outside the change's scope. Name the files you did not open.
 2. Claude arbitrates each finding: accept (fix it, rerun affected tests) or reject *with a logged reason*. Cap at `MAX_INSPECTION_ROUNDS=2` (initial review + one reinspection after accepted fixes). **When accepting a finding changes what the build must do** (not just how it does it), edit `PLAN.md` to match in the same pass, with the same whole-plan search as a Phase 2 revision — the reinspection and the closing gate judge the build against that file, and a note in the log or in the inspector's prompt does not reach them. Log each such edit as `post-approval plan change` and list it at the human gate as its own line item: the Phase 2 approval covered the old text, not this one.
 3. Append to `LOG_FILE` under `## Post-build inspection`: findings verbatim, Claude's dispositions, rounds used. Present the summary alongside the final diff at the human gate — and the summary's content is a contract, not a vibe: **every REJECTED finding from any inspection round appears as its own line item at the gate, with Claude's one-line rationale.** The findings the human most needs to audit are exactly the ones Claude overruled; an aggregate ("23 findings, 19 fixed") hides them at the one moment a human is looking. Accepted-and-fixed findings may be summarized in aggregate.
 
