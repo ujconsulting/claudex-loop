@@ -158,17 +158,20 @@ looking at its own work, which is exactly what the doctrine forbids as a verdict
    git diff --cached "$BASE_REF"         # the evidence
    ```
 
-   Before the commit, compare the index with `$GATE_TREE` **path by path**. The gate itself
-   writes `LOG_FILE` (and `SPEC_FILE`'s marker, and `BASELINE_FILE` when it updates one) —
-   those are the only paths allowed to differ:
+   Before the commit, check the index against `$GATE_TREE` with the one finalization rule
+   all three review steps share (claudex-loop inspection, `build` Step 3, this gate). The
+   gate writes `LOG_FILE` and flips `SPEC_FILE`'s marker; `tree_check.py` allows exactly
+   that — the log only GROWS at the end, the spec differs only in its `claudex-gate:` line —
+   and nothing else, not even another edit inside those two files:
 
    ```bash
-   git diff --cached --name-only "$GATE_TREE"   # vs the index; may list ONLY the gate's own files
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/tree_check.py" --tree "$GATE_TREE" --log "$LOG_FILE" --spec "$SPEC_FILE"
    ```
 
-   Any other path in that list means the commit would carry bytes this gate never saw —
-   rerun the gate on the new tree. Do not re-pin `$GATE_TREE` to make the list empty:
-   the gate's own files differing is expected, everything else is not.
+   Exit 1 lists what changed beyond that: the commit would carry bytes this gate never saw
+   — rerun the gate on the new tree. Do not re-pin `$GATE_TREE` to make it pass. A
+   `BASELINE_FILE` the gate updated is not covered: re-review it, or keep it out of the
+   commit. (A plan or log the repo gitignores is outside every tree and needs no check.)
 2. Read `SPEC_FILE` (and `DOD_FILE` if given). **If `scope` contains `dod` and the plan's
    marker names a due point** (`claudex-gate: pending; due-after: <step>`), say one sentence
    before anything is sent: *"Per the plan the closing gate is due after `<step>`. Is

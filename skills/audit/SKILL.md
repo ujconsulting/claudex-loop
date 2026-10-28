@@ -318,12 +318,23 @@ truncates its target before any check runs. Two kinds of file, two rules:
 - **What the hunt produces** — snapshot, manifests, bundles, prompts, dispatches, ledger,
   report, coverage descriptor — is created by `hunt_run.py` itself, exclusively, through
   `hunt_io`.
-- **What you hand it** — agent answers, candidate records, coverage list, findings — you
-  write with the Write tool into the directories `prepare` created: `<run-dir>/work/`
-  (answers, `coverage.json`, `findings.json`) and `<run-dir>/records/`; the verifier's
-  answers come from the wrapper's own checked `--out-file` into `<run-dir>/answers/`.
-  `hunt_run.py` reads every such file only through `hunt_io` below the run directory, so a
-  link, a junction or a FIFO planted there refuses at read time instead of being followed.
+- **What you hand it** — agent answers, candidate records, coverage list, findings — goes
+  in through `put`, never through the Write tool or a redirect: `put` reads the bytes from
+  **stdin** (a quoted heredoc) and creates `<run-dir>/work/<name>` or
+  `<run-dir>/records/<name>` exclusively through `hunt_io`, so a link, a junction or a FIFO
+  planted at the destination refuses **before** anything is written. The verifier's answers
+  come from the wrapper's own checked `--out-file` into `<run-dir>/answers/`. Everything is
+  read back only through `hunt_io` below the run directory.
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" put --run "$RUN_DIR" --as "records/$ID.json" <<'CLAUDEX_END'
+{"id": "R-1", "title": "...", "claim": "...", "attack": "...", "hunt_status": "confirmed", "ranges": []}
+CLAUDEX_END
+```
+
+  Quote the delimiter (`<<'CLAUDEX_END'`) so the shell expands nothing in the payload, and
+  pick one that does not occur in it. `--as` is `work/<name>` or `records/<name>`, with a
+  plain `[A-Za-z0-9._-]` file name.
 
 **2. Hunt** — follow the method of the pinned skill, and read its text **only** through
 `skill-file`: every call re-verifies the run's copy against the pinned manifest and prints
@@ -348,9 +359,10 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" bundle --run "$RUN_DIR" --pat
 It prints the path of the new file below `<run-dir>/work/`; an existing name, a link or a
 name that is not a plain `[A-Za-z0-9._-]` file name refuses. `$UNIT` is a plain identifier
 of your choosing (letters, digits, `.`, `_`, `-`), never a path.
-- **log every agent answer at once**, before you summarize it: write it to a file in the
-  run directory and append it (`log-agent`, role `recon|hunter|critic|checker`) — verbatim,
-  redacted, in the ledger. A step that fails to log stops the hunt.
+- **log every agent answer at once**, before you summarize it: store it verbatim with
+  `put --as "work/$UNIT.answer.txt"` and append it (`log-agent`, role
+  `recon|hunter|critic|checker`) — redacted, in the ledger. A step that fails to store or
+  to log stops the hunt.
 - target code is **not executed**. What would need execution stays `needs_validation`.
   `[REDACTED:<rule>]` is removed secret material; a conclusion resting on it stays
   unconfirmed.
@@ -361,7 +373,7 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" log-agent --run "$RUN_DIR" --
 ```
 
 Write each candidate as a record `{id, title, claim, attack, hunt_status, ranges:[{path,
-from_line, to_line}]}` to `<run-dir>/records/<id>.json` — `hunt_status` is the hunt's own
+from_line, to_line}]}` with `put --as "records/<id>.json"` — `hunt_status` is the hunt's own
 `confirmed` or `needs_validation`; `ranges` name the excerpts the verifier will see (paths
 must be snapshot members). The hunt's severity and reasoning stay in your notes; they never
 go to the verifier.
@@ -400,7 +412,9 @@ container plan (`PLAN-B-container.md`), not before; do not claim otherwise in th
 the coverage list and the private original-content manifest go to
 `~/.claudex/hunt-coverage/`, bound by a completion descriptor written last. A later run
 treats coverage as current only if that descriptor validates and the original manifest is
-unchanged; otherwise it is historical and every unit is hunted again.
+unchanged; otherwise it is historical and every unit is hunted again. Store the coverage
+list and the findings with `put --as work/coverage.json` and `put --as work/findings.json`
+first, as for every input.
 
 ```bash
 python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" publish --run "$RUN_DIR" \

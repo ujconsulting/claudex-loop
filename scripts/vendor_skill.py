@@ -19,9 +19,10 @@ only open, read, fstat and close files -- no child process, network, write, envi
 or eval. Updating the pin means reading them again.
 
 Every write goes through hunt_io: the lock, each file, MANIFEST.json and the publishing
-rename (closing gate B-4). `git clone` writes relative to a working directory set by
-fchdir() to the anchored temporary directory (POSIX), so a swapped ancestor cannot
-redirect it. On Windows all of this is path-based after the check: R5-1, as in hunt_io.
+rename (closing gate B-4). `git clone` clones into "." of a destination directory WE
+created exclusively, with git's working directory fchdir()-ed onto it (POSIX): a swapped
+ancestor or a link planted as the destination cannot redirect it (recheck B-r2-1). On
+Windows all of this is path-based after the check: R5-1, as in hunt_io.
 Messages are ASCII only.
 """
 
@@ -60,9 +61,9 @@ class VendorError(Exception):
 
 def _git(*args: str, cwd: Path | None = None, binary: bool = False, anchor_fd: int | None = None):
     """Run git; raise VendorError on failure. `anchor_fd` (POSIX): git starts with its
-    working directory set by fchdir() to that already-verified directory handle, so
-    relative paths it writes stay in that directory even if an ancestor is swapped
-    afterwards (gate recheck B-4)."""
+    working directory set by fchdir() to that already-verified directory handle, so every
+    relative path it resolves starts at that directory inode, whatever happens to the
+    pathname of it or of its ancestors afterwards (gate rechecks B-4, B-r2-1)."""
     # Unattended and anonymous: no stdin, no terminal or GUI credential prompt (the
     # Windows credential manager otherwise aborts the session: "remote helper 'https'
     # aborted session", measured 2026-10-27). The skill repository is public.
@@ -188,15 +189,17 @@ def vendor(cache_root: Path = DEFAULT_CACHE, url: str = REPO_URL, commit: str = 
         tmp = hunt_io.make_dir(cache_root, f"t{secrets.token_hex(4)}", base=cache_root)
         files_dir = hunt_io.make_dir(cache_root, f"f{secrets.token_hex(4)}", base=cache_root)
         try:
-            bare = tmp / "r"
-            # The clone is written RELATIVE to an anchored working directory (POSIX), never
-            # to a pathname whose ancestors could change meanwhile (gate recheck B-4).
-            dfd = hunt_io._open_dir_anchor(tmp, base=cache_root)
+            # The destination is OURS: created exclusively, then git starts with its working
+            # directory fchdir()-ed onto that very directory and clones into "." (POSIX).
+            # Neither a swapped ancestor nor a link planted as the destination can redirect
+            # the clone (gate rechecks B-4 and B-r2-1). Windows: path-based, R5-1.
+            bare = hunt_io.make_dir(tmp, "r", base=cache_root)
+            dfd = hunt_io._open_dir_anchor(bare, base=cache_root)
             try:
                 if dfd is not None:
-                    _git("clone", "--bare", "--quiet", url, "r", anchor_fd=dfd)
-                else:  # Windows: path-based, R5-1
-                    _git("clone", "--bare", "--quiet", url, "r", cwd=tmp)
+                    _git("clone", "--bare", "--quiet", url, ".", anchor_fd=dfd)
+                else:
+                    _git("clone", "--bare", "--quiet", url, ".", cwd=bare)
             finally:
                 if dfd is not None:
                     os.close(dfd)

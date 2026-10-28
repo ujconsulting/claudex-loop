@@ -219,7 +219,7 @@ Re-verify (Step 3) after each round. After `MAX_FIX_ROUNDS` failed rounds: STOP 
 Present: 3-bullet summary of what was built, files-changed list, proof-test output (pass/fail, verbatim tail), rounds used, any spec deviations. Ask: *"Codex built it, proof passes, diff reviewed. Commit?"*
 
 - Commit ONLY on yes — and Claude writes the commit, never Codex.
-- **Right before the commit:** `git diff --name-only -- <paths>` empty and `git write-tree` equal to the last `REVIEWED_TREE`. A different tree means something changed after the review — re-read it or show it at the gate as unreviewed; never commit it as reviewed.
+- **Right before the commit:** `git diff --name-only -- <paths>` empty, and `python "${CLAUDE_PLUGIN_ROOT}/scripts/tree_check.py" --tree "$REVIEWED_TREE" --log "$LOG_FILE" --spec "$SPEC_FILE"` exits 0 — the index equals the last `REVIEWED_TREE` except that the log grew and the plan's `claudex-gate:` line changed. Anything else changed after the review — re-read it or show it at the gate as unreviewed; never commit it as reviewed.
 - Rejected → ask what's wrong, route back to Step 4 (or take over directly if fix rounds are spent).
 
 ## Hard rules

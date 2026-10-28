@@ -226,5 +226,31 @@ def test_the_clone_runs_in_an_anchored_working_directory(tmp_path, monkeypatch):
     url, commit = _fixture(tmp_path)
     vs.vendor(tmp_path / "cache", url, commit, _manifest_sha(GOOD))
     clone = next((a, k) for a, k in calls if a[0] == "clone")
-    assert clone[0][-1] == "r", "the clone target is relative"
+    assert clone[0][-1] == ".", "git clones into its own anchored working directory"
     assert isinstance(clone[1].get("anchor_fd"), int)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fchdir anchoring is POSIX; Windows is R5-1")
+def test_a_redirect_planted_while_git_starts_receives_nothing(tmp_path, monkeypatch):
+    """Gate recheck B-r2-2: a BEHAVIOURAL check. Right before git runs, the temporary
+    directory is swapped for a link to an outside tree that already holds an empty `r`.
+    With git's working directory fchdir()-ed onto the destination we created, nothing
+    may reach the outside tree, whatever vendor() does afterwards."""
+    url, commit = _fixture(tmp_path)
+    cache = tmp_path / "cache"
+    outside = tmp_path / "outside"
+    (outside / "r").mkdir(parents=True)
+    real = vs._git
+
+    def attacker(*args, **kw):
+        if args and args[0] == "clone":
+            tmp = next(p for p in cache.iterdir() if p.name.startswith("t"))
+            tmp.rename(tmp.with_name(tmp.name + ".moved"))
+            tmp.symlink_to(outside, target_is_directory=True)
+        return real(*args, **kw)
+    monkeypatch.setattr(vs, "_git", attacker)
+    try:
+        vs.vendor(cache, url, commit, _manifest_sha(GOOD))
+    except vs.VendorError:
+        pass  # refusing afterwards is fine; writing outside is not
+    assert list((outside / "r").iterdir()) == [], "the clone escaped into the planted link"

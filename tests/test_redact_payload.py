@@ -275,3 +275,10 @@ def test_split_lines_counts_only_cr_and_lf():
     assert rp.split_lines("a\vb\nc\r\nd\re f\n") == ["a\vb", "c", "d", "e f"]
     assert rp.split_lines("") == []
     assert rp.split_lines("x") == ["x"]
+
+
+def test_a_forged_placeholder_prefix_is_not_redacted_text(tmp_path):
+    """Fresh gate B-1: the verify pass took any value STARTING with "[REDACTED:" as done."""
+    assert rp.is_placeholder("[REDACTED:named-secret-dq]")
+    assert not rp.is_placeholder("[REDACTED:x]horse horse")
+    assert not rp.is_placeholder("[REDACTED:]")

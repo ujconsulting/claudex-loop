@@ -9,6 +9,8 @@ revised after post-build inspection round 1. Steps, each its own CLI call:
               (written now, under ~/.claudex/hunt-coverage), the coverage classification
               against the last complete run (current / historical / none), the ledger.
   skill-file  one file of the run's skill copy -- the copy is re-verified on every read.
+  put         an input Claude hands the hunt (answer, record, coverage, findings), read
+              from stdin and created exclusively below <run>/work/ or <run>/records/.
   bundle      a hunter's input: verified snapshot files, numbered, scanned as a whole,
               written exclusively to <run>/work/<--out-name>.
   log-agent   every hunter / critic / candidate-checker answer, appended to the ledger.
@@ -285,6 +287,27 @@ def _verify_snapshot(run: Run) -> None:
         raise HuntError(f"refused: {exc}") from exc
 
 
+PUT_DIRS = ("work", "records")  # where `put` may place what Claude hands the hunt
+
+
+def put(run: Run, dest: str, data: bytes) -> Path:
+    """Store an INPUT Claude hands the hunt -- an agent answer, a candidate record, the
+    coverage list, the findings -- as <run>/<dir>/<name>, created exclusively through
+    hunt_io. The bytes come from stdin, so nothing outside hunt_io ever writes into the run
+    directory: a planted link or FIFO at the destination refuses BEFORE any byte is written
+    (gate recheck C2-r2-3; the Write tool used to write first and the read refused after).
+    """
+    folder, _, name = dest.partition("/")
+    if folder not in PUT_DIRS or not _OUT_NAME.match(name or ""):
+        raise HuntError(f"--as must be one of {'|'.join(PUT_DIRS)}/<plain file name>")
+    if len(data) > hunt_io.MAX_READ:
+        raise HuntError(f"input exceeds {hunt_io.MAX_READ} bytes")
+    try:
+        return hunt_io.create_file(run.run_dir / folder, name, data, base=run.scratch)
+    except hunt_io.HuntIOError as exc:
+        raise HuntError(f"input not stored: {exc}") from exc
+
+
 BUNDLE_MAX = 200_000
 
 
@@ -352,7 +375,7 @@ def request(run: Run, record: dict) -> Path:
         raise HuntError(f"request for {record.get('id')} still carries {len(hits)} secret(s)")
     for _rule, rx in redact_payload.PATTERNS:
         for m in rx.finditer(text):
-            if not m.group("v").startswith("[REDACTED:"):
+            if not redact_payload.is_placeholder(m.group("v")):
                 raise HuntError(f"request for {record.get('id')} still carries a secret pattern")
     reqs = run.run_dir / "requests"
     hunt_io.create_file(reqs, f"{dispatch['record_id']}.dispatch.json", _json(dispatch), base=run.scratch)
@@ -429,6 +452,9 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--role", required=True)
     g.add_argument("--unit", required=True)
     g.add_argument("--response", required=True)
+    pu = sub.add_parser("put", help="store stdin as <run>/work/<name> or <run>/records/<name>")
+    pu.add_argument("--run", required=True)
+    pu.add_argument("--as", dest="dest", required=True)
     b = sub.add_parser("bundle")
     b.add_argument("--run", required=True)
     b.add_argument("--path", action="append", required=True)
@@ -459,6 +485,8 @@ def main(argv: list[str] | None = None) -> int:
         run = load(Path(a.run))
         if a.cmd == "skill-file":
             sys.stdout.buffer.write(skill_file(run, a.path))
+        elif a.cmd == "put":
+            print(put(run, a.dest, sys.stdin.buffer.read(hunt_io.MAX_READ + 1)))
         elif a.cmd == "bundle":
             if not _OUT_NAME.match(a.out_name):
                 raise HuntError("--out-name must be a plain file name [A-Za-z0-9._-], no leading dot")

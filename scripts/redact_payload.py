@@ -62,6 +62,13 @@ PATTERNS = [
     ("named-secret", re.compile(r"(?i)(?P<k>" + _NAME + r")(?P<v>[^\s\"',;]{4,})")),
 ]
 _LINE_SPLIT = re.compile(r"(\r\n|\n|\r)")
+_PLACEHOLDER = re.compile(r"\[REDACTED:[A-Za-z0-9._-]{1,64}\]")
+
+
+def is_placeholder(value: str) -> bool:
+    """True only when `value` is ONE complete placeholder and nothing else. A prefix test
+    let `"[REDACTED:x]horse horse"` pass as redacted (fresh closing gate, B-1)."""
+    return _PLACEHOLDER.fullmatch(value) is not None
 
 
 class RedactError(Exception):
@@ -234,7 +241,7 @@ def redact_tree(root: Path, scanner=None, verify: bool = True) -> RedactResult:
             text = _read_text(root, rel)
             for _rule, rx in PATTERNS:
                 for m in rx.finditer(text):
-                    if not m.group("v").startswith("[REDACTED:"):
+                    if not is_placeholder(m.group("v")):
                         raise RedactError(f"{rel}: pattern hit left")
     return result
 

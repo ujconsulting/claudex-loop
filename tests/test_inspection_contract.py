@@ -90,13 +90,14 @@ class IndexFingerprint(unittest.TestCase):
         """Closing gate C2-3: substring checks for command names survived deleting the
         equality rule and replacing the pre-commit comparison with 'just commit'."""
         loop = section(LOOP.read_text(encoding="utf-8"), "### Post-build cross-inspection")
-        self.assertIn("`git write-tree` equal to the `INSPECTED_TREE` of the last inspection round", loop)
+        # recheck 2 (C2-r2-1): one mechanical finalization rule in all three skills
+        self.assertIn('tree_check.py" --tree "$INSPECTED_TREE" --log "$LOG_FILE" --spec "$PLAN_FILE"', loop)
         self.assertIn("never commit it as inspected", loop)
         text = BUILD.read_text(encoding="utf-8")
         verify = section(text, "## Step 3 — Verify")
         self.assertIn("record `git write-tree` as `REVIEWED_TREE`", verify)
         gate = section(text, "## Step 5 — Human gate")
-        self.assertIn("`git write-tree` equal to the last `REVIEWED_TREE`", gate)
+        self.assertIn('tree_check.py" --tree "$REVIEWED_TREE" --log "$LOG_FILE" --spec "$SPEC_FILE"', gate)
         self.assertIn("never commit it as reviewed", gate)
 
     def test_the_closing_gate_reviews_the_staged_tree(self):
@@ -108,7 +109,7 @@ class IndexFingerprint(unittest.TestCase):
         self.assertIn("rerun the gate on the new tree", s)
         # recheck C2-1: the gate's own log must not invalidate it forever, and the
         # comparison stays path by path instead of re-pinning the tree
-        self.assertIn('git diff --cached --name-only "$GATE_TREE"', s)
+        self.assertIn('tree_check.py" --tree "$GATE_TREE" --log "$LOG_FILE" --spec "$SPEC_FILE"', s)
         self.assertIn("Do not re-pin `$GATE_TREE`", s)
 
     def test_the_hunt_step_writes_no_file_by_shell_redirect(self):
@@ -119,6 +120,9 @@ class IndexFingerprint(unittest.TestCase):
             code = block.split("```")[0]
             self.assertIsNone(re.search(r'(?:^|\s)\d?>{1,2}\s*["$/\w]', code), code)
         self.assertIn("--out-name", step)
+        # recheck 2 (C2-r2-3): inputs go in through `put` on stdin, not the Write tool
+        self.assertIn('hunt_run.py" put --run "$RUN_DIR" --as', step)
+        self.assertIn("never through the Write tool", step)
         self.assertIn("do not\ncall `judge`", step)
 
     def test_section_stops_at_the_next_heading_of_equal_or_higher_level(self):

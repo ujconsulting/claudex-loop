@@ -85,7 +85,7 @@ class SkillsUseTheReader(unittest.TestCase):
         # command, never hand-built from input/.
         self.assertIn("Never hand-built from `input/`", step)
         self.assertIn("--spec security-verify", step)
-        for sub in ("prepare", "skill-file", "bundle", "log-agent", "request", "judge", "publish"):
+        for sub in ("prepare", "skill-file", "put", "bundle", "log-agent", "request", "judge", "publish"):
             self.assertIn(f"hunt_run.py\" {sub}", step, sub)
         self.assertIn("not a read boundary", step, "the redaction must not be oversold")
 

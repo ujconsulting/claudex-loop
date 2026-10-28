@@ -349,3 +349,46 @@ def test_a_redirected_ancestor_below_the_run_dir_refuses_a_control_read(run, tmp
         req.symlink_to(outside, target_is_directory=True)
     with pytest.raises(OSError):
         hr._read(req / "sub" / "R.json", run.run_dir)
+
+
+def test_put_creates_inputs_exclusively_from_stdin(run, monkeypatch, capsys):
+    """Gate recheck C2-r2-3: inputs Claude hands the hunt were written with the Write tool,
+    so a planted link was refused only at read time, AFTER the write."""
+    import io
+    run.ledger.close()
+
+    def call(dest, data):
+        monkeypatch.setattr(sys, "stdin", type("S", (), {"buffer": io.BytesIO(data)})())
+        return hr.main(["put", "--run", str(run.run_dir), "--as", dest])
+    assert call("records/R-1.json", b'{"id": "R-1"}') == 0
+    assert (run.run_dir / "records" / "R-1.json").read_bytes() == b'{"id": "R-1"}'
+    assert call("records/R-1.json", b"again") == 2          # never overwrites
+    assert call("answers/x.txt", b"x") == 2                  # not a put directory
+    assert call("work/../x.txt", b"x") == 2                  # not a plain name
+    assert call("work/.hidden", b"x") == 2
+
+
+def test_put_refuses_a_planted_link_before_writing(run, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "R-2.json"
+    victim.write_bytes(b"keep")
+    rec = run.run_dir / "records"
+    rec.rmdir()
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(outside), str(rec))
+    else:
+        rec.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(hr.HuntError):
+        hr.put(run, "records/new.json", b"x")
+    assert sorted(p.name for p in outside.iterdir()) == ["R-2.json"]
+    assert victim.read_bytes() == b"keep"
+
+
+def test_a_forged_placeholder_in_a_record_is_refused(run):
+    """Fresh gate B-1: `password = "[REDACTED:x]horse horse"` passed the prompt screen."""
+    rec = dict(RECORD, claim='password = "[REDACTED:x]horse horse"')
+    with pytest.raises(hr.HuntError, match="secret pattern"):
+        hr.request(run, rec)
+    assert not (run.run_dir / "requests" / "R-1.txt").exists()
