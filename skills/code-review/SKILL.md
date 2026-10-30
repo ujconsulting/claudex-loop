@@ -185,11 +185,30 @@ looking at its own work, which is exactly what the doctrine forbids as a verdict
    whatever the repo already has and inline the *numbers* in the prompt; a
    threshold check beats an opinion, and it is what makes `DOCSTRING_MIN`
    meaningful. Typical: `interrogate -v <changed pkgs>` (Python docstring
-   coverage), `pytest --cov --cov-report=xml` + `diff-cover coverage.xml
-   --compare-branch <BASE_REF>` (coverage of the *changed lines*), or the
-   project's own equivalent. If none exists, say so in the prompt — "no
-   coverage data available, judge from the diff" — rather than inventing a
-   number. Missing tooling is a `tests` finding, not a reason to skip.
+   coverage; a static scanner, it may run on the host) and the **total** test
+   coverage, which loads the repository's code and therefore runs only in the
+   sandbox, on the tree this gate pinned:
+
+   ```bash
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" \
+     --tree "$GATE_TREE" --image python-test --export coverage.xml \
+     -- python -m pytest --cov --cov-report=xml:/out/coverage.xml -q
+   ```
+
+   (For a committed target with no staged change, `git rev-parse <ref>^{tree}` is the
+   tree.) Read the total from `RUN_DIR/out/coverage.xml`. **Pass rule: only
+   `COMMAND_STATUS=exited` with `COMMAND_EXIT=0` counts**; `timeout`, `oom`,
+   `output_limit`, `not_started` are failures, and runner exit `2` (refused) or `5`
+   (infrastructure) is not a test result. Log `MANIFEST_SHA256=` with the tree id; a
+   manifest for another tree is no evidence for this gate. An export reported missing
+   means no coverage data. There is no host fallback: if Docker or the image is missing,
+   or the program is not one of the image's tools, the step is refused (runner exit
+   `2`) — say so in the prompt ("no coverage data available, judge from the diff"); the
+   human may run it themselves. A dependency the image lacks that the code imports fails
+   inside the container (`COMMAND_EXIT` != 0): that is "no coverage data —
+   dependencies outside the image (B1.5)", not a coverage number. Coverage of the *changed lines* (`diff-cover`) is not part of
+   B1: it reads git on the host, and host git is unhardened until T23, so it is not run.
+   Do not invent a number. Missing tooling is a `tests` finding, not a reason to skip.
 4. **Anything the reviewer must cite by line, hand it over WITH line numbers.** A
    unified diff carries hunk headers, so the reviewer has to do arithmetic to name a
    line — and models miscount. Where you inline whole files rather than a diff, prefix
@@ -450,7 +469,9 @@ coderabbit review --agent --uncommitted --include-untracked --config CLAUDE.md A
    whenever the exposure pass ran. A missing verdict line, or a report with
    all-pass verdicts and zero findings on a non-trivial diff, is an **invalid
    review** — do not record it as a pass; rerun or surface it.
-3. For each finding: accept (fix it, rerun the affected tests/proof) or reject
+3. For each finding: accept (fix it, re-pin the tree, rerun the affected tests/proof
+   through `scripts/sandbox_run.py` on the new tree — same pass rule as Step 1.3, never
+   on the host) or reject
    *with a logged reason*. Append `### Claude's dispositions` to `LOG_FILE` —
    one line per finding, `accepted → <what changed>` or `rejected → <why>`.
 4. If anything was fixed and rechecks remain: resume the SAME session —
@@ -473,10 +494,32 @@ generate-and-ship tool cannot offer.
   fixtures, naming, file layout. A correct docstring in the wrong format is a
   new inconsistency.
 - **Every generated test must be shown to fail.** Break the code it covers
-  (invert a condition, return the wrong value), run the test, confirm it goes
-  red, restore the code, confirm it goes green. Record the result in
-  `LOG_FILE`. An untested test proves nothing and is worse than no test,
-  because it reads as coverage.
+  (invert a condition, return the wrong value), confirm the test goes red, restore
+  the code, confirm it goes green. Both runs go through `scripts/sandbox_run.py`
+  and each on its own pinned tree: the runner executes exactly the bytes of the
+  tree it is given, so re-using `$GATE_TREE` would run the unchanged code twice
+  and "prove" nothing. Pin the broken version and the restored version
+  separately, from a private index (`--pin`, no `git add`, other sessions' staged
+  work stays alone), after writing each version to the working tree:
+
+  ```bash
+  python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" \
+    --pin <changed path> [<changed path> ...] --image python-test -- python -m pytest -q -rf <the new test id>
+  ```
+
+  Record the `TREE=` of the first call as `BROKEN_TREE` and of the second (code
+  restored) as `RESTORED_TREE`; the two ids must differ — equal ids mean the
+  break was never pinned, and the check is void. Expected result against
+  `BROKEN_TREE`: `COMMAND_STATUS=exited` with `COMMAND_EXIT=1` ("tests were collected,
+  ran, and some failed"), and the captured output names the new test in a `FAILED <test
+  id>` line. Any other non-zero exit is not a red test: `2` (collection or import
+  error, interrupted), `4` (usage error) and `5` (no tests collected) mean the
+  assertion never ran — a mutation that breaks the import "proves" a test that was
+  never executed. Expected result against `RESTORED_TREE`: `COMMAND_STATUS=exited`
+  with `COMMAND_EXIT=0` (green). `timeout`, `oom`, `not_started` or runner exit
+  `2`/`5` on either tree is not a result. Log both trees, both exit codes, the
+  `FAILED` line and `MANIFEST_SHA256=` for each in `LOG_FILE`. An untested test
+  proves nothing and is worse than no test, because it reads as coverage.
 - **Never weaken an assertion to make a test pass.** If a new test fails, either
   the code is wrong (fix the code) or the expectation is wrong (say so, with
   the reasoning) — loosening the assert is falsifying the gate.

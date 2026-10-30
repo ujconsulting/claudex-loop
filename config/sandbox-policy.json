@@ -1,0 +1,23 @@
+{
+  "_comment": "Plan B1 (docs/plans/2026-10-27-sicherheitskette/PLAN-B1-sandbox-run.md). Read only from the INSTALLED plugin directory, never from the checkout under review. An image is accepted only if `docker image inspect` reports exactly this id. Change it in a reviewed commit after a human built the image from config/sandbox/python-test.Dockerfile.",
+  "context": "desktop-linux",
+  "images": {
+    "python-test": {
+      "ref": "claudex-sandbox-python-test:2",
+      "id": "sha256:378312ca3ce2bf03df93593fd1aba5f60c63016b23d6b65b4f761b67ca3843fd",
+      "_tools_comment": "argv[0] must be one of these (plan Approach 4: only image-contained dependencies; anything else is refused with the B1.5 explanation).",
+      "tools": [
+        "python3",
+        "python",
+        "pytest",
+        "git",
+        "sh",
+        "true",
+        "false",
+        "id",
+        "sleep",
+        "yes"
+      ]
+    }
+  }
+}

@@ -18,6 +18,7 @@ automatically; read it before reviewing anything here.
 | `scripts/hunt_run.py` (+ `hunt_snapshot.py`, `redact_payload.py`, `verify_record.py`, `vendor_skill.py`, `hunt_io.py`) | The security hunt of `audit` Step 3c: pinned Cloudflare skill snapshot, frozen redacted input, cold bound verification, append-only ledger; every input Claude hands it goes in through `hunt_run.py put` (stdin, exclusive creation). `config/gitleaks.toml` is the plugin-owned scanner config. |
 | `scripts/tree_check.py` | The one finalization rule of inspection, build review and closing gate: the index may differ from the reviewed tree only by an appended log and the plan's `claudex-gate:` flip. |
 | `scripts/build_isolation.py` | Isolation flags for the Codex build: every user MCP server off by name, apps, plugins, hooks, computer/browser control off. Fails closed. |
+| `scripts/sandbox_run.py` (+ `sandbox_snapshot.py`, `sandbox_driver.py`, `config/sandbox-policy.json`, `config/sandbox/`) | The sandbox runner (plan B1): runs repository code in a hardened container on a pinned git tree, no host fallback; every skill's test/proof/coverage run goes through it. `tests/test_sandbox_contract.py` holds the skills to it. |
 | `hooks/wrapper_guard.py` | PreToolUse guard: an allowlisted wrapper call stays ONE command. |
 | `hooks/claudex-python.sh` | Interpreter shim. Denies wrapper calls when it cannot run the guard. |
 | `skills/*/SKILL.md` | The doctrine documents. **Executable** — a `bash` block is an instruction, not an illustration. |

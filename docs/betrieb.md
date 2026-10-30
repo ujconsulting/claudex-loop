@@ -524,6 +524,50 @@ fehlende Plan-Schritte (`DOD: INCOMPLETE | SECURITY: FAIL`, 3 Befunde).
 
 ---
 
+## 7b. Code des geprüften Repos: der Sandbox-Runner (Plan B1)
+
+Tests, Coverage, Proof-Läufe und Eintrittspunkte eines **geprüften** Repos laden dessen Code. Die
+Skills führen sie deshalb nur über `scripts/sandbox_run.py` aus: Container ohne Netz, schreibgeschütztes
+Root, kein Host-Mount, tmpfs-Arbeitsverzeichnis, Befehl als uid 65532 ohne Capabilities, Eingabe genau
+der festgehaltene Git-Tree. **Kein Rückfall auf den Host**; fehlt Docker oder das Image, wird der Schritt
+verweigert und der Mensch kann den Befehl selbst ausführen. Plan und Messungen:
+`docs/plans/2026-10-27-sicherheitskette/PLAN-B1-sandbox-run.md`.
+
+```text
+python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch <dir> (--tree <sha> | --pin <pfad>...) --image python-test     [--export NAME]... [--timeout S] -- <argv...>
+```
+
+Ausgabe: `RUN_DIR=`, `TREE=`, `COMMAND_STATUS=`, `COMMAND_EXIT=`, `MANIFEST_SHA256=`; Exporte liegen in
+`RUN_DIR/out/<name>`. Eigener Exit-Code: 0 = der Lauf hat stattgefunden (Urteil in `COMMAND_STATUS=`
+und `COMMAND_EXIT=`), 2 = verweigert, 5 = Infrastruktur. **Bestanden ist nur `COMMAND_STATUS=exited`
+mit `COMMAND_EXIT=0`**; `MANIFEST_SHA256=` wird mit der Tree-Id protokolliert.
+
+**Das Image** `python-test` (Python 3.13, pytest, pytest-cov, coverage, git; Rezept `config/sandbox/python-test.Dockerfile`) baut
+ein Mensch einmal (braucht Netz, der Runner baut und zieht nie):
+
+```text
+docker --context desktop-linux build -f "${CLAUDE_PLUGIN_ROOT}/config/sandbox/python-test.Dockerfile" -t claudex-sandbox-python-test:2 "${CLAUDE_PLUGIN_ROOT}/config/sandbox"
+docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-python-test:2
+```
+
+Dockerfile und Kontext stehen ausdruecklich unter `${CLAUDE_PLUGIN_ROOT}` (nie relativ im geprueften Repo).
+Die Id muss dem Eintrag in `config/sandbox-policy.json` entsprechen (nur das Plugin-Verzeichnis zählt,
+nie das Checkout unter Prüfung; Änderung in einem geprüften Commit). Nur Abhängigkeiten **im Image**
+sind unterstützt (B1.5 für den Rest); Abhängigkeits-Prüfer (pip-audit, npm audit, OSV-Scanner) deckt B1 nicht ab.
+**Welches Werkzeug wo laeuft** (Klassifikation wie in `skills/audit/SKILL.md`; ein Werkzeug, das nicht in
+der Tabelle steht, gilt als Code-ladend, bis es eingeordnet ist):
+
+| Class | Tools | Where |
+|---|---|---|
+| static, reads files only | gitleaks, grype, hadolint, actionlint, interrogate, ruff | host |
+| loads project code or config | pytest and coverage, the repo's own entry points, eslint with project config, golangci-lint with plugins, Checkov with custom checks | `sandbox_run.py` with the `python-test` image, or refused. The image carries Python, pytest, pytest-cov, coverage and git only: a tool the image lacks is refused, never installed |
+| dependency auditors | pip-audit, npm audit, OSV-Scanner | **not covered by B1**: host, at the user's own risk until B1.5 |
+
+Die Grenze ist ein Container in einer Docker-Desktop-VM mit Root-Rechten. Roh bleiben: der Codex-Bau (bis
+B2), die CI (`.github/workflows/checks.yml`) und die Pre-Commit-Prüfung dieses Repos (eigener, vertrauter Code).
+
+---
+
 ## 8. Codex heben — Vorgang mit Nachmessung
 
 Jede Garantie des Wrappers ist eine Messung gegen eine bestimmte CLI-Version

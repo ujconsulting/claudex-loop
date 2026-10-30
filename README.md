@@ -36,7 +36,8 @@ flowchart LR
     C -- APPROVED --> S["✍️ You sign off"]
     C -. MAX_ROUNDS:<br>you break the tie .-> S
     S -. optional .-> D["🔨 BUILD<br>one model writes"]
-    D --> I["🔬 CROSS-INSPECT<br>the other model<br>grades the diff"]
+    D --> T["⚙️ PROOF RUN<br>in sandbox"]
+    T --> I["🔬 CROSS-INSPECT<br>the other model<br>grades the diff"]
     I --> G["✅ You approve<br>the final diff"]
     I -. default on,<br>a skip is logged .-> V["🧪 ACCEPTANCE GATE<br>dod · quality · security<br>+ docs · tests"]
     V -. facing the network:<br>then it is required .-> X["🛡️ EXPOSURE PASS<br>own model, own effort<br>SAFE / UNSAFE"]
@@ -46,10 +47,12 @@ flowchart LR
     classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
     classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
     classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    classDef sandbox fill:#f4f4f4,stroke:#10a37f,color:#1a1a1a,stroke-dasharray: 5 5
     class A,B,R,D producer
     class C,I,V,X adversary
     class L,S,G human
     class P artifact
+    class T sandbox
 ```
 
 **You enter at four points only:** confirming the ledger, answering the interview, signing off the converged plan, and approving the final diff if you build. Every reviewing step is read-only and never touches a file.
@@ -65,7 +68,7 @@ flowchart LR
 | **🔍 0 — RECON** | Claude scouts *before* asking you anything — explores the codebase and living docs, or on greenfield researches prior art, stacks, and known pitfalls (research depth is a gate **you** control, up to a multi-agent deep-research workflow) | Opens with an **Assumptions Ledger**: everything already resolved, batch-confirmed in one reply. The interview never wastes questions the code or research already answered |
 | **🎯 1 — INTERROGATE** | A visible **decision map** splits open decisions into load-bearing (asked one at a time) and cosmetic (batched, veto-by-exception) | Every question must justify its existence: *why it matters*, a committed *recommendation*, and *what breaks if we guess wrong*. Escape hatch: "accept all remaining recommendations" |
 | **⚔️ 2 — REVIEW** | Codex reviews `PLAN.md` in a read-only sandbox → `VERDICT: APPROVED` or `REVISE` with concrete flaws. Claude arbitrates (rejects bad critiques *with logged reasons*), revises — every passage that still states a superseded behaviour, acceptance criteria included, is changed or marked, so no revision says both — and resumes the **same Codex session** | The reviewer remembers its prior findings and attacks its own accepted fixes. Bounded by `MAX_ROUNDS` — a flagged deadlock beats a fake "approved" |
-| **🔨 3 — BUILD** *(optional)* | You pick the builder. **Codex builds** (`build`, full write access) → Claude reads the entire diff like a contributor PR and runs the proof test itself. **Claude builds** → a *fresh* read-only Codex session cross-inspects the finished diff against the plan — on by default, findings arbitrated and logged. A finding that changes *what* must be built updates `PLAN.md` itself and reaches your gate as a post-approval plan change. The inspector gets its own prompt (acceptance criteria, every changed file in full, tests that only confirm the code) and judges the **staged** change: the index is pinned with `git write-tree`, and before the commit `scripts/tree_check.py` allows exactly the review's own changes — the log only grows, the plan's `claudex-gate:` marker flips — and nothing else, so a commit carrying anything uninspected is not committed as inspected | The final code is always graded by the rival model, whichever one wrote it. Skipping the inspection requires an explicit, logged opt-out |
+| **🔨 3 — BUILD** *(optional)* | You pick the builder. **Codex builds** (`build`, full write access) → Claude reads the entire diff like a contributor PR and runs the proof test itself — in a disposable container on the reviewed tree (`scripts/sandbox_run.py`), never on the host. **Claude builds** → a *fresh* read-only Codex session cross-inspects the finished diff against the plan — on by default, findings arbitrated and logged. A finding that changes *what* must be built updates `PLAN.md` itself and reaches your gate as a post-approval plan change. The inspector gets its own prompt (acceptance criteria, every changed file in full, tests that only confirm the code) and judges the **staged** change: the index is pinned with `git write-tree`, and before the commit `scripts/tree_check.py` allows exactly the review's own changes — the log only grows, the plan's `claudex-gate:` marker flips — and nothing else, so a commit carrying anything uninspected is not committed as inspected | The final code is always graded by the rival model, whichever one wrote it. Skipping the inspection requires an explicit, logged opt-out |
 
 **The invariant across all four:** *whoever made the thing never checks the thing.* Plan by Claude → attacked by Codex. Code by Codex → reviewed by Claude. Code by Claude → inspected by Codex. No one grades their own work, in any path.
 
@@ -177,6 +180,15 @@ product is controls:
   the wrapper control closed, and its last finding — in the skills' contract tests —
   is fixed red-first but not yet re-verified by the reviewer. Written up as it is in
   [`docs/audit/2026-09-11-scope.md`](./docs/audit/2026-09-11-scope.md) §10.
+- **The sandbox runner's own acceptance gate found two HIGHs after two inspection
+  rounds had passed it** (2026-10-30, plan B1). The command's output went to regular
+  files the command itself held open: it could write past the cap and `ftruncate` the
+  file back before the size check, or leave a background child writing after the last
+  check — an overflow reported as `exited`, exit 0. Captures are pipes now, counted by
+  the driver and read to EOF only after every process of the run is dead. And the
+  runbook called `python scripts/sandbox_run.py` relative to the checkout under review,
+  so a hostile repository would have supplied the very runner meant to contain it; a
+  contract test now holds every runner call to the installed plugin's copy.
 
 Three independent passes over the same 500 lines, each finding what the previous one
 missed. That is the argument for the whole method, made against its own author.
@@ -374,6 +386,7 @@ with everything in place.
   unpinned latest. `gpt-6.1-sol` needs it (`gpt-6-sol` ≥ 0.156.0); older CLIs answer with HTTP 400, and the wrapper refuses it there up
   front; its header shows the version it found. On Windows, Codex 0.147 and later also needs
   wrapper **2.4.0 or newer**, or the reviewer silently reads nothing (see [Safety](#safety)).
+- **Docker** (Docker Desktop, Linux engine) and the `python-test` image, built once by a human from `config/sandbox/python-test.Dockerfile` — the build command is in the Dockerfile header and in `docs/betrieb.md`. Tests, coverage and proof runs of a reviewed repository execute only there; without Docker or the image those steps are refused, there is no host fallback.
 - **Authenticated** — `codex login` once (any ChatGPT account: Free/Plus/Pro/Max)
 - **Model and effort come from the roles, not from your Codex config** —
   `python scripts/claudex_roles.py --spec <role>` resolves them (`gpt-6.1-sol/medium` for
@@ -437,6 +450,8 @@ Two gates decide *where* it writes, both from [upstream PR #12](https://github.c
 - **A spec citing findings by absolute path escapes that worktree.** `D:\...\repo\src\foo.py:210` resolves to the *original* checkout, and a `--yolo` Codex edits it — the isolation is gone and nothing says so. The skill greps the spec for absolute paths and, when it finds any, names the forbidden prefixes literally in the prompt contract.
 
 **The builder gets the shell and the files, nothing that acts elsewhere** (since 2026-10-27). `--yolo` means no sandbox and no approvals, and until then every MCP server, plugin, app, hook and computer/browser control from the user's Codex config came with it — measured on one machine: `n8n`, `node_repl`, `codex_app` and `cua_repl`, all callable unprompted. [`scripts/build_isolation.py`](./scripts/build_isolation.py) now lists the enabled servers with `codex mcp list --json --disable apps --disable plugins`, switches each off by name, adds `--disable` for apps, plugins, hooks and computer/browser control plus `-c notify=[]`, and passes them to `exec` and `resume` alike. It prints nothing and exits 2 when the listing cannot be trusted, and the build does not start. Image generation and the model from `~/.codex/config.toml` stay; a build that needs one server gets `--allow-mcp <name>`, logged. Upstream found the same gap in its runner ([#43](https://github.com/chaseai-yt/claudex-loop/issues/43), [#45](https://github.com/chaseai-yt/claudex-loop/pull/45)).
+
+**Repository code runs in a container, never on the host** (since 2026-10-30, plan B1). Every place where a skill used to execute the code of the repository under review — `build`'s proof run, `code-review`'s coverage, `docs-backfill`'s test suite, `audit`'s entry points and code-loading linters, and the reruns after fixes — now goes through [`scripts/sandbox_run.py`](./scripts/sandbox_run.py). The runner builds a complete, bounded snapshot of exactly the **pinned git tree** (never the working tree; every object id recomputed, a symlink or submodule entry refuses the run), starts a disposable container from an image listed in the installed plugin's own policy (no network, read-only root, no host mount, tmpfs workspace, the command as an unprivileged uid without capabilities) and returns a manifest that binds result, tree, image and argv: `COMMAND_STATUS=` and `COMMAND_EXIT=` carry the verdict, `MANIFEST_SHA256=` is logged with the tree id. Only `exited` with exit 0 passes; a timeout, OOM or output overflow never does, and the runner's own exit codes (2 refused, 5 infrastructure) are no test result. **There is no host fallback**: without Docker or the image the step is refused and the human may run the command themselves. Dependencies must be inside the image (B1.5 covers the rest): a program that is not one of the image's tools is refused up front, and a module the image lacks fails inside the container — never a pass; dependency auditors (pip-audit, npm audit, OSV-Scanner) are not covered and run on the host at your own risk until then. Said honestly: the boundary is a container on a rootful Docker Desktop VM plus the flags above, not a hardware boundary. **The Codex build itself still runs raw until B2** (`--yolo`, minus the isolation flags below); this repo's own CI and pre-commit checks run its own trusted code and stay raw too.
 
 ### The read-only wrapper — and why it isn't enough on its own
 

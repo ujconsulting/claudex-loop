@@ -1,0 +1,9 @@
+# Pinned test toolchain for config/sandbox/python-test.Dockerfile (wheels only, hash-checked).
+# Hashes taken 2026-10-30 from the wheels pip downloaded (pytest 9.0.3; pytest-cov 7.1.0 + coverage 7.17.0 for code-review coverage).
+pytest==9.0.3 --hash=sha256:2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9
+pluggy==1.7.0 --hash=sha256:7dd7b0d8832ba3cb632c306926ded123429211b83641b35dc5c41ad2d34f9bec
+iniconfig==2.3.1 --hash=sha256:9121e2c1fdb355232495be3194c8dfe87ccc2d5dee45947b78e68f499790d7a7
+packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pygments==2.21.0 --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+pytest-cov==7.1.0 --hash=sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678
+coverage==7.17.0 --hash=sha256:045c1eeb19fb4eae949850a761102fffb3a5f638b97f977912f95843e54f6669

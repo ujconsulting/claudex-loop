@@ -1,6 +1,6 @@
 ---
 name: build
-description: "Hand a frozen spec (PLAN.md or any locked plan) to OpenAI Codex to IMPLEMENT with full write access, while Claude stays the spec-writer and reviewer — the exact role-flip of /plan-review. Codex builds from the spec in a --yolo sandbox, Claude reads the full diff like a contributor PR, runs the proof test, and iterates fixes via the SAME Codex session up to MAX_FIX_ROUNDS before taking over. Human approves the diff before any commit. Use when the user says \"/build\", \"have codex build this\", \"codex implement the plan\", \"hand the plan to codex\", \"delegate the build to codex\", or right after a plan survives /grill-me-codex, /grill-with-docs-codex, or /plan-review and they choose Codex for implementation (Act 3). Also for standalone delegation: refactors, mechanical migrations, bug fixes with a known repro, test/coverage writing — anything that reads as a work order. NOT for tiny edits (~<20 lines — delegation overhead loses), NOT for design work (if writing the spec forces decisions, that's /grill-me-codex first), NOT for reviewing existing code (/codex:review), and NOT for anything needing Claude-session tools (MCP, secrets, browser)."
+description: "Hand a frozen spec (PLAN.md or any locked plan) to OpenAI Codex to IMPLEMENT with full write access, while Claude stays the spec-writer and reviewer — the exact role-flip of /plan-review. Codex builds from the spec in a --yolo sandbox, Claude reads the full diff like a contributor PR, runs the proof through `sandbox_run.py`, and iterates fixes via the SAME Codex session up to MAX_FIX_ROUNDS before taking over. Human approves the diff before any commit. Use when the user says \"/build\", \"have codex build this\", \"codex implement the plan\", \"hand the plan to codex\", \"delegate the build to codex\", or right after a plan survives /grill-me-codex, /grill-with-docs-codex, or /plan-review and they choose Codex for implementation (Act 3). Also for standalone delegation: refactors, mechanical migrations, bug fixes with a known repro, test/coverage writing — anything that reads as a work order. NOT for tiny edits (~<20 lines — delegation overhead loses), NOT for design work (if writing the spec forces decisions, that's /grill-me-codex first), NOT for reviewing existing code (/codex:review), and NOT for anything needing Claude-session tools (MCP, secrets, browser)."
 ---
 
 # Codex-Build — Codex Types, Claude Verifies
@@ -65,7 +65,7 @@ through ToolSearch; `claudex-reader` reached none. See `ROLES.md`.
 | `SPEC_FILE` | `PLAN.md` | The frozen spec Codex implements. |
 | `MAX_FIX_ROUNDS` | `2` | Fix iterations via resume before Claude takes over and finishes directly. |
 | `LOG_FILE` | `PLAN-REVIEW-LOG.md` | Append-only build transcript. If it exists (Act 1/2 ran), append `## Act 3 — Build`; else create it. |
-| `PROOF_CMD` | from spec | Exact test/verify command Codex must run as proof. If the spec lacks one, ask the user ONE question to get it before launching. |
+| `PROOF_CMD` | from spec | Exact test/verify command Codex must run as proof. If the spec lacks one, ask the user ONE question to get it before launching. Claude's own proof run in Step 3.3 goes through `scripts/sandbox_run.py` only (never on the host). |
 | `SCRATCH_DIR` | harness scratchpad, else `<repo>/.claudex-tmp/` | Disposable staging for the prompt contract, the `-o` capture and stderr. ⛔ Never `/tmp`. |
 
 Echo resolved values before starting.
@@ -137,7 +137,7 @@ SPEC: Read <SPEC_FILE> at the repo root. It is a frozen, already-reviewed spec.
 KEY PATHS: <files/dirs Codex will touch or must read first>
 CONSTRAINTS: <"don't touch X", style rules, deps that must not change>
 NON-GOALS: <explicitly out of scope — from the plan's Out of scope section>
-PROOF: Run `<PROOF_CMD — from the plan's Verification section when it has one, its real-output inputs and old-vs-new comparison included>` and include its full output in your report.
+PROOF (the Codex build itself runs raw until B2; Claude's own proof run goes through `sandbox_run.py`): Run `<the proof command — from the plan's Verification section when it has one, its real-output inputs and old-vs-new comparison included>` and include its full output in your report.
 OUTPUT: End with a report — files changed (one line each: path + what/why),
   proof output, and any deviations from the spec with reasons.
 EOF
@@ -186,8 +186,14 @@ Verify yourself:
 1. `git status -sb` + read the FULL diff with `git diff HEAD` — **not** plain `git diff`, which shows only unstaged changes and hides anything Codex staged (upstream [#18](https://github.com/chaseai-yt/claudex-loop/pull/18)). Untracked files from `git status` are read too. If `git diff --cached` is non-empty, Codex staged something although it must not commit: where index and working tree differ (`git diff --name-only` for those paths), the commit would carry the index. Decide which state you review: `git restore --staged <path>` puts the index back to **`HEAD`** (it does *not* copy the working tree), after which `git diff HEAD` shows the working-tree change alone; log which you did. Judge it like a contributor PR: correctness, spec fidelity, style match with surrounding code, nothing touched outside scope.
 
    **Pin what you reviewed** (the same binding as the post-build inspection in `claudex-loop`): once the diff read is done, stage exactly the reviewed paths (`git add <path> …` — never `-A`), check that `git diff --name-only -- <those paths>` prints nothing, and record `git write-tree` as `REVIEWED_TREE` in `LOG_FILE`. Every fix round re-stages and re-pins.
-2. **Trace every changed test back to a spec line.** A green suite proves the code does what its tests say; it does not prove the tests were asked for. The failure mode to hunt is **unrequested code paired with a test asserting it** — that combination reads as verified and sails through a proof run. List the tests the diff added, and for each name the spec item it covers. A test with no spec line behind it is the tell: either Codex solved a problem the spec had already settled differently, or it invented a requirement. Both are findings.
-3. Run `PROOF_CMD` yourself (or the focused tests for the changed area). Codex's pasted output doesn't count as proof.
+2. **Trace every changed test back to a spec line.** A green suite proves the code does what its tests say; it does not prove the tests were asked for. The failure mode to hunt is **unrequested code paired with a test asserting it** — that combination reads as verified and sails through a green check. List the tests the diff added, and for each name the spec item it covers. A test with no spec line behind it is the tell: either Codex solved a problem the spec had already settled differently, or it invented a requirement. Both are findings.
+3. Run the proof yourself — through `scripts/sandbox_run.py`, never on the host. The repository under review controls what its tests execute, so they run in a disposable container on exactly the tree you just pinned (B1; the Codex build itself still runs raw until B2). Codex's pasted output doesn't count as proof.
+
+   ```bash
+   python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" --tree "$REVIEWED_TREE" --image python-test -- <the proof command or the focused tests>
+   ```
+
+   It prints `RUN_DIR=`, `TREE=`, `COMMAND_STATUS=`, `COMMAND_EXIT=` and `MANIFEST_SHA256=`. **Pass rule: only `COMMAND_STATUS=exited` with `COMMAND_EXIT=0` counts.** `timeout`, `oom`, `output_limit` and `not_started` are failures, never a pass. Log `MANIFEST_SHA256=` together with the tree id under `## Act 3 — Build`; a manifest whose `TREE=` is not `$REVIEWED_TREE` is not evidence for this step. The runner's own exit code says only whether the run happened: `2` = refused, `5` = infrastructure — neither is a test result. There is **no host fallback**: if Docker or the image is missing, or the program is not one of the image's tools, the step is refused (runner exit `2`) — say so, and the human may run the command themselves, on their own responsibility. A dependency the image lacks that the program then loads (a module the code imports) is not refused up front: it fails inside the container (`COMMAND_EXIT` != 0, usually `2` for a collection error). Report that as "dependencies outside the image (B1 supports only image-contained dependencies; see B1.5)", never as a failing result about the code. Pin first (Step 3.1), run second: this step needs `REVIEWED_TREE`.
 4. **Read the "Deviations" section as a claim, not a summary.** `Deviations: None` is common on builds that did deviate — a spec step that turns out impossible gets quietly resolved the right way and never reported. Where the diff diverges from the spec text, decide whether the spec or the code was wrong, and log which.
 5. Append to `LOG_FILE` under `## Act 3 — Build`: `### Round <n> — Codex build` + its report summary + `### Claude's verdict` + what passed/failed review.
 
@@ -212,7 +218,7 @@ This is the one place in the plugin that does NOT go through `tools/codex_ro.py`
 deliberately so: the wrapper exists to make write access impossible, and this step is
 the build. Everything else — ping, review, resume-for-review — goes through it.
 
-Re-verify (Step 3) after each round. After `MAX_FIX_ROUNDS` failed rounds: STOP delegating — Claude takes over and finishes the remaining fixes directly. Log the takeover. Ping-ponging trivia through delegation burns more than it saves.
+Re-verify (Step 3) after each round — re-pin, and rerun the proof through `sandbox_run.py` on the new `REVIEWED_TREE`; an older manifest is not evidence for the new tree. After `MAX_FIX_ROUNDS` failed rounds: STOP delegating — Claude takes over and finishes the remaining fixes directly. Log the takeover. Ping-ponging trivia through delegation burns more than it saves.
 
 ## Step 5 — Human gate (diff sign-off)
 
@@ -225,7 +231,7 @@ Present: 3-bullet summary of what was built, files-changed list, proof-test outp
 ## Hard rules
 
 - Codex's diff is the only diff in the tree it builds in. Always. A detached worktree is how you get that when the dirt belongs to another session — not `git stash`.
-- Claude never skips the diff read. Every Codex claim is advisory until Claude has read the diff and run the proof, and that includes any QA or self-review Codex ran inside its own session.
+- Claude never skips the diff read. Every Codex claim is advisory until Claude has read the diff and run the proof through `sandbox_run.py`, and that includes any QA or self-review Codex ran inside its own session.
 - Fix loop terminates at `MAX_FIX_ROUNDS` — then Claude takes over. No unbounded delegation ping-pong.
 - Commits, pushes, releases, GitHub mutations: Claude-side only, after the human gate. Codex never commits.
 - `LOG_FILE` is the deliverable — with Acts 1/2 it tells the whole story: grilled → reviewed → built → verified.

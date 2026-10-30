@@ -126,7 +126,27 @@ cheaper, and put the *results* into the reviewer's prompt:
 
 - **Whatever the repo already has.** Most repos have a validation entry point (a
   `validate` command, a Makefile target, a CI workflow). Use it instead of
-  re-inventing the toolchain — and say in the log which one you used.
+  re-inventing the toolchain — and say in the log which one you used — but never on
+  the host: the repository under audit controls what its own commands execute. Such an
+  entry point runs only through the sandbox runner (see "Where each tool may run"
+  below), on a pinned input. The audit pins `HEAD` as is
+  (`git rev-parse HEAD^{tree}`): **uncommitted changes are not part of this run**, and
+  the log says so.
+
+  ```bash
+  python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR"     --tree "$AUDIT_TREE" --image python-test -- <the entry point and its arguments>
+  ```
+
+  **Pass rule: only `COMMAND_STATUS=exited` with `COMMAND_EXIT=0` counts.** Anything
+  else (`timeout`, `oom`, `output_limit`, `not_started`) is a failed run, and runner
+  exit `2` (refused) or `5` (infrastructure) is not a result about the code at all.
+  Log `MANIFEST_SHA256=` with the tree id. There is no host fallback: with Docker or
+  the image missing, or a program that is not one of the image's tools, it is refused
+  (runner exit `2`) — record "not run: refused" in the coverage note and say that the
+  human may run it themselves. A dependency the image lacks that the program then
+  loads fails inside the container (`COMMAND_EXIT` != 0); record it as "not run:
+  dependencies outside the image (B1 supports only image-contained dependencies;
+  B1.5 is the rest)", not as a finding about the code.
 - **The standing four**, language-independent and worth running on almost any repo.
   Probe first — `command -v <tool>` — and name in the log which ones were absent;
   a tool that never ran is not a clean result:
@@ -142,9 +162,27 @@ cheaper, and put the *results* into the reviewer's prompt:
   prompt, and the reviewer is a remote model. Without redaction an audit *transmits*
   every secret it discovers — turning a scan into the leak it was looking for.
 
-- Language layers on top, when they exist: linters (ruff/eslint/golangci-lint),
-  dependency audits (pip-audit, npm audit, OSV), further secret scanning (TruffleHog),
-  IaC checks (Checkov), docstring and test coverage (`interrogate`, coverage report).
+- Language layers on top, when they exist, each by the classification below: `ruff`
+  and `interrogate` (static, host), eslint and golangci-lint (they load project
+  config or plugins: runner or refused), Checkov (custom checks load project code:
+  runner or refused), the test-coverage report (runner), further secret scanning
+  (TruffleHog), and the dependency auditors.
+
+  **Where each tool may run** (B1 classification — a tool that is not in the table is
+  treated as loading project code until it is classified):
+
+  | Class | Tools | Where |
+  |---|---|---|
+  | static, reads files only | gitleaks, grype, hadolint, actionlint, interrogate, ruff | host |
+  | loads project code or config | pytest and coverage, the repo's own entry points, eslint with project config, golangci-lint with plugins, Checkov with custom checks | `sandbox_run.py` with the `python-test` image, or refused. The image carries Python, pytest, pytest-cov, coverage and git only (`config/sandbox/requirements-test.txt`), and the runner accepts only the tools listed in `config/sandbox-policy.json`: a tool the image lacks is refused, never installed |
+  | dependency auditors | pip-audit, npm audit, OSV-Scanner | **not covered by B1**: host, at the user's own risk until B1.5 |
+
+  ⛔ **Dependency auditors run on the host, at the user's own risk, until B1.5.**
+  pip-audit's requirements source can create a venv and install the requirements, and
+  that is project code; npm audit and OSV-Scanner read manifests and lockfiles the
+  repository controls. B1 has no non-installing, sandboxed invocation for them (B1.5
+  defines one), so say this warning in the log next to the result, and run them only
+  when the user accepts the risk. They are not a reason to fail an audit when skipped.
 
 Verified 2026-08-28 against gitleaks 8.30.1, grype 0.118.0, hadolint 2.15.1,
 actionlint 1.7.12 — flags differ across major versions, so check `--help` if a call is

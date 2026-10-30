@@ -96,9 +96,15 @@ PY
 ```
 
 Gefundene Loecher **durch konkrete Kommandos ersetzen**, nicht einfach loeschen: die
-Aufrufe, die das Repo wirklich braucht, gezielt eintragen (`Bash(python -m pytest*)`,
-`Bash(powershell -Command "Get-Content*)` …). Fehlt spaeter etwas, fragt Claude einmal nach
-— genau so ist es gedacht.
+Aufrufe, die das Repo wirklich braucht, gezielt eintragen (`Bash(powershell -Command "Get-Content*)`
+…). Fehlt spaeter etwas, fragt Claude einmal nach — genau so ist es gedacht.
+
+⛔ **Keine Freigabe fuer Tests des Repos und keine fuer den Sandbox-Runner.** Tests, Linter und
+Eintrittspunkte eines Repos laden dessen Code; sie laufen seit B1 nur ueber
+`scripts/sandbox_run.py` im Container, nie auf dem Host. Ein Praefix-Eintrag fuer den Runner
+waere wieder ein Loch (`… && …` laeuft auf derselben Freigabe mit), und weder
+`hooks/wrapper_guard.py` noch `hooks/claudex-python.sh` kennen den Runner (das ist B2). Jeder
+Runner-Aufruf bleibt eine einzeln bestaetigte Rueckfrage.
 
 ⛔ **Ein an ein konkretes Skript gebundener Aufruf ist trotzdem ein Loch.** Diese Zeile
 stand hier bis zum 28.08.2026 als Entwarnung — sie war falsch, und der Skill hatte damit
@@ -174,6 +180,22 @@ siehe `docs/betrieb.md`, „Codex heben"), dann `codex login`.
 (`--ignore-user-config`); Modell und Effort der Reviews kommen aus der Rollen-Config.
 ⛔ `gpt-5.4`/`-mini` verschwanden am 31.08.2026 aus Codex; `gpt-5.6-terra` ist seit 22.09.2026
 durch `gpt-6-sol` abgelöst.
+
+**Docker und das Test-Image (B1, fuer Tests, Coverage und Proof-Laeufe).** Skills fuehren Code des
+geprueften Repos nur im Container aus (`scripts/sandbox_run.py`), ohne Rueckfall auf den Host.
+Voraussetzung ist Docker (Docker Desktop, Context `desktop-linux`, Linux-Engine) und das einmal
+von einem Menschen gebaute Image `python-test` (braucht Netz; der Runner baut und zieht nie):
+
+```bash
+docker --context desktop-linux build -f "${CLAUDE_PLUGIN_ROOT}/config/sandbox/python-test.Dockerfile" -t claudex-sandbox-python-test:2 "${CLAUDE_PLUGIN_ROOT}/config/sandbox"
+docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-python-test:2
+```
+
+Dockerfile und Build-Kontext liegen ausdruecklich unter `${CLAUDE_PLUGIN_ROOT}`, nie relativ im
+geprueften Repo (ein feindliches Repo koennte dort ein eigenes Dockerfile mitbringen). Die ausgegebene Id muss mit dem Eintrag `python-test` in `config/sandbox-policy.json` des
+Plugins uebereinstimmen (Aenderung dort nur in einem geprueften Commit). Fehlt Docker oder das
+Image, verweigern die Schritte den Lauf; der Mensch kann den Befehl auf eigene Verantwortung
+selbst ausfuehren. Der Codex-Build selbst laeuft bis B2 weiterhin roh.
 
 ### 2. Bestandsaufnahme im Ziel-Repo
 

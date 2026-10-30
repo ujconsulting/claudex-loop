@@ -39,7 +39,8 @@ flowchart LR
     C -- APPROVED --> S["✍️ You sign off"]
     C -. MAX_ROUNDS:<br>you break the tie .-> S
     S -. optional .-> D["🔨 BUILD<br>one model writes"]
-    D --> I["🔬 CROSS-INSPECT<br>the other model<br>grades the diff"]
+    D --> T["⚙️ PROOF RUN<br>in sandbox"]
+    T --> I["🔬 CROSS-INSPECT<br>the other model<br>grades the diff"]
     I --> G["✅ You approve<br>the final diff"]
     I -. default on,<br>a skip is logged .-> V["🧪 ACCEPTANCE GATE<br>dod · quality · security<br>+ docs · tests"]
     V -. facing the network:<br>then it is required .-> X["🛡️ EXPOSURE PASS<br>own model, own effort<br>SAFE / UNSAFE"]
@@ -49,10 +50,12 @@ flowchart LR
     classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
     classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
     classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    classDef sandbox fill:#f4f4f4,stroke:#10a37f,color:#1a1a1a,stroke-dasharray: 5 5
     class A,B,R,D producer
     class C,I,V,X adversary
     class L,S,G human
     class P artifact
+    class T sandbox
 ```
 
 *(Die Grafik bleibt bewusst englisch — sie ist mit der englischen Fassung identisch, damit beim Ändern nicht eine von beiden zurückbleibt.)*
@@ -70,7 +73,7 @@ flowchart LR
 | **🔍 0 — RECON** | Claude erkundet, *bevor* es dich irgendetwas fragt — Codebase und lebende Doku, oder auf der grünen Wiese Stand der Technik, Stacks und bekannte Fallstricke (die Rechercheteife ist ein Tor, das **du** kontrollierst, bis hin zu einem Multi-Agenten-Deep-Research-Workflow) | Beginnt mit einem **Annahmen-Ledger**: alles bereits Geklärte, in einer Antwort gebündelt bestätigt. Das Interview verschwendet keine Frage, die Code oder Recherche schon beantwortet haben |
 | **🎯 1 — INTERROGATE** | Eine sichtbare **Entscheidungskarte** trennt offene Entscheidungen in tragende (einzeln gefragt) und kosmetische (gebündelt, Veto per Ausnahme) | Jede Frage muss ihre Existenz rechtfertigen: *warum sie zählt*, eine verbindliche *Empfehlung*, und *was kaputtgeht, wenn wir falsch raten*. Notausgang: „alle übrigen Empfehlungen übernehmen" |
 | **⚔️ 2 — REVIEW** | Codex prüft `PLAN.md` in einer read-only-Sandbox → `VERDICT: APPROVED` oder `REVISE` mit konkreten Mängeln. Claude entscheidet (weist schlechte Kritik *mit protokollierter Begründung* zurück), überarbeitet — jede Stelle, die noch ein überholtes Verhalten beschreibt, die Abnahmekriterien eingeschlossen, wird geändert oder markiert, damit keine Fassung beides sagt — und setzt **dieselbe Codex-Session** fort | Der Prüfer erinnert sich an seine früheren Funde und greift seine eigenen akzeptierten Fixes an. Begrenzt durch `MAX_ROUNDS` — eine ausgewiesene Pattsituation schlägt ein vorgetäuschtes „approved" |
-| **🔨 3 — BUILD** *(optional)* | Du wählst den Bauenden. **Codex baut** (`build`, volle Schreibrechte) → Claude liest den gesamten Diff wie einen Contributor-PR und führt den Beweistest selbst aus. **Claude baut** → eine *frische* read-only-Codex-Session inspiziert den fertigen Diff gegen den Plan — standardmäßig an, Funde werden entschieden und protokolliert. Ein Fund, der ändert, *was* gebaut werden muss, ändert `PLAN.md` selbst und kommt an deinem Gate als Planänderung nach der Freigabe an. Der Inspektor bekommt einen eigenen Prompt (Abnahmekriterien, jede geänderte Datei vollständig, Tests, die nur den Code bestätigen) und beurteilt die **gestagte** Änderung: der Index wird mit `git write-tree` festgehalten, und vor dem Commit lässt `scripts/tree_check.py` genau die eigenen Änderungen des Reviews zu — das Log wächst nur, die `claudex-gate:`-Marke im Plan springt um — und sonst nichts, sodass ein Commit mit ungeprüftem Inhalt nicht als geprüft committet wird | Der finale Code wird immer vom rivalisierenden Modell benotet, egal welches ihn geschrieben hat. Die Inspektion zu überspringen verlangt einen ausdrücklichen, protokollierten Opt-out |
+| **🔨 3 — BUILD** *(optional)* | Du wählst den Bauenden. **Codex baut** (`build`, volle Schreibrechte) → Claude liest den gesamten Diff wie einen Contributor-PR und führt den Beweistest selbst aus — in einem Wegwerf-Container auf dem geprüften Baum (`scripts/sandbox_run.py`), nie auf dem Host. **Claude baut** → eine *frische* read-only-Codex-Session inspiziert den fertigen Diff gegen den Plan — standardmäßig an, Funde werden entschieden und protokolliert. Ein Fund, der ändert, *was* gebaut werden muss, ändert `PLAN.md` selbst und kommt an deinem Gate als Planänderung nach der Freigabe an. Der Inspektor bekommt einen eigenen Prompt (Abnahmekriterien, jede geänderte Datei vollständig, Tests, die nur den Code bestätigen) und beurteilt die **gestagte** Änderung: der Index wird mit `git write-tree` festgehalten, und vor dem Commit lässt `scripts/tree_check.py` genau die eigenen Änderungen des Reviews zu — das Log wächst nur, die `claudex-gate:`-Marke im Plan springt um — und sonst nichts, sodass ein Commit mit ungeprüftem Inhalt nicht als geprüft committet wird | Der finale Code wird immer vom rivalisierenden Modell benotet, egal welches ihn geschrieben hat. Die Inspektion zu überspringen verlangt einen ausdrücklichen, protokollierten Opt-out |
 
 **Die Invariante über alle vier:** *wer die Sache gemacht hat, prüft die Sache nie.* Plan von Claude → angegriffen von Codex. Code von Codex → geprüft von Claude. Code von Claude → inspiziert von Codex. Niemand benotet die eigene Arbeit, auf keinem Pfad.
 
@@ -186,6 +189,17 @@ gesamtes Produkt Kontrollen sind:
   bestätigte die Kontrolle im Wrapper als geschlossen, und sein letzter Fund — in den
   Contract-Tests der Skills — ist rot-zuerst behoben, vom Reviewer aber noch nicht
   gegengeprüft. So wie es ist aufgeschrieben in [`docs/audit/2026-09-11-scope.md`](./docs/audit/2026-09-11-scope.md) §10.
+- **Das Abnahme-Gate des Sandbox-Runners fand zwei HIGHs, nachdem zwei
+  Inspektionsrunden ihn durchgelassen hatten** (30.10.2026, Plan B1). Die Ausgabe des
+  Befehls ging in normale Dateien, die der Befehl selbst offen hielt: Er konnte über den
+  Deckel hinaus schreiben und die Datei vor der Größenprüfung per `ftruncate`
+  zurückkürzen, oder einen Hintergrundprozess nach der letzten Prüfung weiterschreiben
+  lassen — ein Überlauf, gemeldet als `exited`, Exit 0. Die Captures sind jetzt Pipes,
+  gezählt vom Driver und erst dann bis EOF gelesen, wenn jeder Prozess des Laufs tot ist.
+  Und das Betriebshandbuch rief `python scripts/sandbox_run.py` relativ zum geprüften
+  Checkout auf, ein feindliches Repo hätte also genau den Runner geliefert, der es
+  einhegen soll; ein Contract-Test hält jetzt jeden Runner-Aufruf an die Kopie des
+  installierten Plugins.
 
 Drei unabhängige Durchgänge über dieselben 500 Zeilen, jeder fand, was der vorige
 übersehen hatte. Das ist das Argument für die ganze Methode, vorgetragen gegen ihren
@@ -331,6 +345,7 @@ Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles
   ungepinnt. `gpt-6.1-sol` braucht sie (`gpt-6-sol` ≥ 0.156.0); ältere CLIs antworten mit HTTP 400, und der Wrapper weist es dort vorab ab;
   seine Kopfzeile zeigt die gefundene Version. Unter Windows braucht Codex ab 0.147 außerdem einen
   Wrapper **ab 2.4.0**, sonst liest der Reviewer lautlos nichts (siehe [Sicherheit](#sicherheit)).
+- **Docker** (Docker Desktop, Linux-Engine) und das Image `python-test`, einmal von einem Menschen aus `config/sandbox/python-test.Dockerfile` gebaut — der Build-Befehl steht im Dockerfile-Kopf und in `docs/betrieb.md`. Tests, Coverage und Proof-Läufe eines geprüften Repos laufen nur dort; ohne Docker oder Image werden diese Schritte verweigert, es gibt keinen Rückfall auf den Host.
 - **Angemeldet** — einmal `codex login` (jedes ChatGPT-Konto: Free/Plus/Pro/Max)
 - **Modell und Aufwand kommen aus den Rollen, nicht aus deiner Codex-Konfiguration** —
   `python scripts/claudex_roles.py --spec <role>` löst sie auf (`gpt-6.1-sol/medium` für
@@ -392,6 +407,8 @@ Zwei Tore entscheiden, *wohin* geschrieben wird, beide aus [upstream PR #12](htt
 - **Eine Spec, die Funde über absolute Pfade zitiert, entkommt diesem Worktree.** `D:\...\repo\src\foo.py:210` löst auf das *ursprüngliche* Checkout auf, und ein `--yolo`-Codex editiert es — die Isolation ist weg, und nichts sagt es. Der Skill durchsucht die Spec nach absoluten Pfaden und benennt, falls er welche findet, die verbotenen Präfixe wörtlich im Prompt-Vertrag.
 
 **Der Bauende bekommt die Shell und die Dateien, nichts, was anderswo wirkt** (seit 27.10.2026). `--yolo` heißt keine Sandbox und keine Rückfragen, und bis dahin kam jeder MCP-Server, jedes Plugin, jede App, jeder Hook und jede Computer- und Browsersteuerung aus der Codex-Konfiguration des Nutzers mit — gemessen auf einem Rechner: `n8n`, `node_repl`, `codex_app` und `cua_repl`, alle ohne Rückfrage aufrufbar. [`scripts/build_isolation.py`](./scripts/build_isolation.py) listet jetzt die aktiven Server mit `codex mcp list --json --disable apps --disable plugins`, schaltet jeden einzeln ab, ergänzt `--disable` für Apps, Plugins, Hooks sowie Computer- und Browsersteuerung und `-c notify=[]`, und gibt das an `exec` und `resume` gleichermaßen weiter. Lässt sich der Liste nicht trauen, gibt es nichts aus und endet mit Exit 2, und der Bau startet nicht. Bildgenerierung und das Modell aus `~/.codex/config.toml` bleiben; ein Bau, der einen Server braucht, bekommt `--allow-mcp <name>`, protokolliert. Upstream hat dieselbe Lücke in seinem Runner gefunden ([#43](https://github.com/chaseai-yt/claudex-loop/issues/43), [#45](https://github.com/chaseai-yt/claudex-loop/pull/45)).
+
+**Code des Repos läuft im Container, nie auf dem Host** (seit 30.10.2026, Plan B1). Jede Stelle, an der ein Skill bisher den Code des geprüften Repos ausgeführt hat — der Proof-Lauf von `build`, die Coverage von `code-review`, die Testsuite von `docs-backfill`, die Eintrittspunkte und codeladenden Linter von `audit` und die Wiederholungen nach Fixes —, geht jetzt über [`scripts/sandbox_run.py`](./scripts/sandbox_run.py). Der Runner baut einen vollständigen, begrenzten Schnappschuss genau des **festgehaltenen Git-Trees** (nie des Arbeitsbaums; jede Objekt-Id wird neu berechnet, ein Symlink- oder Submodul-Eintrag verweigert den Lauf), startet einen Wegwerf-Container aus einem Image, das in der Richtlinie des installierten Plugins steht (kein Netz, schreibgeschütztes Root, kein Host-Mount, tmpfs-Arbeitsverzeichnis, der Befehl als unprivilegierte uid ohne Capabilities), und liefert ein Manifest, das Ergebnis, Tree, Image und argv bindet: `COMMAND_STATUS=` und `COMMAND_EXIT=` tragen das Urteil, `MANIFEST_SHA256=` wird mit der Tree-Id protokolliert. Nur `exited` mit Exit 0 besteht; Timeout, OOM oder Ausgabe-Überlauf nie, und die eigenen Exit-Codes des Runners (2 verweigert, 5 Infrastruktur) sind kein Testergebnis. **Es gibt keinen Rückfall auf den Host**: ohne Docker oder Image wird der Schritt verweigert, und der Mensch kann den Befehl selbst ausführen. Abhängigkeiten müssen im Image liegen (B1.5 deckt den Rest ab): Ein Programm, das nicht zu den Werkzeugen des Images gehört, wird vorab verweigert, und ein Modul, das im Image fehlt, scheitert im Container — nie ein Bestehen; Abhängigkeits-Prüfer (pip-audit, npm audit, OSV-Scanner) sind nicht abgedeckt und laufen bis dahin auf eigenes Risiko auf dem Host. Ehrlich gesagt: die Grenze ist ein Container in einer Docker-Desktop-VM mit Root-Rechten plus die genannten Flags, keine Hardware-Grenze. **Der Codex-Bau selbst läuft bis B2 weiterhin roh** (`--yolo`, abzüglich der Isolations-Flags oben); die eigene CI dieses Repos und seine Pre-Commit-Prüfungen führen den eigenen, vertrauenswürdigen Code aus und bleiben ebenfalls roh.
 
 ### Der read-only-Wrapper — und warum er allein nicht genügt
 

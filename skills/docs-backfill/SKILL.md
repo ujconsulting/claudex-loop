@@ -107,8 +107,28 @@ git diff -U0 <TARGET> | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)'
 
 Every remaining line must be a docstring, comment or blank-line adjustment. Any
 executable line in the diff is a defect in this run — revert the batch and redo
-it. Then run the test suite: it must be **untouched and still green**. A docs
+it. Then run the test suite through `scripts/sandbox_run.py` (below): it must be **untouched and still green**. A docs
 backfill that changes behaviour has failed regardless of how good the prose is.
+
+The suite loads the repository's code, so it runs only through the sandbox runner, never
+on the host. This step had no pin of its own, so build one first, from a private index
+that leaves other sessions' staged work alone (the runner's `--pin` mode, no repository
+filter, no `git add`): list the changed paths of this batch, run the runner with them,
+and use the tree it reports.
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" \
+  --pin <changed path> [<changed path> ...] --image python-test -- python -m pytest -q
+```
+
+Check that the batch's blob ids are in the `TREE=` it prints. **Pass rule: only
+`COMMAND_STATUS=exited` with `COMMAND_EXIT=0` counts** (`timeout`, `oom`, `output_limit`
+are failures; runner exit `2` refused / `5` infrastructure is not a test result). Log
+`MANIFEST_SHA256=` with the tree id in `LOG_FILE`. No host fallback: with Docker or the
+image missing, or a program that is not one of the image's tools, the step is refused
+(runner exit `2`) and the human may run it themselves. A dependency the image lacks that
+the code imports fails inside the container (`COMMAND_EXIT` != 0): log it as
+"dependencies outside the image (B1.5)", not as a docs-only proof that failed.
 
 ### Step 5 — Adversarial review (fresh read-only Codex session)
 
