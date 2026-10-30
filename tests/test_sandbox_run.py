@@ -103,7 +103,7 @@ def run_main(argv):
 
 
 def docker_ids(label: str) -> set:
-    env = {k: v for k, v in os.environ.items() if k not in ("DOCKER_HOST", "DOCKER_CONTEXT")}
+    env = sr.client_env()
     res = subprocess.run(["docker", "--context", CONTEXT, "ps", "-a", "--filter", f"label={label}", "-q"],
                          capture_output=True, env=env, timeout=60)
     assert res.returncode == 0, res.stderr.decode(errors="replace")
@@ -144,8 +144,8 @@ class TempMixin:
         patcher = mock.patch.dict(os.environ)
         patcher.start()
         self.addCleanup(patcher.stop)
-        os.environ.pop("DOCKER_HOST", None)
-        os.environ.pop("DOCKER_CONTEXT", None)
+        for var in [k for k in os.environ if k.upper().startswith("DOCKER_")]:
+            os.environ.pop(var)
 
 
 def make_tar(members, trailing: bytes = b"") -> bytes:
@@ -357,6 +357,46 @@ class EnvironmentTests(TempMixin, unittest.TestCase):
                 with self.assertRaises(sr.Refused):
                     sr.check_environment()
 
+    def test_every_variable_that_redirects_the_client_is_refused(self):
+        # DOCKER_CONFIG names another config directory, where the policy's context name can
+        # resolve to another daemon; the TLS variables re-point or re-trust the connection.
+        for var in ("DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_TLS"):
+            with self.subTest(var=var):
+                self.clean_env()
+                os.environ[var] = "1"
+                with self.assertRaises(sr.Refused):
+                    sr.check_environment()
+
+    def test_an_unrelated_docker_variable_passes(self):
+        self.clean_env()
+        os.environ["DOCKER_BUILDKIT"] = "1"
+        sr.check_environment()
+
+    def test_the_docker_client_gets_no_docker_variable(self):
+        self.clean_env()
+        os.environ["DOCKER_BUILDKIT"] = "1"
+        os.environ["DOCKER_CONFIG"] = "elsewhere"   # refused up front; stripped here regardless
+        seen = []
+
+        def fake_run(argv, **kw):
+            seen.append(kw["env"])
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        class FakePopen:
+            def __init__(self, argv, **kw):
+                seen.append(kw["env"])
+                raise OSError("stop here")
+
+        with mock.patch.object(sr.subprocess, "run", fake_run), \
+                mock.patch.object(sr.subprocess, "Popen", FakePopen):
+            sr.docker("ctx", "version")
+            with self.assertRaises(sr.Infrastructure):
+                sr.stream_start("ctx", "cid", b"", 1.0)
+        self.assertEqual(len(seen), 2)
+        for env in seen:
+            self.assertEqual([k for k in env if k.upper().startswith("DOCKER_")], [])
+            self.assertIn("PATH", {k.upper() for k in env})
+
     def test_clean_environment_passes(self):
         self.clean_env()
         sr.check_environment()
@@ -520,8 +560,8 @@ class ResolveImageTests(unittest.TestCase):
         for p in patchers:
             p.start()
             self.addCleanup(p.stop)
-        os.environ.pop("DOCKER_HOST", None)
-        os.environ.pop("DOCKER_CONTEXT", None)
+        for var in sr.REDIRECTING_VARS:
+            os.environ.pop(var, None)
         code, _out, err = run_main(["--repo", tmp.name, "--scratch", tmp.name, "--tree", SHA1_TREE,
                                     "--image", "python-test", "--", "true"])
         self.assertEqual(code, 2, err)
@@ -569,8 +609,8 @@ class ResolveImageTests(unittest.TestCase):
         for p in patchers:
             p.start()
             self.addCleanup(p.stop)
-        os.environ.pop("DOCKER_HOST", None)
-        os.environ.pop("DOCKER_CONTEXT", None)
+        for var in sr.REDIRECTING_VARS:
+            os.environ.pop(var, None)
         code, out, err_text = run_main(["--repo", tmp.name, "--scratch", tmp.name, "--tree", SHA1_TREE,
                                         "--image", "python-test", "--", "true"])
         self.assertEqual(code, 5, err_text)
@@ -612,8 +652,8 @@ class ToolPreflightTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(tmp.cleanup)
         with mock.patch.object(sr, "docker", fail_if_called), mock.patch.dict(os.environ):
-            os.environ.pop("DOCKER_HOST", None)
-            os.environ.pop("DOCKER_CONTEXT", None)
+            for var in sr.REDIRECTING_VARS:
+                os.environ.pop(var, None)
             code, _out, err = run_main(["--repo", tmp.name, "--scratch", tmp.name, "--tree", SHA1_TREE,
                                         "--image", "python-test", "--", "npm", "test"])
         self.assertEqual(code, 2, err)
@@ -625,8 +665,8 @@ class ToolPreflightTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(tmp.cleanup)
         with mock.patch.object(sr, "docker", fail_if_called), mock.patch.dict(os.environ):
-            os.environ.pop("DOCKER_HOST", None)
-            os.environ.pop("DOCKER_CONTEXT", None)
+            for var in sr.REDIRECTING_VARS:
+                os.environ.pop(var, None)
             for argv in (["npm", "test"], ["/no/such/python3"]):
                 with self.subTest(argv=argv):
                     code, out, err = run_main(["--repo", tmp.name, "--scratch", tmp.name, "--tree", SHA1_TREE,
@@ -645,8 +685,8 @@ class ToolPreflightTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         missing = Path(tmp.name) / "no-such-scratch"
         with mock.patch.object(sr, "docker", fail_if_called), mock.patch.dict(os.environ):
-            os.environ.pop("DOCKER_HOST", None)
-            os.environ.pop("DOCKER_CONTEXT", None)
+            for var in sr.REDIRECTING_VARS:
+                os.environ.pop(var, None)
             code, out, _err = run_main(["--repo", tmp.name, "--scratch", str(missing), "--tree", SHA1_TREE,
                                         "--image", "python-test", "--", "npm", "test"])
         self.assertEqual(code, 2)
@@ -1528,7 +1568,7 @@ class ContainerProbes(TempMixin, unittest.TestCase):
         return res.stdout.decode().strip() if res.returncode == 0 else ""
 
     def test_v5_externally_killed_driver_is_infrastructure_and_cleaned_up(self):
-        env = {k: v for k, v in os.environ.items() if k not in ("DOCKER_HOST", "DOCKER_CONTEXT")}
+        env = sr.client_env()
         scratch = self.tmp()
         stop, killed = threading.Event(), []
 
@@ -1565,7 +1605,7 @@ class ContainerProbes(TempMixin, unittest.TestCase):
         # Inspection round 2, part A, finding 11: the REAL runner is killed mid-run. Its container
         # must survive while within the deadline the runner generated, and the janitor must
         # remove exactly it once that deadline plus the grace has passed.
-        env = {k: v for k, v in os.environ.items() if k not in ("DOCKER_HOST", "DOCKER_CONTEXT")}
+        env = sr.client_env()
         scratch = self.tmp()
         timeout = 120
         started = int(time.time())
@@ -1607,7 +1647,7 @@ class ContainerProbes(TempMixin, unittest.TestCase):
         self.assertEqual(self.container_state(name, env), "")
 
     def test_v5_janitor_removes_an_abandoned_container_and_keeps_a_live_one(self):
-        env = {k: v for k, v in os.environ.items() if k not in ("DOCKER_HOST", "DOCKER_CONTEXT")}
+        env = sr.client_env()
         image = sr.load_policy()["images"]["python-test"]["id"]
         now = int(time.time())
         made = {}

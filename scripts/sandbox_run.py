@@ -102,17 +102,31 @@ def load_policy(path: Path | None = None) -> dict:
     return data
 
 
+# Variables that make the docker client talk to another daemon or trust another one: the host
+# and context directly, DOCKER_CONFIG through another config directory in which the policy's
+# context name resolves differently, the TLS set by re-pointing or re-trusting the connection
+# (round-1 finding 13; post-commit security review 2026-10-30).
+REDIRECTING_VARS = ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+                    "DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH")
+
+
 def check_environment() -> None:
-    """A DOCKER_HOST/DOCKER_CONTEXT in the environment would select another daemon, where the
-    same image name can mean other bytes (round-1 finding 13)."""
-    for var in ("DOCKER_HOST", "DOCKER_CONTEXT"):
+    """Refuse when a variable in REDIRECTING_VARS is set: it would select another daemon, where
+    the same image name can mean other bytes."""
+    for var in REDIRECTING_VARS:
         if os.environ.get(var):
             raise Refused(f"{var} is set; the runner uses only the context named in the plugin policy")
 
 
+def client_env() -> dict[str, str]:
+    """The environment for every docker client call: ours without any DOCKER_* variable, so a
+    variable added to the client later cannot redirect it either."""
+    return {k: v for k, v in os.environ.items() if not k.upper().startswith("DOCKER_")}
+
+
 def docker(context: str, *args: str, timeout: float = DOCKER_TIMEOUT, data: bytes | None = None):
     """One bounded docker call. Raises Infrastructure on timeout or start failure."""
-    env = {k: v for k, v in os.environ.items() if k not in ("DOCKER_HOST", "DOCKER_CONTEXT")}
+    env = client_env()
     try:
         return subprocess.run(["docker", "--context", context, *args], input=data,
                               stdin=None if data is not None else subprocess.DEVNULL,
@@ -279,7 +293,7 @@ def stream_start(context: str, cid: str, stdin: bytes, timeout: float) -> tuple[
     """`docker start -ai`: write stdin from a thread, read stdout under RESULT_CAP and stderr under
     its own small cap WHILE receiving; on byte RESULT_CAP + 1, or on the deadline, kill the
     container at once (post-build inspection A, finding 3)."""
-    env = {k: v for k, v in os.environ.items() if k not in ("DOCKER_HOST", "DOCKER_CONTEXT")}
+    env = client_env()
     try:
         proc = subprocess.Popen(["docker", "--context", context, "start", "-ai", cid], env=env,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
