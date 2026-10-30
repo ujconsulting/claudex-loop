@@ -88,7 +88,10 @@ Auf macOS heißt der Interpreter in der Regel `python3`. Exit-Codes: `0` Antwort
 anderer Lauf gesperrt hält; eine `.codex/config.toml` im Arbeitsverzeichnis oder darüber; ein
 Modell, das die installierte CLI nicht kann), **`3` blind** — nachweisbar kein Befehl
 ausgeführt und eine Sandbox-Ablehnung oder ein unbrauchbarer Beleg: das Review **nicht**
-protokollieren —, `124` Timeout, `127` kein codex gefunden, sonst codex' eigener Code.
+protokollieren —, **`4` unsafe** (Exit 4, ab 2.7.0) — das Session-Rollout zeigt, dass der Lauf nicht
+mit read-only-Sandbox, Berechtigungsprofil und Freigabe `never` lief: **ungültige Runde, kein
+Review**, egal was das Urteil sagt; der Reviewer kann Dateien geschrieben haben, also
+`git status` prüfen und die Kopfzeile `#   applied:` lesen —, `124` Timeout, `127` kein codex gefunden, sonst codex' eigener Code.
 
 ⛔ **Auch Ping und Resume laufen über den Wrapper.** Ein direkter `codex exec` umgeht
 Sandbox-Pin, Pfadgrenzen, stderr-Datei, Timeout und MCP-Abschaltung auf einmal — und

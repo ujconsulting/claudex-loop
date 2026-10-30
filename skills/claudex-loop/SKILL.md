@@ -320,6 +320,9 @@ python tools/codex_ro.py --expect-workdir "$TARGET" --model "$MODEL" --effort "$
   --err-file "$SCRATCH_DIR/codex-stderr-r$ROUND.txt"
 ```
 
+Wrapper exit 3 (blind) or exit 4 (the read-only sandbox was not applied — `#   applied:`
+line; check `git status`) is an INVALID round, whatever the verdict says.
+
 ⛔ **Never `"$(cat REVIEW_PROMPT)"`.** That is what this line said until the audit of
 2026-08-30, and `REVIEW_PROMPT` is a bare relative filename that no step ever creates.
 On a clean repo `cat` fails and Codex is launched with an EMPTY prompt — a review that
@@ -351,6 +354,8 @@ python tools/codex_ro.py --expect-workdir "$TARGET" --resume "$THREAD_ID" --mode
   --err-file "$SCRATCH_DIR/codex-stderr-r$ROUND.txt"
 ```
 
+Same rule on resume: wrapper exit 3 or exit 4 is an INVALID round, whatever the verdict says.
+
 ⛔ **`resume` REJECTS `-s`.** Read-only is reachable there only through `-c sandbox_mode`,
 and a LATER `-c` beats an earlier one — so a raw `codex exec resume` is one appended
 argument away from inheriting `config.toml` and writing files. The wrapper makes
@@ -379,6 +384,11 @@ forever at ~0% CPU under a non-interactive driver without it.
      without a sandbox backend, wrapper ≥ 2.4.0); the verdict was written from the prompt
      alone. Log `## Round <n> — INVALID (exit 3, reviewer read nothing)` and do not count
      it as an approval.
+   - **Wrapper exit 4 is an INVALID ROUND too** — not a review, whatever the verdict file
+     says. The read-only sandbox was not applied to the answering turn (wrapper ≥ 2.7.0;
+     the `#   applied:` header line says what ran instead) and the reviewer may have
+     written files: check `git status`, log `## Round <n> — INVALID (exit 4, sandbox not
+     read-only)`, do not count it as an approval.
 3. If round > `MAX_ROUNDS` → break to Resolution (deadlock).
 
 ### If Codex dies mid-loop (quota, credits, outage) — degrade, don't dead-end

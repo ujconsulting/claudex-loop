@@ -341,7 +341,9 @@ python tools/codex_ro.py --expect-workdir "$TARGET" --effort low --timeout 120 \
 
 Erwartung: Exit 0, `THREAD_ID=…`, und `PING-OK` in `ping-out.txt`. Kein Trust-Prompt,
 kein Sandbox-Fehler. Exit 2 = abgewiesen (Pfad oder `-c`), Exit 1 = leere Antwort trotz
-Exit 0 beim Kind — der Auth-Fall, der Grund steht dann in `ping-err.txt`.
+Exit 0 beim Kind — der Auth-Fall, der Grund steht dann in `ping-err.txt`. Exit 4 = die
+Read-only-Sandbox galt für den Lauf nicht (ungültig, kein Review; `git status` prüfen und
+die Kopfzeile `#   applied:` in der Ausgabe lesen).
 
 MCP-Server aus der Nutzer-Config starten seit Wrapper 2.6.0 gar nicht mehr: der Wrapper
 lädt diese Config nicht (`--ignore-user-config`), schaltet Web-Suche, Apps, Plugins und

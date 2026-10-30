@@ -327,7 +327,11 @@ its own diff).
 Capture `thread_id` from the `thread.started` line; 10-minute ceiling
 (`timeout: 600000` via Claude Code's Bash tool). stderr goes to a **file**: a
 quota/auth failure can present as exit 0 + empty output file, and the real
-error (429/401) only appears there. On resume, force `-c
+error (429/401) only appears there. **Wrapper exit 3 (blind) and exit 4 (the read-only
+sandbox was not applied to the answering turn; see the `#   applied:` header line, and
+check `git status` — the reviewer may have written files) are INVALID ROUNDS** — not a
+review and never a pass, whatever the verdict lines say; the same holds for the exposure
+pass. On resume, force `-c
 sandbox_mode="read-only"` (resume rejects `-s`) and feed the recheck prompt
 via stdin the same way.
 
@@ -394,6 +398,8 @@ python tools/codex_ro.py --expect-workdir "$TARGET" --model "$EXPOSURE_MODEL" --
   --out-file "$SCRATCH_DIR/exposure-r$ROUND.txt" --err-file "$SCRATCH_DIR/exposure-stderr-r$ROUND.txt"
 ```
 
+Wrapper exit 3 (blind) or exit 4 (the read-only sandbox was not applied — `#   applied:`
+line; check `git status`) is no exposure verdict: log it as INVALID, never as SAFE.
 (`EXPOSURE_MODEL`/`EXPOSURE_EFFORT` are the `model=`/`effort=` fields of
 `claudex_roles.py --spec exposure-review`. There is no "without the wrapper" variant:
 this call is a review, and reviews go through `tools/codex_ro.py`.)

@@ -273,7 +273,9 @@ python tools/codex_ro.py --expect-workdir "$TARGET" --model "$EXPOSURE_MODEL" --
 ```
 
 `EXPOSURE_MODEL`/`EXPOSURE_EFFORT` come from `claudex_roles.py --spec exposure-review`.
-Log each as `## Exposure — <component> — <model>/<effort>` + report verbatim.
+Log each as `## Exposure — <component> — <model>/<effort>` + report verbatim. Wrapper exit 3
+(blind) or exit 4 (the read-only sandbox was not applied — `#   applied:` line; check
+`git status`) is no exposure verdict: log it as INVALID and rerun or report it.
 `EXPOSURE: SAFE` with zero findings and an empty `Checked:` line is invalid. A
 CRITICAL here — an unauthenticated reachable route, a forgeable identity header, a
 secret in a response — goes to the user **immediately**, before the rest of the audit
@@ -384,7 +386,7 @@ actually sent, ranges clipped to the file) and refuses if the prompt still holds
 the wrapper runs as for every review (`--expect-workdir "$TARGET"`); `judge` parses the one
 JSON answer against the stored dispatch — not against the record, which may have changed —
 and appends it to the ledger at once. Anything malformed, with duplicate keys, mis-bound,
-outside the sent lines, timed out or blind (exit 3) is `UNRESOLVED`. If the ledger line
+outside the sent lines, timed out, blind (exit 3) or unsafe (exit 4) is `UNRESOLVED`. If the ledger line
 cannot be redacted, `judge` fails and records nothing: stop.
 
 ```bash
@@ -400,8 +402,9 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/hunt_run.py" judge --run "$RUN_DIR" --reco
 it for that one call — the wrapper call stays a single command (the guard refuses anything
 chained to it), so read the status there and substitute it literally. Never a value from an
 earlier record, never a default: without the status of this record's wrapper call, do not
-call `judge` — the record stays `UNRESOLVED`. 124 (timeout) and 3 (blind run) are statuses
-like any other and `judge` turns them into `UNRESOLVED`.
+call `judge` — the record stays `UNRESOLVED`. 124 (timeout), 3 (blind run) and 4 (sandbox
+not read-only; the verifier may have written files, so check `git status`) are statuses
+like any other and `judge` turns every non-zero one into `UNRESOLVED`.
 
 ⛔ **What the redaction does and does not do.** It covers everything *we send* the
 verifier. The read-only verifier can still read the repository itself, as in every Codex

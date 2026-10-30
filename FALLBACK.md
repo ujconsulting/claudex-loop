@@ -126,6 +126,11 @@ Properties, deliberately different from the Codex path:
   plan state; any later edit self-demotes it — re-review instead of keeping
   the tick.
 
+**Not a quota failure:** wrapper exit 3 (blind) and exit 4 (sandbox not read-only; the
+reviewer may have written files, see the `#   applied:` header line and `git status`) are
+INVALID ROUNDS, not auth/quota signatures — do not wait, resume or switch reviewers on
+them; fix the cause and rerun. (The adapter's own exit 3 above is a different code.)
+
 ## Other gates reuse the same machinery
 
 The adapter is not plan-review-specific: `--system-file` swaps in any gate's

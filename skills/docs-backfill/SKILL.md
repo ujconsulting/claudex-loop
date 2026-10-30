@@ -130,7 +130,9 @@ Mechanics are `code-review`'s: `-s read-only`, prompt via **stdin**, output
 to a file via `cygpath -w`, stderr to a **file** (a 401/429 presents as exit 0
 with empty output), 600 s ceiling, `< /dev/null`. Or hand all of that to the
 wrapper: `python tools/codex_ro.py --prompt-file p.txt --out-file v.txt`, which
-does it the same way on Windows and macOS. Preflight the quota with
+does it the same way on Windows and macOS. Wrapper exit 3 (blind) and exit 4 (the
+read-only sandbox was not applied — see its `#   applied:` line; check `git status`) are
+an INVALID review, whatever the verdict says. Preflight the quota with
 `python scripts/codex_usage.py`; on exhaustion the user decides — wait, fallback
 via `scripts/fallback_review.py --chain --require-verdicts "DOCS:ACCURATE|INACCURATE"`,
 or skip with an explicit log entry. Never silently.
