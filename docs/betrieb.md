@@ -534,10 +534,14 @@ verweigert und der Mensch kann den Befehl selbst ausführen. Plan und Messungen:
 `docs/plans/2026-10-27-sicherheitskette/PLAN-B1-sandbox-run.md`.
 
 ```text
-python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch <dir> (--tree <sha> | --pin <pfad>...) --image python-test     [--export NAME]... [--timeout S] -- <argv...>
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch <dir> (--tree <sha> | --pin <pfad>...) --image python-test [--deps <pfad im Tree>]... [--export NAME]... [--timeout S] -- <argv...>
 ```
 
-Ausgabe: `RUN_DIR=`, `TREE=`, `COMMAND_STATUS=`, `COMMAND_EXIT=`, `MANIFEST_SHA256=`; Exporte liegen in
+Jeder Aufruf beginnt mit `python -I` (isoliert): eine geerbte `PYTHONPATH`, das Checkout oder das
+Benutzer-Site-Verzeichnis darf kein `sitecustomize` laden, bevor der Runner etwas prueft.
+
+Ausgabe: `RUN_DIR=`, `TREE=`, `COMMAND_STATUS=`, `COMMAND_EXIT=`, `MANIFEST_SHA256=` (mit `--deps` zusaetzlich
+`REQUIREMENTS_SHA256=`); Exporte liegen in
 `RUN_DIR/out/<name>`. Eigener Exit-Code: 0 = der Lauf hat stattgefunden (Urteil in `COMMAND_STATUS=`
 und `COMMAND_EXIT=`), 2 = verweigert, 5 = Infrastruktur. **Bestanden ist nur `COMMAND_STATUS=exited`
 mit `COMMAND_EXIT=0`**; `MANIFEST_SHA256=` wird mit der Tree-Id protokolliert.
@@ -552,8 +556,53 @@ docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-
 
 Dockerfile und Kontext stehen ausdruecklich unter `${CLAUDE_PLUGIN_ROOT}` (nie relativ im geprueften Repo).
 Die Id muss dem Eintrag in `config/sandbox-policy.json` entsprechen (nur das Plugin-Verzeichnis zählt,
-nie das Checkout unter Prüfung; Änderung in einem geprüften Commit). Nur Abhängigkeiten **im Image**
-sind unterstützt (B1.5 für den Rest); Abhängigkeits-Prüfer (pip-audit, npm audit, OSV-Scanner) deckt B1 nicht ab.
+nie das Checkout unter Prüfung; Änderung in einem geprüften Commit). Abhängigkeiten liegen entweder
+**im Image** oder kommen über `--deps` (B1.5, unten).
+
+### Abhängigkeiten (`--deps`, B1.5)
+
+`--deps <pfad im festgehaltenen Tree>` (wiederholbar, höchstens 4) nimmt eine **vollständig gehashte**
+Requirements-Datei: je Zeile `name==version --hash=sha256:...`, kanonische PEP-440-Version, keine
+Optionen, keine Extras, keine URLs, **keine Umgebungsmarker**. Plugin-Code auf dem Host wählt die Wheels
+allein anhand des Hashes aus PyPIs JSON-Index, lädt sie als undurchsichtige Bytes (Host-Prüfung von
+sha256 und Größe, kein Redirect, keine Proxys) und öffnet nie ein Wheel; pip **im Container** installiert
+sie offline als eigene uid (65531), danach prüft der Treiber den Abschluss der deklarierten Metadaten.
+Auf dem Host läuft kein Paket-Werkzeug (weder pip noch npm noch ein Audit-Werkzeug). Dieselbe `--deps`-Angabe
+gilt bei jedem Lauf eines Gates (erster Lauf, Mutationsläufe, Wiederholungen nach Fixes).
+
+- `COMMAND_STATUS=deps_failed` heißt: Installation oder Abschlussprüfung scheiterte, der Befehl lief
+  nie. Das ist ein Fehlschlag, nie ein Bestehen, und ein Abhängigkeitsproblem, kein Testergebnis.
+- Ungehashte oder markerhaltige Requirements werden nicht ausgeführt, nie auf dem Host:
+  "dependencies outside the image - the requirements are not hashed (B1.5)". Kompilieren fürs Image:
+  `uv pip compile --generate-hashes --python-version 3.13 --python-platform x86_64-manylinux_2_28`;
+  bleiben danach Marker stehen, wird die Datei trotzdem verweigert.
+- Verweigert bleiben außerdem Quellpakete (sdist), private Indizes, Proxys, Nicht-PyPI-Ökosysteme für
+  Installationen und arm64. Ehrliche Grenze: die Abschlussprüfung beweist nur, was die Metadaten
+  deklarieren; ein Test, der bei fehlendem optionalem Import überspringt, besteht trotzdem.
+- **Netz-Ausgang**: `pypi.org`, `files.pythonhosted.org` (Wheels) und `api.osv.dev` (Audit). **Paketnamen
+  und Versionen verlassen dabei den Rechner.**
+- **Quarantäne**: Hängt ein Download-Worker so, dass sein Ende nicht bestätigt werden kann, bleibt sein
+  Verzeichnis liegen (Exit 5) und `<scratch>/claudex-quarantine/<run id>.json` hält Pfad, pid und Frist
+  fest. **Nichts löscht das automatisch.** Der Runner listet die Einträge beim Start (als Daten, er folgt
+  keinem Pfad). Von Hand entfernen, nachdem geprüft ist, dass die pid beendet ist.
+
+### Abhängigkeits-Audit (`dep_audit.py`, B1.5)
+
+```text
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/dep_audit.py" --repo . --tree <sha> --scratch <dir> --file <pfad im Tree> [--file <pfad im Tree>]...
+```
+
+Liest die Dateien aus dem Snapshot des festgehaltenen Trees, parst sie selbst und fragt die OSV-API mit
+exakten Name/Version-Paaren (ein Ergebnis je Paket, sonst "unvollständig"). Eingaben: `package-lock.json`
+Version 2/3 (nur Registry-Einträge); jede andere Datei gilt unabhängig vom Namen als Requirements-Datei
+(`requirements.lock`, `locks/test.txt`) und muss vollständig gehasht sein, ohne Marker und Optionen.
+Bekannte Lockfiles anderer Werkzeuge werden am Namen abgewiesen. Ausgabe:
+`RUN_DIR=`, `TREE=`, `STATUS=`, `VULNERABLE_PACKAGES=`, `REPORT=`, `AUDIT_MANIFEST_SHA256=`. Exit 0 =
+vollständig und sauber, 1 = vollständig mit Funden, 2 = Eingabe verweigert, 5 = Infrastruktur oder
+unvollständig (**nie sauber**). Ein Manifest, dessen Tree nicht der festgehaltene ist, ist kein Beleg.
+Nicht abgedeckt ("no sandbox-safe audit yet"): `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `uv.lock`,
+`Pipfile.lock`, ungehashte Requirements, Cargo, Go, Maven.
+
 **Welches Werkzeug wo laeuft** (Klassifikation wie in `skills/audit/SKILL.md`; ein Werkzeug, das nicht in
 der Tabelle steht, gilt als Code-ladend, bis es eingeordnet ist):
 
@@ -561,7 +610,7 @@ der Tabelle steht, gilt als Code-ladend, bis es eingeordnet ist):
 |---|---|---|
 | static, reads files only | gitleaks, grype, hadolint, actionlint, interrogate, ruff | host |
 | loads project code or config | pytest and coverage, the repo's own entry points, eslint with project config, golangci-lint with plugins, Checkov with custom checks | `sandbox_run.py` with the `python-test` image, or refused. The image carries Python, pytest, pytest-cov, coverage and git only: a tool the image lacks is refused, never installed |
-| dependency auditors | pip-audit, npm audit, OSV-Scanner | **not covered by B1**: host, at the user's own risk until B1.5 |
+| dependency auditors | fully hashed requirements files (any file name) and `package-lock.json` v2/v3 | `scripts/dep_audit.py` (plugin code, no package tool; queries the OSV API); raw pip-audit, npm audit and osv-scanner are not prescribed for repositories under review |
 
 Die Grenze ist ein Container in einer Docker-Desktop-VM mit Root-Rechten. Roh bleiben: der Codex-Bau (bis
 B2), die CI (`.github/workflows/checks.yml`) und die Pre-Commit-Prüfung dieses Repos (eigener, vertrauter Code).

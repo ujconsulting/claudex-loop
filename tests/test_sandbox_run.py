@@ -11,6 +11,12 @@ when the promise is broken -- not by reading the code again:
   BEFORE any docker call (docker is patched to fail the test if called); the janitor removes
   only containers well past their deadline and reports a survivor; `--pin` refuses unsafe
   paths before any git object is written.
+- Part A, B1.5 (plan PLAN-B15-deps.md steps 2, 3, 4 runner side, 6; post-approval changes 1
+  and 2): the driver bootstrap keeps `docker create` under the Windows command-line limit and
+  carries nothing from the snapshot; `--deps` refuses before any network call or container;
+  the fetch result is cross-checked and re-verified; the deps tar is framed deterministically
+  after the snapshot; `/deps` is mounted only with `--deps`; the manifest records it all; an
+  unconfirmed worker leaves its directory in quarantine. docker and the fetch worker are faked.
 - Part B (only with CLAUDEX_DOCKER_TESTS=1, needs the local image): each probe goes through
   `sandbox_run.main([...])` on a throwaway repository whose tree holds a small probe script,
   so the boundary is measured end to end -- escape probes, "edits are discarded", binding to
@@ -22,6 +28,7 @@ a throwaway repository in a temporary directory.
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import io
@@ -35,10 +42,15 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
+import zipfile
+import zlib
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import sandbox_deps as sdeps  # noqa: E402
+import sandbox_fetch as sf  # noqa: E402
 import sandbox_run as sr  # noqa: E402
 import sandbox_snapshot as ss  # noqa: E402
 
@@ -286,9 +298,27 @@ class ReadResultTests(unittest.TestCase):
             sr.read_result(b"\0" * (sr.RESULT_CAP + 1), NONCE, [])
 
 
+DRIVER_TAIL = ["python3", "-I", "-S", "-c", "print('driver')"]
+
+# B1's `docker create` argv up to the image, verbatim (commit f9acbfe/995cbec). Without --deps the
+# B1.5 runner must produce exactly this; only the driver argv after the image may differ (plan
+# step 2; post-approval change 1).
+B1_CREATE_HEAD = [
+    "create", "--name", "claudex-run-abcd", "--label", "claudex.run=abcd",
+    "--label", "claudex.deadline=1234567890", "--pull=never", "--network", "none", "--read-only",
+    "--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL",
+    "--security-opt", "no-new-privileges", "--user", "0:0", "--pids-limit", "512",
+    "--memory", "4g", "--memory-swap", "4g", "--cpus", "2", "--log-driver", "none",
+    "--mount", "type=tmpfs,destination=/work,tmpfs-size=512m,tmpfs-mode=1777",
+    "--mount", "type=tmpfs,destination=/out,tmpfs-size=48m,tmpfs-mode=1777",
+    "--tmpfs", "/tmp:size=256m", "--tmpfs", "/home/run:size=64m",
+    "-e", "HOME=/home/run", "-w", "/", "-i",
+]
+
+
 class CreateArgsTests(unittest.TestCase):
     def setUp(self):
-        self.args = sr.create_args("abcd", 1234567890, "sha256:" + "1" * 64, "print('driver')")
+        self.args = sr.create_args("abcd", 1234567890, "sha256:" + "1" * 64, DRIVER_TAIL)
 
     def pair(self, flag, value):
         found = [i for i, a in enumerate(self.args) if a == flag and self.args[i + 1:i + 2] == [value]]
@@ -346,6 +376,26 @@ class CreateArgsTests(unittest.TestCase):
 
     def test_image_and_driver_form_the_tail(self):
         self.assertEqual(self.args[-6:], ["sha256:" + "1" * 64, "python3", "-I", "-S", "-c", "print('driver')"])
+
+    def test_without_deps_the_flags_are_b1s(self):
+        # Plan B1.5 step 2: without --deps the same flags, mounts and limits as B1.
+        self.assertEqual(self.args, B1_CREATE_HEAD + ["sha256:" + "1" * 64] + DRIVER_TAIL)
+        self.assertFalse(any("/deps" in a for a in self.args))
+
+    def test_deps_tmpfs_only_with_deps(self):
+        # Post-approval change 2: --tmpfs (exec), not --mount type=tmpfs (noexec by default).
+        args = sr.create_args("abcd", 1234567890, "sha256:" + "1" * 64, DRIVER_TAIL, deps_tmpfs="2g")
+        flag = "/deps:rw,exec,nosuid,nodev,size=2g,mode=1777"
+        self.assertEqual([args[i + 1] for i, a in enumerate(args) if a == "--tmpfs"],
+                         ["/tmp:size=256m", "/home/run:size=64m", flag])
+        # everything else is unchanged: removing the one flag pair gives B1's argv back
+        i = args.index(flag)
+        self.assertEqual(args[:i - 1] + args[i + 1:], self.args)
+
+    def test_driver_tail_must_be_the_bootstrap_shape(self):
+        for bad in ("print(1)", ["python3", "-c", "x"], ["sh", "-I", "-S", "-c", "x"]):
+            with self.subTest(bad=bad), self.assertRaises((TypeError, ValueError)):
+                sr.create_args("abcd", 1, "sha256:" + "1" * 64, bad)
 
 
 class EnvironmentTests(TempMixin, unittest.TestCase):
@@ -1054,6 +1104,958 @@ class CreateCleanupTests(TempMixin, unittest.TestCase):
         self.assertEqual(manifest["cleanup"], "UNCONFIRMED")
 
 
+# --- part A, B1.5: --deps, the driver bootstrap, the deps tar ---------------------------------
+
+B85_ALPHABET = set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~")
+BOOTSTRAP_RE = re.compile(r"import zlib,base64;exec\(zlib\.decompress\(base64\.b85decode\('([^'\\]*)'\)\)\)")
+POLICY_DEPS = {
+    "wheel_target": {"python": "3.13", "platforms": ["manylinux_2_17_x86_64", "any"]},
+    "deps_max_bytes": 512 * 1024 * 1024, "deps_max_file_bytes": 128 * 1024 * 1024,
+    "deps_tmpfs": "2g", "deps_install_timeout": 300,
+}
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _record_hash(data: bytes) -> str:
+    return "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+
+
+def make_wheel(name, version, requires=(), files=None):
+    """(file name, bytes) of a minimal valid pure-Python wheel, like test_sandbox_driver's."""
+    di = f"{name}-{version}.dist-info"
+    meta = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+    meta += "".join(f"Requires-Dist: {r}\n" for r in requires)
+    entries = dict(files if files is not None else {f"{name}/__init__.py": b"VALUE = 7\n"})
+    entries[di + "/METADATA"] = meta.encode()
+    entries[di + "/WHEEL"] = (b"Wheel-Version: 1.0\nGenerator: claudex-test\nRoot-Is-Purelib: true\n"
+                              b"Tag: py3-none-any\n")
+    record = "".join(f"{p},{_record_hash(d)},{len(d)}\n" for p, d in entries.items())
+    record += f"{di}/RECORD,,\n"
+    entries[di + "/RECORD"] = record.encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, data in entries.items():
+            info = zipfile.ZipInfo(path, date_time=(2020, 1, 1, 0, 0, 0))
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, data)
+    return f"{name}-{version}-py3-none-any.whl", buf.getvalue()
+
+
+def req_line(filename: str, data: bytes) -> str:
+    name, version = filename.split("-")[:2]
+    return f"{name}=={version} --hash=sha256:{sha(data)}\n"
+
+
+def unconfirmed(message, pid, path, record, deadline_epoch):
+    """A FetchUnconfirmed carrying what sandbox_fetch puts on it -- pid, path, record and the exact
+    deadline_epoch of the quarantine record -- built without relying on the constructor's
+    signature, so the runner is tested against the attribute interface only."""
+    exc = sf.FetchUnconfirmed.__new__(sf.FetchUnconfirmed)
+    Exception.__init__(exc, message)
+    exc.pid, exc.path, exc.record, exc.deadline_epoch = pid, path, record, deadline_epoch
+    return exc
+
+
+class FakeWorker:
+    """Stands in for sandbox_fetch.run_job: writes exactly what a worker writes into the job
+    directory (the four worker files plus one wheel per requirement) and returns its result.
+    `tamper` may replace the bytes written for a file name (the report keeps the original hash);
+    `report` may rewrite the reported files list; `fail` raises instead (given the job dir)."""
+
+    def __init__(self, wheels, tamper=None, report=None, fail=None):
+        self.wheels = dict(wheels)
+        self.tamper, self.report, self.fail = tamper or {}, report, fail
+        self.calls = []
+
+    def __call__(self, job, job_dir, deadline_s, scratch, run_id):
+        job_dir = Path(job_dir)
+        self.calls.append({"job": job, "job_dir": job_dir, "deadline": deadline_s, "run_id": run_id,
+                           "fresh": sorted(os.listdir(job_dir))})
+        (job_dir / sf.JOB_NAME).write_bytes(json.dumps(job).encode())
+        (job_dir / sf.STDOUT_NAME).write_bytes(b"")
+        (job_dir / sf.STDERR_NAME).write_bytes(b"")
+        if self.fail is not None:
+            raise self.fail(job_dir)
+        files = []
+        for name, version, _hashes in job["requirements"]:
+            filename = next(f for f in self.wheels if f.startswith(f"{name}-{version}-"))
+            data = self.wheels[filename]
+            (job_dir / filename).write_bytes(self.tamper.get(filename, data))
+            files.append([name, version, filename, sha(data), len(data)])
+        if self.report is not None:
+            files = self.report(files)
+        result = {"ok": True, "files": files}
+        (job_dir / sf.RESULT_NAME).write_bytes(json.dumps(result).encode())
+        return result
+
+
+class FakeDocker:
+    """docker and stream_start for a run that never starts a container. The fake driver parses
+    the stdin protocol exactly (nonce, spec, tar_len bytes, deps_len bytes, nothing more) and
+    answers like the real one: install.txt iff deps_len > 0."""
+
+    def __init__(self, image_id, status="exited", deps_obj=None):
+        self.image_id, self.status, self.deps_obj = image_id, status, deps_obj
+        self.calls, self.stdin, self.spec = [], None, None
+
+    def docker(self, context, *args, **kw):
+        self.calls.append(args)
+        ok = lambda out=b"": subprocess.CompletedProcess([], 0, stdout=out, stderr=b"")  # noqa: E731
+        if args[0] == "version":
+            return ok(b"29\n")
+        if args[:2] == ("image", "inspect"):
+            return ok(self.image_id.encode() + b"\n")
+        if args[0] in ("ps", "create", "rm", "kill"):
+            return ok()
+        if args[0] == "inspect" and "--format" in args:
+            return ok(b"0 false\n")
+        if args[0] == "inspect":
+            return subprocess.CompletedProcess(
+                [], 1, stdout=b"[]\n", stderr=b"Error response from daemon: No such container: " + args[-1].encode())
+        raise AssertionError(f"unexpected docker call {args}")
+
+    def stream(self, context, cid, stdin, timeout):
+        self.stdin = stdin
+        nonce_line, rest = stdin.split(b"\n", 1)
+        spec_line, rest = rest.split(b"\n", 1)
+        self.spec = json.loads(spec_line)
+        self.snapshot = rest[:self.spec["tar_len"]]
+        self.deps = rest[self.spec["tar_len"]:]
+        assert len(self.deps) == self.spec["deps_len"], "bytes after the deps tar"
+        with_deps = self.spec["deps_len"] > 0
+        deps = None
+        if with_deps:
+            deps = self.deps_obj or {"status": "installed", "reason": None, "installed": [["alpha", "1.0"]]}
+        doc = {"nonce": nonce_line.decode(), "command_status": self.status,
+               "command_exit": 0 if self.status == "exited" else None, "truncated": False,
+               "durations": {}, "exports": {}, "infrastructure": None, "deps": deps}
+        members = [("result.json", json.dumps(doc).encode()), ("stdout.txt", b"out"), ("stderr.txt", b"")]
+        if with_deps:
+            members.append(("install.txt", b"Successfully installed alpha-1.0\n"))
+        return make_tar(members), b""
+
+    def creates(self):
+        return [a for a in self.calls if a[0] == "create"]
+
+
+class BootstrapTests(unittest.TestCase):
+    """Post-approval change 1: the driver goes in as a fixed zlib+b85 bootstrap."""
+
+    def driver(self) -> bytes:
+        return sr.DRIVER_FILE.read_bytes()
+
+    def test_bootstrap_shape_and_round_trip(self):
+        tail = sr.driver_bootstrap(self.driver())
+        self.assertEqual(tail[:4], ["python3", "-I", "-S", "-c"])
+        m = BOOTSTRAP_RE.fullmatch(tail[4])
+        self.assertIsNotNone(m, tail[4][:120])
+        self.assertTrue(set(m.group(1)) <= B85_ALPHABET)
+        self.assertNotIn("'", m.group(1))
+        self.assertNotIn("\\", m.group(1))
+        self.assertEqual(zlib.decompress(base64.b85decode(m.group(1))), self.driver())
+
+    def test_bootstrap_runs_its_source_under_minus_I_minus_S(self):
+        source = b"import sys\nprint('BOOT', __name__, sys.flags.isolated, sys.flags.no_site)\n"
+        tail = sr.driver_bootstrap(source)
+        done = subprocess.run([sys.executable, *tail[1:]], capture_output=True, timeout=60)
+        self.assertEqual(done.stdout.decode().split(), ["BOOT", "__main__", "1", "1"], done.stderr)
+
+    def test_whole_create_argv_stays_under_the_windows_limit(self):
+        args = sr.create_args("0123456789abcdef", 1234567890, "sha256:" + "1" * 64,
+                              sr.driver_bootstrap(self.driver()), deps_tmpfs="2g")
+        joined = " ".join(["docker", "--context", "desktop-linux", *args])
+        self.assertLess(len(joined), 30000)
+
+    def test_a_source_that_would_need_quoting_is_refused(self):
+        with mock.patch.object(sr.base64, "b85encode", lambda _b: b"abc'def"):
+            with self.assertRaises(sr.Infrastructure):
+                sr.driver_bootstrap(b"print(1)")
+
+
+class DepsPolicyTests(unittest.TestCase):
+    """Plan step 3: wheel_target and the deps limits are policy data, validated strictly."""
+
+    def entry(self, **over):
+        e = {"ref": "r:1", "id": "sha256:" + "a" * 64, "tools": ["true"], **json.loads(json.dumps(POLICY_DEPS))}
+        for k, v in over.items():
+            if v is KeyError:
+                e.pop(k)
+            else:
+                e[k] = v
+        return e
+
+    def test_shipped_policy_carries_the_measured_wheel_target(self):
+        # glibc of claudex-sandbox-python-test:2 measured 2026-11-01: ('glibc', '2.41'), Debian 13.
+        entry = sr.load_policy()["images"]["python-test"]
+        expected = [f"manylinux_2_{n}_x86_64" for n in range(41, 16, -1)] + [
+            "manylinux2014_x86_64", "manylinux_2_12_x86_64", "manylinux2010_x86_64",
+            "manylinux_2_5_x86_64", "manylinux1_x86_64", "any"]
+        self.assertEqual(entry["wheel_target"], {"python": "3.13", "platforms": expected})
+        self.assertEqual(entry["deps_max_bytes"], 512 * 1024 * 1024)
+        self.assertEqual(entry["deps_max_file_bytes"], 128 * 1024 * 1024)
+        self.assertEqual(entry["deps_tmpfs"], "2g")
+        self.assertEqual(entry["deps_install_timeout"], 300)
+        cfg = sr.deps_policy(entry)
+        self.assertEqual(cfg["wheel_target"], entry["wheel_target"])
+
+    def test_no_deps_fields_means_none(self):
+        self.assertIsNone(sr.deps_policy({"ref": "r:1", "id": "sha256:" + "a" * 64, "tools": []}))
+
+    def test_malformed_fields_are_refused(self):
+        bad = {
+            "partial": {"deps_tmpfs": KeyError},
+            "target not object": {"wheel_target": ["3.13"]},
+            "target extra key": {"wheel_target": {"python": "3.13", "platforms": ["any"], "abi": "x"}},
+            "python bad": {"wheel_target": {"python": "3", "platforms": ["any"]}},
+            "platforms empty": {"wheel_target": {"python": "3.13", "platforms": []}},
+            "platform bad": {"wheel_target": {"python": "3.13", "platforms": ["many linux"]}},
+            "platform dup": {"wheel_target": {"python": "3.13", "platforms": ["any", "any"]}},
+            "bytes bool": {"deps_max_bytes": True},
+            "bytes zero": {"deps_max_bytes": 0},
+            "bytes huge": {"deps_max_bytes": 2 * 1024 ** 3},
+            "bytes str": {"deps_max_bytes": "512"},
+            "file over total": {"deps_max_file_bytes": 513 * 1024 * 1024},
+            "tmpfs comma": {"deps_tmpfs": "2g,exec"},
+            "tmpfs unit": {"deps_tmpfs": "2t"},
+            "tmpfs too small": {"deps_tmpfs": "100m"},
+            "timeout zero": {"deps_install_timeout": 0},
+            "timeout big": {"deps_install_timeout": 3601},
+            "timeout float": {"deps_install_timeout": 30.5},
+        }
+        for label, over in bad.items():
+            with self.subTest(label=label), self.assertRaises(sr.Refused):
+                sr.deps_policy(self.entry(**over))
+
+
+class ReadResultDepsTests(unittest.TestCase):
+    INSTALLED = {"status": "installed", "reason": None, "installed": [["alpha", "1.0"]]}
+    FAILED = {"status": "failed", "reason": "missing beta", "installed": []}
+
+    def members(self, deps, status="exited", install=b"log"):
+        exit_ = 0 if status == "exited" else None
+        m = good_members(command_status=status, command_exit=exit_, deps=deps)
+        return m + ([("install.txt", install)] if install is not None else [])
+
+    def test_install_txt_is_accepted_only_with_deps(self):
+        result, got = sr.read_result(make_tar(self.members(self.INSTALLED)), NONCE, [], with_deps=True)
+        self.assertEqual(got["install.txt"], b"log")
+        self.assertEqual(result["deps"], self.INSTALLED)
+        with self.assertRaises(sr.Infrastructure):
+            sr.read_result(make_tar(self.members(None)), NONCE, [])
+
+    def test_install_txt_missing_with_deps(self):
+        with self.assertRaises(sr.Infrastructure):
+            sr.read_result(make_tar(self.members(self.INSTALLED, install=None)), NONCE, [], with_deps=True)
+
+    def test_install_txt_over_its_cap(self):
+        big = b"x" * (sr.INSTALL_CAP + 1)
+        with self.assertRaises(sr.Infrastructure):
+            sr.read_result(make_tar(self.members(self.INSTALLED, install=big)), NONCE, [], with_deps=True)
+
+    def test_deps_failed_is_valid_only_with_deps_and_a_failed_object(self):
+        result, _ = sr.read_result(make_tar(self.members(self.FAILED, "deps_failed")), NONCE, [],
+                                   with_deps=True)
+        self.assertEqual(result["command_status"], "deps_failed")
+        for deps, status, with_deps in ((self.FAILED, "deps_failed", False),
+                                        (self.INSTALLED, "deps_failed", True),
+                                        (self.FAILED, "exited", True),
+                                        (None, "exited", True),
+                                        ({"status": "weird", "reason": None, "installed": []}, "exited", True),
+                                        (self.INSTALLED, "exited", False)):
+            with self.subTest(deps=deps, status=status, with_deps=with_deps):
+                install = b"log" if with_deps else None
+                with self.assertRaises(sr.Infrastructure):
+                    sr.read_result(make_tar(self.members(deps, status, install)), NONCE, [],
+                                   with_deps=with_deps)
+
+    def test_b1_result_without_deps_key_still_reads(self):
+        result, _ = sr.read_result(make_tar(good_members()), NONCE, [])
+        self.assertIsNone(result.get("deps"))
+
+
+@NEEDS_GIT
+class DepsRunTests(TempMixin, unittest.TestCase):
+    """The runner end to end with docker and the fetch worker faked (plan steps 2-4, 6)."""
+
+    def setUp(self):
+        self.clean_env()
+        self.base = self.tmp()
+        self.alpha = ("alpha-1.0-py3-none-any.whl", b"ALPHA-WHEEL-BYTES")
+        self.beta = ("beta-2.0-py3-none-any.whl", b"BETA-WHEEL-BYTES" * 3)
+        self.marker = "SNAPSHOT-MARKER-" + uuid.uuid4().hex
+        files = {
+            "requirements.txt": "# compiled\n" + req_line(*self.beta) + req_line(*self.alpha),
+            "other.txt": req_line(*self.alpha),
+            "probe.txt": self.marker + "\n",
+            "dir/x.txt": "x\n",
+            "options.txt": "-r requirements.txt\n",
+            "unhashed.txt": "alpha==1.0\n",
+            "marker.txt": f"alpha==1.0 ; python_version > '3' --hash=sha256:{sha(self.alpha[1])}\n",
+            "conflict.txt": "alpha==1.1 --hash=sha256:" + "0" * 64 + "\n",
+            "nohash-in-common.txt": "alpha==1.0 --hash=sha256:" + "0" * 64 + "\n",
+            "empty.txt": "# nothing\n",
+            "blank-a.txt": "# only a comment\n\n",
+            "blank-b.txt": "\n   \n# and another\n",
+            # A3: continuations that end in a blank or a comment line
+            "cont-blank.txt": "six==1.17.0 \\\n\n",
+            "cont-comment.txt": "six==1.17.0 \\\n# a comment\n",
+            "lone-blank.txt": f"alpha==1.0 --hash=sha256:{sha(self.alpha[1])}\n\\\n\n",
+            "lone-comment.txt": f"alpha==1.0 --hash=sha256:{sha(self.alpha[1])}\n\\\n# a comment\n",
+            # 300 distinct requirements each: every file is within MAX_REQUIREMENTS, the merge is not
+            "many-a.txt": "".join(f"pa{i:03d}==1.0 --hash=sha256:{i:064x}\n" for i in range(300)),
+            "many-b.txt": "".join(f"pb{i:03d}==1.0 --hash=sha256:{i + 1000:064x}\n" for i in range(300)),
+        }
+        self.repo, self.tree = make_repo(self.base, files)
+        self.scratch = self.base / "scratch"
+        self.scratch.mkdir()
+        self.image_id = sr.load_policy()["images"]["python-test"]["id"]
+        self.fake = FakeDocker(self.image_id)
+        self.worker = FakeWorker([self.alpha, self.beta])
+        for p in (mock.patch.object(sr, "docker", self.fake.docker),
+                  mock.patch.object(sr, "stream_start", self.fake.stream),
+                  mock.patch.object(sr.sandbox_fetch, "run_job", self.worker)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def main(self, deps=(), command=("true",)):
+        argv = ["--repo", str(self.repo), "--scratch", str(self.scratch), "--tree", self.tree,
+                "--image", "python-test"]
+        for d in deps:
+            argv += ["--deps", d]
+        code, out, err = run_main(argv + ["--", *command])
+        return code, parse_kv(out), err
+
+    def manifest(self, info):
+        return json.loads((Path(info["RUN_DIR"]) / "manifest.json").read_text())
+
+    def run_dirs(self):
+        return list((self.scratch / "sandbox").glob("run-*"))
+
+    # --- the good path -----------------------------------------------------------------------
+    def test_with_deps_the_deps_tar_follows_the_snapshot(self):
+        code, info, err = self.main(deps=["requirements.txt"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(info["COMMAND_STATUS"], "exited")
+        run_dir = Path(info["RUN_DIR"])
+        # the worker got a fresh, empty job directory under the run directory and the plan's job
+        call = self.worker.calls[0]
+        self.assertEqual(call["job_dir"], run_dir / "deps")
+        self.assertEqual(call["fresh"], [])
+        self.assertEqual(call["deadline"], 600)
+        self.assertRegex(call["run_id"], r"^[0-9a-f]{16}$")
+        self.assertEqual(run_dir.name, "run-" + call["run_id"])
+        job = call["job"]
+        self.assertEqual(job["kind"], "wheels")
+        self.assertEqual([r[:2] for r in job["requirements"]], [["alpha", "1.0"], ["beta", "2.0"]])
+        self.assertEqual(job["requirements"][0][2], [sha(self.alpha[1])])
+        policy = sr.load_policy()["images"]["python-test"]
+        self.assertEqual(job["target"], policy["wheel_target"])
+        self.assertEqual((job["max_file"], job["max_total"]),
+                         (policy["deps_max_file_bytes"], policy["deps_max_bytes"]))
+        # the job directory is gone, the run directory keeps manifest and results only
+        self.assertFalse((run_dir / "deps").exists())
+        self.assertEqual(sorted(p.name for p in run_dir.iterdir()),
+                         ["install.txt", "manifest.json", "result.json", "stderr.txt", "stdout.txt"])
+        self.assertEqual((run_dir / "install.txt").read_bytes(), b"Successfully installed alpha-1.0\n")
+        # spec keys and stdin framing
+        spec = self.fake.spec
+        self.assertEqual(spec["deps_len"], len(self.fake.deps))
+        self.assertEqual(spec["deps_sha256"], sha(self.fake.deps))
+        self.assertEqual(spec["deps_timeout"], 300)
+        with tarfile.open(fileobj=io.BytesIO(self.fake.snapshot)) as tf:
+            self.assertIn("probe.txt", tf.getnames())
+        # the deps tar: flat, deterministic, root-owned 0644 regular members, mtime 0
+        with tarfile.open(fileobj=io.BytesIO(self.fake.deps), mode="r:") as tf:
+            ms = tf.getmembers()
+            self.assertEqual([m.name for m in ms], [self.alpha[0], self.beta[0], "requirements.txt"])
+            for m in ms:
+                self.assertTrue(m.isreg())
+                self.assertEqual((m.mode, m.uid, m.gid, m.mtime, m.uname, m.gname), (0o644, 0, 0, 0, "", ""))
+            data = {m.name: tf.extractfile(m).read() for m in ms}
+        self.assertEqual(data[self.alpha[0]], self.alpha[1])
+        self.assertEqual(data[self.beta[0]], self.beta[1])
+        self.assertEqual(data["requirements.txt"],
+                         (req_line(*self.alpha) + req_line(*self.beta)).encode())
+        # the container: /deps tmpfs, the bootstrap, nothing from the snapshot on the command line
+        create = list(self.fake.creates()[0])
+        self.assertIn("/deps:rw,exec,nosuid,nodev,size=2g,mode=1777", create)
+        self.assertEqual(create[-5:-1], ["python3", "-I", "-S", "-c"])
+        self.assertIsNotNone(BOOTSTRAP_RE.fullmatch(create[-1]))
+        joined = " ".join(create)
+        self.assertNotIn(self.marker, joined)
+        self.assertNotIn(sha(self.alpha[1]), joined)
+        self.assertLess(len(joined), 30000)
+        # the manifest
+        m = self.manifest(info)
+        self.assertEqual(m["driver_sha256"], sha(sr.DRIVER_FILE.read_bytes()))
+        reqs = sdeps.parse_requirements(req_line(*self.alpha).encode() + req_line(*self.beta).encode(), "x")
+        d = m["deps"]
+        self.assertEqual(d["files"], [{"path": "requirements.txt", "content_sha256": sha(
+            ("# compiled\n" + req_line(*self.beta) + req_line(*self.alpha)).encode())}])
+        self.assertEqual(d["requirements"], [
+            {"name": "alpha", "version": "1.0", "wheel": self.alpha[0], "sha256": sha(self.alpha[1])},
+            {"name": "beta", "version": "2.0", "wheel": self.beta[0], "sha256": sha(self.beta[1])}])
+        self.assertEqual(d["requirements_sha256"], sdeps.requirements_sha256(reqs))
+        self.assertEqual(d["deps_tar_sha256"], sha(self.fake.deps))
+        self.assertEqual(d["wheel_target"], policy["wheel_target"])
+        self.assertEqual(d["install"], {"status": "installed", "reason": None, "installed": [["alpha", "1.0"]]})
+        self.assertEqual(d["install_txt_sha256"], sha(b"Successfully installed alpha-1.0\n"))
+        self.assertEqual(info["REQUIREMENTS_SHA256"], d["requirements_sha256"])
+        self.assertEqual(info["MANIFEST_SHA256"], sha((run_dir / "manifest.json").read_bytes()))
+
+    def test_two_files_are_merged(self):
+        code, info, err = self.main(deps=["requirements.txt", "other.txt"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual([f["path"] for f in self.manifest(info)["deps"]["files"]],
+                         ["requirements.txt", "other.txt"])
+        self.assertEqual([r[:2] for r in self.worker.calls[0]["job"]["requirements"]],
+                         [["alpha", "1.0"], ["beta", "2.0"]])
+
+    def test_without_deps_the_run_is_b1s(self):
+        code, info, err = self.main()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.worker.calls, [])
+        self.assertEqual((self.fake.spec["deps_len"], self.fake.spec["deps_sha256"],
+                          self.fake.spec["deps_timeout"]), (0, "", 300))
+        self.assertEqual(self.fake.deps, b"")
+        create = list(self.fake.creates()[0])
+        self.assertFalse(any("/deps" in a for a in create))
+        tail = create.index(self.image_id)
+        self.assertEqual(len(create[:tail]), len(B1_CREATE_HEAD))
+        m = self.manifest(info)
+        self.assertIsNone(m["deps"])
+        self.assertNotIn("REQUIREMENTS_SHA256", info)
+        self.assertEqual(sorted(p.name for p in Path(info["RUN_DIR"]).iterdir()),
+                         ["manifest.json", "result.json", "stderr.txt", "stdout.txt"])
+
+    def test_deps_failed_is_a_command_status_never_a_pass(self):
+        self.fake.status = "deps_failed"
+        self.fake.deps_obj = {"status": "failed", "reason": "beta>=1 missing", "installed": []}
+        code, info, err = self.main(deps=["requirements.txt"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(info["COMMAND_STATUS"], "deps_failed")
+        self.assertEqual(info["COMMAND_EXIT"], "-")
+        m = self.manifest(info)
+        self.assertIsNone(m["command_exit"])
+        self.assertEqual(m["deps"]["install"]["status"], "failed")
+
+    # --- refusals: before any network call and any container ---------------------------------
+    def assert_refused_before_fetch(self, deps, needle=None):
+        code, info, err = self.main(deps=deps)
+        self.assertEqual(code, 2, err)
+        self.assertNotIn("Traceback", err)
+        if needle:
+            self.assertIn(needle, err)
+        self.assertEqual(self.worker.calls, [], "the fetch worker ran")
+        self.assertEqual(self.fake.creates(), [], "a container was created")
+        for run_dir in self.run_dirs():
+            self.assertFalse((run_dir / "deps").exists())
+
+    def test_files_that_are_not_regular_entries_of_the_pinned_tree(self):
+        (self.repo / "untracked.txt").write_text(req_line(*self.alpha))  # working tree only
+        for path in ("missing.txt", "dir", "untracked.txt", "Requirements.txt"):
+            with self.subTest(path=path):
+                self.assert_refused_before_fetch([path], "not a regular file of the pinned tree")
+
+    def test_unacceptable_requirements_are_refused(self):
+        for path in ("options.txt", "unhashed.txt", "marker.txt", "empty.txt"):
+            with self.subTest(path=path):
+                self.assert_refused_before_fetch([path])
+
+    def test_merge_conflicts_are_refused(self):
+        for pair in (["requirements.txt", "conflict.txt"], ["requirements.txt", "nohash-in-common.txt"]):
+            with self.subTest(pair=pair):
+                self.assert_refused_before_fetch(pair)
+
+    def test_static_deps_refusals_happen_before_any_docker_call(self):
+        with mock.patch.object(sr, "docker", fail_if_called):
+            for deps in (["a.txt"] * 5, ["../x"], ["/etc/passwd"], [".git/config"], ["a//b"],
+                         ["C:\\x"], ["requirements.txt", "./requirements.txt"],
+                         ["requirements.txt", "requirements.txt"]):
+                with self.subTest(deps=deps):
+                    self.assert_refused_before_fetch(deps)
+
+    def test_an_image_without_wheel_target_refuses_deps_before_docker(self):
+        policy = json.loads(json.dumps(sr.load_policy()))
+        for key in POLICY_DEPS:
+            policy["images"]["python-test"].pop(key)
+        with mock.patch.object(sr, "load_policy", lambda: policy), mock.patch.object(sr, "docker", fail_if_called):
+            self.assert_refused_before_fetch(["requirements.txt"], "wheel_target")
+
+    def test_without_deps_a_policy_without_deps_fields_still_runs(self):
+        policy = json.loads(json.dumps(sr.load_policy()))
+        for key in POLICY_DEPS:
+            policy["images"]["python-test"].pop(key)
+        with mock.patch.object(sr, "load_policy", lambda: policy):
+            code, _info, err = self.main()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.fake.spec["deps_timeout"], sr.DEFAULT_DEPS_TIMEOUT)
+
+    # --- the fetch outcome ---------------------------------------------------------------------
+    def test_fetch_refused_is_exit_2_and_removes_the_job_dir(self):
+        self.worker.fail = lambda _d: sf.FetchRefused("no wheel for the image's platform")
+        code, info, err = self.main(deps=["requirements.txt"])
+        self.assertEqual(code, 2, err)
+        self.assertIn("no wheel for the image's platform", err)
+        self.assertEqual(self.fake.creates(), [])
+        self.assertFalse((Path(info["RUN_DIR"]) / "deps").exists())
+        self.assertEqual(self.manifest(info)["runner_status"], "refused")
+        self.assertIn("REQUIREMENTS_SHA256", info)
+
+    def test_fetch_infrastructure_is_exit_5_and_removes_the_job_dir(self):
+        self.worker.fail = lambda _d: sf.FetchInfrastructure("HTTP 503 from pypi.org")
+        code, info, err = self.main(deps=["requirements.txt"])
+        self.assertEqual(code, 5, err)
+        self.assertEqual(self.fake.creates(), [])
+        self.assertFalse((Path(info["RUN_DIR"]) / "deps").exists())
+
+    def test_merged_files_over_max_requirements_are_refused_before_fetch(self):
+        # A6: 300 + 300 distinct requirements -- each file is accepted alone, the merge is not
+        self.assertGreater(600, sdeps.MAX_REQUIREMENTS)
+        self.assert_refused_before_fetch(["many-a.txt", "many-b.txt"], str(sdeps.MAX_REQUIREMENTS))
+        # each file alone stays within the limit and reaches the fetch (the fake worker has no
+        # wheel for it and is told to refuse, which proves the parse passed)
+        self.worker.fail = lambda _d: sf.FetchRefused("no wheel")
+        code, _info, err = self.main(deps=["many-a.txt"])
+        self.assertEqual(code, 2, err)
+        self.assertEqual(len(self.worker.calls), 1)
+        self.assertEqual(len(self.worker.calls[0]["job"]["requirements"]), 300)
+
+    def test_files_that_together_list_no_requirement_are_refused_before_fetch(self):
+        # B3: an empty --deps inventory is a caller mistake, never an empty deps tar
+        for deps in (["empty.txt"], ["blank-a.txt", "blank-b.txt"], ["empty.txt", "blank-a.txt", "blank-b.txt"]):
+            with self.subTest(deps=deps):
+                self.fake.calls.clear()
+                self.assert_refused_before_fetch(deps, "the files list no requirement")
+                self.assertFalse(any(a and a[0] in ("create", "start") for a in self.fake.calls))
+
+    def test_continuations_into_blank_or_comment_lines_are_refused_with_their_line(self):
+        # A3, callers' outcome: a normal refusal with a written manifest, never a crash; the
+        # reason names file and line; no worker and no docker create. The `six==1.17.0 \` cases
+        # join to an unhashed requirement; a lone backslash joins nothing (empty logical line).
+        cases = {"cont-blank.txt": ("cont-blank.txt:1:", "no hash"),
+                 "cont-comment.txt": ("cont-comment.txt:1:", "no hash"),
+                 "lone-blank.txt": ("lone-blank.txt:2:", "joins nothing"),
+                 "lone-comment.txt": ("lone-comment.txt:2:", "joins nothing")}
+        for path, (where, what) in cases.items():
+            with self.subTest(path=path):
+                self.fake.calls.clear()
+                before = set(self.run_dirs())
+                code, info, err = self.main(deps=[path])
+                self.assertEqual(code, 2, err)
+                self.assertNotIn("Traceback", err)
+                self.assertIn(where, err)
+                self.assertIn(what, err)
+                self.assertEqual(self.worker.calls, [], "run_job was called")
+                self.assertEqual(self.fake.creates(), [], "a container was created")
+                new = set(self.run_dirs()) - before
+                self.assertEqual(len(new), 1)
+                run_dir = new.pop()
+                self.assertEqual(Path(info["RUN_DIR"]), run_dir)
+                m = self.manifest(info)
+                self.assertEqual(m["runner_status"], "refused")
+                self.assertIn(where, m["reason"])
+                self.assertIn(what, m["reason"])
+                self.assertFalse((run_dir / "deps").exists())
+
+    def test_quarantine_block_copies_the_exception_and_equals_the_record(self):
+        # A8: pid, path, deadline_epoch and record come from FetchUnconfirmed -- the exact values
+        # sandbox_fetch wrote into the quarantine record, not a deadline the runner computed itself
+        deadline = time.time() + 1234.5678901  # deliberately not now + FETCH_DEADLINE
+
+        def fail(d):
+            record = sf.write_quarantine_record(self.scratch, self.worker.calls[-1]["run_id"], d, 4242, deadline)
+            return unconfirmed("worker pid 4242 not confirmed dead", 4242, d, record, deadline)
+        self.worker.fail = fail
+        code, info, err = self.main(deps=["requirements.txt"])
+        self.assertEqual(code, 5, err)
+        q = self.manifest(info)["quarantine"]
+        record_path = self.scratch / sf.QUARANTINE_DIR / f"{self.worker.calls[-1]['run_id']}.json"
+        rec = json.loads(record_path.read_text())
+        self.assertEqual(q, {"cleanup": "unconfirmed", "pid": rec["pid"], "path": rec["path"],
+                             "deadline_epoch": rec["deadline_epoch"], "record": str(record_path)})
+        self.assertEqual(q["deadline_epoch"], deadline)
+        self.assertEqual(rec["cleanup"], "unconfirmed")
+
+    def test_a_failed_removal_of_the_download_dir_is_infrastructure(self):
+        # A9: outside quarantine the download directory must go; if it cannot, the run is exit 5,
+        # the retained path is named in manifest and stderr, and no container is created
+        real_rmtree = sr.shutil.rmtree
+
+        def rmtree(p, *a, **k):
+            if Path(p).name == "deps":
+                return None  # the removal "fails" silently, as ignore_errors=True would
+            return real_rmtree(p, *a, **k)
+        for fail, needle in ((None, None),
+                             (lambda _d: sf.FetchRefused("no wheel for the image's platform"), "no wheel"),
+                             (lambda _d: sf.FetchInfrastructure("HTTP 503"), "HTTP 503")):
+            with self.subTest(needle=needle):
+                self.fake.calls.clear()
+                self.worker.fail = fail
+                with mock.patch.object(sr.shutil, "rmtree", rmtree):
+                    code, info, err = self.main(deps=["requirements.txt"])
+                self.assertEqual(code, 5, err)
+                self.assertNotIn("Traceback", err)
+                job_dir = Path(info["RUN_DIR"]) / "deps"
+                self.assertTrue(job_dir.is_dir())
+                self.assertIn(ascii(str(job_dir)), err)
+                m = self.manifest(info)
+                self.assertEqual(m["runner_status"], "infrastructure")
+                self.assertEqual(m["deps_dir_cleanup"], "failed")
+                self.assertEqual(m["deps_dir_retained"], str(job_dir))
+                self.assertNotIn("COMMAND_STATUS", info)
+                self.assertEqual(self.fake.creates(), [])
+                if needle is not None:
+                    self.assertIn(needle, m["reason"])  # the first failure is not hidden
+                real_rmtree(job_dir)
+
+    def test_unconfirmed_worker_keeps_its_directory_and_exits_5(self):
+        removed = []
+        self.worker.fail = lambda d: unconfirmed("worker pid 4242 not confirmed dead", 4242, d, None,
+                                                 time.time() + 600)
+        real_rmtree = sr.shutil.rmtree
+        with mock.patch.object(sr.shutil, "rmtree",
+                               lambda p, *a, **k: (removed.append(Path(p)), real_rmtree(p, *a, **k))):
+            code, info, err = self.main(deps=["requirements.txt"])
+        self.assertEqual(code, 5, err)
+        job_dir = Path(info["RUN_DIR"]) / "deps"
+        self.assertTrue(job_dir.is_dir())
+        self.assertTrue((job_dir / sf.JOB_NAME).exists())
+        self.assertNotIn(job_dir, removed)
+        m = self.manifest(info)
+        self.assertEqual(m["cleanup"], "unconfirmed")
+        self.assertEqual(m["quarantine"]["pid"], 4242)
+        self.assertEqual(m["quarantine"]["path"], str(job_dir))
+        self.assertEqual(m["quarantine"]["cleanup"], "unconfirmed")
+        self.assertGreater(m["quarantine"]["deadline_epoch"], time.time())
+        self.assertIn("4242", err)
+        self.assertEqual(self.fake.creates(), [])
+
+    def test_interrupted_fetch_removes_the_job_dir(self):
+        def interrupt(_d):
+            raise KeyboardInterrupt
+        self.worker.fail = interrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.main(deps=["requirements.txt"])
+        self.assertEqual(self.fake.creates(), [])
+        for run_dir in self.run_dirs():
+            self.assertFalse((run_dir / "deps").exists())
+
+    def test_a_misreported_hash_is_rejected(self):
+        # The worker writes other bytes but reports the pinned hash: the parent re-hashes.
+        self.worker.tamper = {self.alpha[0]: b"TAMPERED-BYTES"}
+        code, info, err = self.main(deps=["requirements.txt"])
+        self.assertEqual(code, 2, err)
+        self.assertEqual(self.fake.creates(), [])
+        self.assertFalse((Path(info["RUN_DIR"]) / "deps").exists())
+
+    def test_a_worker_list_that_does_not_match_the_requirements_is_rejected(self):
+        cases = {
+            "wrong version": lambda f: [[f[0][0], "9.9", *f[0][2:]], f[1]],
+            "missing entry": lambda f: f[:1],
+            "two files for one": lambda f: [f[0], [f[0][0], f[0][1], "alpha-1.0-py2-none-any.whl", *f[0][3:]], f[1]],
+            "file of another package": lambda f: [[f[0][0], f[0][1], f[1][2], *f[0][3:]], f[1]],
+            "malformed": lambda f: [f[0], "beta"],
+        }
+        for label, report in cases.items():
+            with self.subTest(label=label):
+                self.fake.calls.clear()
+                self.worker.report = report
+                code, info, err = self.main(deps=["requirements.txt"])
+                self.assertEqual(code, 5, err)
+                self.assertEqual(self.fake.creates(), [])
+                self.assertFalse((Path(info["RUN_DIR"]) / "deps").exists())
+
+    def test_a_deps_tar_over_its_cap_is_refused(self):
+        small = self.small_policy(100)
+        with mock.patch.object(sr, "DEPS_TAR_SLACK", 0), \
+                mock.patch.object(sr, "load_policy", lambda: small):
+            # the wheels (65 bytes) fit the 100-byte download cap; the framed tar does not
+            code, _info, err = self.main(deps=["requirements.txt"])
+        self.assertEqual(code, 2, err)
+        self.assertIn("deps tar", err)
+        self.assertEqual(self.fake.creates(), [])
+
+    def small_policy(self, total):
+        policy = json.loads(json.dumps(sr.load_policy()))
+        entry = policy["images"]["python-test"]
+        entry["deps_max_bytes"] = total
+        entry["deps_max_file_bytes"] = total
+        entry["deps_tmpfs"] = "16m"
+        return policy
+
+    # --- quarantine listing ------------------------------------------------------------------
+    def test_quarantine_records_are_listed_at_start_and_nothing_is_touched(self):
+        victim = self.base / "victim"
+        victim.mkdir()
+        (victim / "sentinel").write_text("keep")
+        rid = sf.new_run_id()
+        record = sf.write_quarantine_record(self.scratch, rid, victim, 4321, time.time() - 99999)
+        code, _info, err = self.main(deps=["a.txt"] * 5)  # a static refusal: still listed
+        self.assertEqual(code, 2, err)
+        self.assertIn(f"quarantined run {rid}", err)
+        self.assertIn("remove by hand after checking that pid 4321 is gone", err)
+        self.assertTrue((victim / "sentinel").exists())
+        self.assertTrue(record.exists())
+
+    # --- broken output streams (plan B1.5 hardening) -------------------------------------------
+    # A stderr diagnostic is best effort: a full redirected log (OSError) or a closed stream
+    # (ValueError) must not turn the outcome into an escaped exception -- exit 1, no manifest,
+    # quarantine fields lost. A lost stdout KEY=value line is never a pass.
+    def main_broken(self, deps=(), command=("true",), err_exc=None, out_exc=None):
+        argv = ["--repo", str(self.repo), "--scratch", str(self.scratch), "--tree", self.tree,
+                "--image", "python-test"]
+        for d in deps:
+            argv += ["--deps", d]
+        out = BrokenStream(out_exc) if out_exc else io.StringIO()
+        err = BrokenStream(err_exc) if err_exc else io.StringIO()
+        with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
+            code = sr.main(argv + ["--", *command])
+        return code, out, err
+
+    def only_run_dir(self) -> Path:
+        dirs = self.run_dirs()
+        self.assertEqual(len(dirs), 1, dirs)
+        return dirs[0]
+
+    def test_broken_stderr_during_a_refusal_is_still_exit_2_with_a_manifest(self):
+        for exc in BROKEN_STREAM_ERRORS:
+            with self.subTest(exc=type(exc).__name__):
+                for d in self.run_dirs():
+                    sr.shutil.rmtree(d)
+                code, out, err = self.main_broken(deps=["unhashed.txt"], err_exc=exc)
+                self.assertEqual(code, 2)
+                self.assertGreater(err.attempts, 0, "no diagnostic was attempted")
+                run_dir = self.only_run_dir()
+                m = json.loads((run_dir / "manifest.json").read_text())
+                self.assertEqual(m["runner_status"], "refused")
+                self.assertIn(f"RUN_DIR={run_dir}", out.getvalue())
+
+    def test_broken_stderr_after_an_unconfirmed_worker_keeps_quarantine_and_exits_5(self):
+        removed = []
+        real_rmtree = sr.shutil.rmtree
+        for exc in BROKEN_STREAM_ERRORS:
+            with self.subTest(exc=type(exc).__name__):
+                for d in self.run_dirs():
+                    real_rmtree(d)
+                removed.clear()
+                self.worker.fail = lambda d: unconfirmed("worker pid 4242 not confirmed dead", 4242, d,
+                                                         None, time.time() + 600)
+                with mock.patch.object(sr.shutil, "rmtree",
+                                       lambda p, *a, **k: (removed.append(Path(p)), real_rmtree(p, *a, **k))):
+                    code, _out, _err = self.main_broken(deps=["requirements.txt"], err_exc=exc)
+                self.assertEqual(code, 5)
+                run_dir = self.only_run_dir()
+                job_dir = run_dir / "deps"
+                self.assertTrue(job_dir.is_dir())
+                self.assertNotIn(job_dir, removed)
+                m = json.loads((run_dir / "manifest.json").read_text())
+                self.assertEqual(m["runner_status"], "infrastructure")
+                self.assertEqual(m["cleanup"], "unconfirmed")
+                self.assertEqual(m["quarantine"]["pid"], 4242)
+                self.assertEqual(m["quarantine"]["path"], str(job_dir))
+                self.assertEqual(m["quarantine"]["cleanup"], "unconfirmed")
+                self.assertEqual(self.fake.creates(), [])
+
+    def test_broken_stderr_when_the_download_dir_is_retained_is_still_exit_5(self):
+        real_rmtree = sr.shutil.rmtree
+
+        def rmtree(p, *a, **k):
+            if Path(p).name == "deps":
+                return None
+            return real_rmtree(p, *a, **k)
+        with mock.patch.object(sr.shutil, "rmtree", rmtree):
+            code, _out, _err = self.main_broken(deps=["requirements.txt"], err_exc=OSError(28, "full"))
+        self.assertEqual(code, 5)
+        run_dir = self.only_run_dir()
+        m = json.loads((run_dir / "manifest.json").read_text())
+        self.assertEqual(m["runner_status"], "infrastructure")
+        self.assertEqual(m["deps_dir_retained"], str(run_dir / "deps"))
+        real_rmtree(run_dir / "deps")
+
+    def test_broken_stderr_while_listing_quarantine_does_not_stop_a_clean_run(self):
+        victim = self.base / "victim"
+        victim.mkdir()
+        sf.write_quarantine_record(self.scratch, sf.new_run_id(), victim, 4321, time.time() - 99999)
+        code, out, err = self.main_broken(err_exc=ValueError("I/O operation on closed file."))
+        self.assertEqual(code, 0)
+        self.assertGreater(err.attempts, 0)
+        self.assertIn("MANIFEST_SHA256=", out.getvalue())
+
+    def test_broken_stdout_on_a_successful_run_is_exit_5_never_a_pass(self):
+        for exc in BROKEN_STREAM_ERRORS:
+            with self.subTest(exc=type(exc).__name__):
+                for d in self.run_dirs():
+                    sr.shutil.rmtree(d)
+                code, _out, err = self.main_broken(deps=["requirements.txt"], out_exc=exc)
+                self.assertEqual(code, 5)
+                m = json.loads((self.only_run_dir() / "manifest.json").read_text())
+                self.assertEqual(m["command_status"], "exited")  # the manifest is the evidence
+                self.assertIn("stdout", err.getvalue())
+
+    def test_broken_stdout_and_stderr_on_a_refusal_stay_exit_2(self):
+        code, _out, _err = self.main_broken(deps=["unhashed.txt"], err_exc=OSError(28, "full"),
+                                            out_exc=OSError(32, "broken pipe"))
+        self.assertEqual(code, 2)
+        m = json.loads((self.only_run_dir() / "manifest.json").read_text())
+        self.assertEqual(m["runner_status"], "refused")
+
+
+class BrokenStream(io.StringIO):
+    """A text stream whose writes (and flushes) raise -- a full redirected log or a closed pipe."""
+
+    def __init__(self, exc):
+        super().__init__()
+        self.exc, self.attempts = exc, 0
+
+    def write(self, s):
+        self.attempts += 1
+        raise self.exc
+
+    def flush(self):
+        if self.exc is not None:
+            raise self.exc
+
+    def close(self):
+        self.exc = None  # IOBase.close flushes; the finaliser must not raise
+        super().close()
+
+
+BROKEN_STREAM_ERRORS = (OSError(28, "No space left on device"), ValueError("I/O operation on closed file."))
+
+
+# --- gate recheck 2 (B1.5 block A2), finding 10: the PROCESS exit code survives a failed stream ----
+# main() returned 5 / 2, but the interpreter flushes a failed stdout/stderr once more while shutting
+# down and then replaces the exit code with 120. Only a real child process shows that.
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+
+SUCCESS_DRIVER = r'''
+import json, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+import sandbox_run as sr
+
+ID = "sha256:" + "c" * 64
+POLICY = {"context": "ctx", "images": {"python-test": {"ref": "r:1", "id": ID, "tools": ["true"]}}}
+
+
+def done(code, out=b"", err=b""):
+    return subprocess.CompletedProcess([], code, stdout=out, stderr=err)
+
+
+def docker(context, *args, **kw):
+    if args[0] == "version":
+        return done(0, b"29\n")
+    if args[:2] == ("image", "inspect"):
+        return done(0, ID.encode())
+    if args[0] in ("ps", "rm"):
+        return done(0)
+    if args[0] == "create":
+        return done(0, b"cid\n")
+    if args[0] == "inspect":
+        if "--format" in args:
+            return done(0, b"0 false\n")
+        return done(1, b"[]\n", b"Error response from daemon: No such container: " + args[-1].encode())
+    raise AssertionError(f"unexpected docker call {args}")
+
+
+RESULT = {"command_status": "exited", "command_exit": 0, "truncated": False, "exports": {}}
+sr.load_policy = lambda: POLICY
+sr.docker = docker
+sr.stream_start = lambda *a, **k: (b"", b"")
+sr.read_result = lambda *a, **k: (RESULT, {})
+sys.exit(sr.entry(json.loads(sys.argv[2])))
+'''
+
+
+@contextlib.contextmanager
+def dead_pipe():
+    """The write end of a pipe whose read end is already closed: every write fails (EPIPE on
+    POSIX, EINVAL on Windows) -- a reader that went away."""
+    r, w = os.pipe()
+    os.close(r)
+    try:
+        yield w
+    finally:
+        os.close(w)
+
+
+class ProcessExitCodeTests(TempMixin, unittest.TestCase):
+    def setUp(self):
+        self.base = self.tmp()
+        self.env = {k: v for k, v in os.environ.items() if not k.upper().startswith("DOCKER_")}
+
+    def child(self, argv, *, stdout, stderr):
+        return subprocess.run([sys.executable, "-I", *argv], stdout=stdout, stderr=stderr,
+                              stdin=subprocess.DEVNULL, env=self.env, timeout=180, check=False)
+
+    def refusal_argv(self):
+        # --timeout 0 is refused before any docker call, with a diagnostic and a manifest
+        return [str(SCRIPTS_DIR / "sandbox_run.py"), "--repo", str(self.base), "--scratch", str(self.base),
+                "--tree", SHA1_TREE, "--image", "python-test", "--timeout", "0", "--", "true"]
+
+    def test_refusal_with_failing_stderr_is_process_exit_2(self):
+        control = self.child(self.refusal_argv(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(control.returncode, 2, control.stderr)
+        self.assertIn(b"REFUSED", control.stderr)
+        with dead_pipe() as w:
+            res = self.child(self.refusal_argv(), stdout=subprocess.PIPE, stderr=w)
+        self.assertEqual(res.returncode, 2, res.stdout)
+        self.assertIn(b"MANIFEST_SHA256=", res.stdout)
+
+    def test_refusal_with_both_streams_failing_is_process_exit_2(self):
+        with dead_pipe() as w:
+            res = self.child(self.refusal_argv(), stdout=w, stderr=w)
+        self.assertEqual(res.returncode, 2)
+
+    @NEEDS_GIT
+    def test_would_be_success_with_lost_stdout_is_process_exit_5(self):
+        repo, tree = make_repo(self.base, {"a.txt": "a\n"})
+        scratch = self.base / "scratch"
+        scratch.mkdir()
+        driver = self.base / "driver.py"
+        driver.write_text(SUCCESS_DRIVER, encoding="utf-8")
+        args = json.dumps(["--repo", str(repo), "--scratch", str(scratch), "--tree", tree,
+                           "--image", "python-test", "--", "true"])
+        argv = [str(driver), str(SCRIPTS_DIR), args]
+        control = self.child(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.assertIn(b"COMMAND_EXIT=0", control.stdout)
+        with dead_pipe() as w:
+            res = self.child(argv, stdout=w, stderr=subprocess.PIPE)
+        self.assertEqual(res.returncode, 5, res.stderr)
+        self.assertIn(b"could not be written to stdout", res.stderr)
+        runs = [d for d in (scratch / "sandbox").iterdir() if (d / "manifest.json").is_file()]
+        self.assertEqual(len(runs), 2, runs)
+        for run_dir in runs:
+            self.assertEqual(json.loads((run_dir / "manifest.json").read_text())["command_status"], "exited")
+
+    def test_main_block_goes_through_the_stream_settling_entry(self):
+        tail = (SCRIPTS_DIR / "sandbox_run.py").read_text(encoding="utf-8").rstrip().splitlines()[-2:]
+        self.assertEqual(tail, ['if __name__ == "__main__":', "    sys.exit(entry())"])
+
+    def test_settle_leaves_working_streams_alone(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
+            sr.settle_std_streams()
+            self.assertIs(sys.stdout, out)
+            self.assertIs(sys.stderr, err)
+
+    def test_settle_replaces_a_failing_stream_without_a_descriptor(self):
+        broken = BrokenStream(OSError(28, "full"))
+        with mock.patch.object(sys, "stdout", broken):
+            sr.settle_std_streams()
+            replaced = sys.stdout
+            self.assertIsNot(replaced, broken)
+            replaced.write("dropped\n")
+            replaced.flush()
+        replaced.close()
+        broken.close()
+
+
 # --- part B: container probes ----------------------------------------------------------------
 
 PROBE = r'''
@@ -1667,6 +2669,76 @@ class ContainerProbes(TempMixin, unittest.TestCase):
         # positive control: the container within its deadline is untouched
         self.assertIn(made["live"][:12], {c[:12] for c in present})
 
+    # B1.5, real container, no network: only the fetch is bypassed (the worker is faked; the
+    # parent's re-verification, the deps tar, the driver's install and closure check are real).
+    DEPS_TEST = "import alpha\n\ndef test_alpha():\n    assert alpha.VALUE == 7\n"
+
+    def deps_repo(self, wheels, extra=None):
+        files = {"requirements.txt": "".join(req_line(*w) for w in wheels), "test_alpha.py": self.DEPS_TEST,
+                 **(extra or {})}
+        return make_repo(self.tmp(), files)
+
+    def deps_sandbox(self, argv, wheels, repo, tree, deps=("requirements.txt",), timeout=300):
+        worker = FakeWorker(wheels)
+        extra = [x for d in deps for x in ("--deps", d)]
+        with mock.patch.object(sr.sandbox_fetch, "run_job", worker):
+            res = self.sandbox(argv, repo=repo, tree=tree, extra=extra, timeout=timeout)
+        self.assertEqual(len(worker.calls), 1 if deps else 0)
+        return res
+
+    PYTEST = ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider", "test_alpha.py"]
+
+    def test_v6_deps_install_and_import_pass_end_to_end(self):
+        wheel = make_wheel("alpha", "1.0")
+        repo, tree = self.deps_repo([wheel])
+        res = self.deps_sandbox(self.PYTEST, [wheel], repo, tree)
+        self.assertEqual(res.code, 0, res.err)
+        self.assertEqual(res.info["COMMAND_STATUS"], "exited", res.text("install.txt"))
+        self.assertEqual(res.info["COMMAND_EXIT"], "0", res.text("stdout.txt"))
+        m = res.manifest()
+        self.assertEqual(m["deps"]["install"], {"status": "installed", "reason": None,
+                                                "installed": [["alpha", "1.0"]]})
+        self.assertEqual(m["deps"]["requirements"][0]["sha256"], sha(wheel[1]))
+        self.assertEqual(res.info["REQUIREMENTS_SHA256"], m["deps"]["requirements_sha256"])
+        self.assertTrue((res.run_dir / "install.txt").is_file())
+        self.assertFalse((res.run_dir / "deps").exists())
+        self.assertEqual(m["cleanup"], "confirmed")
+        self.assertEqual(self.own_left(), set())
+
+    def test_v6_the_same_test_without_deps_fails_as_in_b1(self):
+        wheel = make_wheel("alpha", "1.0")
+        repo, tree = self.deps_repo([wheel])
+        res = self.deps_sandbox(self.PYTEST, [wheel], repo, tree, deps=())
+        self.assertEqual(res.code, 0, res.err)
+        self.assertEqual(res.info["COMMAND_STATUS"], "exited")
+        self.assertEqual(res.info["COMMAND_EXIT"], "2")  # pytest: collection error (ImportError)
+        self.assertIsNone(res.manifest()["deps"])
+        self.assertFalse((res.run_dir / "install.txt").exists())
+
+    def test_v6_a_missing_declared_dependency_is_deps_failed(self):
+        wheel = make_wheel("alpha", "1.0", requires=["beta>=1"])
+        repo, tree = self.deps_repo([wheel])
+        res = self.deps_sandbox(["sh", "-c", "echo RAN"], [wheel], repo, tree)
+        self.assertEqual(res.code, 0, res.err)
+        self.assertEqual(res.info["COMMAND_STATUS"], "deps_failed")
+        self.assertEqual(res.info["COMMAND_EXIT"], "-")
+        m = res.manifest()
+        self.assertEqual(m["deps"]["install"]["status"], "failed")
+        self.assertIn("beta", m["deps"]["install"]["reason"])
+        self.assertEqual(res.text("stdout.txt"), "")
+        self.assertEqual(self.own_left(), set())
+
+    def test_v6_the_command_cannot_alter_the_installed_tree(self):
+        wheel = make_wheel("alpha", "1.0")
+        repo, tree = self.deps_repo([wheel])
+        script = ("import alpha, errno, os\n"
+                  "for p in (os.path.join(os.path.dirname(alpha.__file__), 'x.py'), alpha.__file__):\n"
+                  "    try:\n        open(p, 'a').close(); print('WROTE')\n"
+                  "    except OSError as e:\n        print(errno.errorcode[e.errno])\n")
+        res = self.deps_sandbox(["python3", "-c", script], [wheel], repo, tree)
+        self.assertEqual(res.info["COMMAND_EXIT"], "0", res.text("stderr.txt"))
+        self.assertEqual(res.text("stdout.txt").split(), ["EACCES", "EACCES"])
+
     # Cleanup proof (runs last: named after the others and defined last) --------------------
     def test_zz_no_container_is_left(self):
         # only what this class started; claudex.measure=1 and janitor-test are labels no runner uses
@@ -1675,6 +2747,83 @@ class ContainerProbes(TempMixin, unittest.TestCase):
         self.assertEqual(docker_ids("claudex.run=janitor-test"), set())
         self.assertEqual(docker_ids("claudex.measure=1"), set())
 
+
+
+# Plan B1.5 Verification 2 with the REAL fetch: pypi.org and files.pythonhosted.org are
+# contacted, so this is opt-in on top of the container suite. Hashes taken from
+# https://pypi.org/simple/<name>/ (PEP 691 JSON) on 2026-11-01.
+SIX_WHL_SHA = "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274"  # py2.py3-none-any
+MARKUPSAFE_X86_SHA = "ccfcd093f13f0f0b7fdd0f198b90053bf7b2f02a3927a30e63f3ccc9df56b676"  # cp313 manylinux x86_64
+MARKUPSAFE_ARM_SHA = "133a43e73a802c5562be9bbcd03d090aa5a1fe899db609c29e8c8d815c5f6de6"  # cp313 manylinux aarch64
+
+
+@unittest.skipUnless(DOCKER_TESTS and os.environ.get("CLAUDEX_NETWORK_TESTS") == "1",
+                     "real PyPI fetch: needs CLAUDEX_DOCKER_TESTS=1 and CLAUDEX_NETWORK_TESTS=1")
+class NetworkDepsTests(TempMixin, unittest.TestCase):
+    def test_real_fetch_of_a_pure_and_a_compiled_wheel(self):
+        self.clean_env()
+        requirements = (f"six==1.17.0 --hash=sha256:{SIX_WHL_SHA}\n"
+                        f"markupsafe==3.0.3 \\\n    --hash=sha256:{MARKUPSAFE_ARM_SHA} \\\n"
+                        f"    --hash=sha256:{MARKUPSAFE_X86_SHA}\n")
+        probe = ("import six, markupsafe\nfrom markupsafe import _speedups\n"
+                 "print(six.__version__, markupsafe.escape('<x>'), _speedups.__file__.endswith('.so'))\n")
+        base = self.tmp()
+        repo, tree = make_repo(base, {"requirements.txt": requirements, "probe.py": probe})
+        scratch = base / "scratch"
+        scratch.mkdir()
+        code, out, err = run_main(["--repo", str(repo), "--scratch", str(scratch), "--tree", tree,
+                                   "--image", "python-test", "--deps", "requirements.txt",
+                                   "--timeout", "600", "--", "python3", "probe.py"])
+        res = Run(code, out, err)
+        run_ids = {p.name[len("run-"):] for p in (scratch / "sandbox").glob("run-*")}
+        self.assertEqual(code, 0, err)
+        self.assertEqual(res.info["COMMAND_EXIT"], "0", res.text("stderr.txt") if res.run_dir else err)
+        self.assertEqual(res.text("stdout.txt").split(), ["1.17.0", "&lt;x&gt;", "True"])
+        wheels = {r["name"]: r for r in res.manifest()["deps"]["requirements"]}
+        self.assertEqual(wheels["markupsafe"]["sha256"], MARKUPSAFE_X86_SHA)
+        self.assertIn("x86_64", wheels["markupsafe"]["wheel"])
+        self.assertEqual(wheels["six"]["sha256"], SIX_WHL_SHA)
+        self.assertFalse((res.run_dir / "deps").exists())
+        self.assertEqual(set().union(*(docker_ids(f"claudex.run={i}") for i in run_ids)), set())
+
+    def test_v5_an_sdist_only_release_is_refused_and_leaves_nothing(self):
+        # docopt 0.6.2 has exactly one distribution, docopt-0.6.2.tar.gz (no wheel at all).
+        # sha256 read from https://pypi.org/simple/docopt/ (Accept: application/vnd.pypi.simple.v1+json)
+        # on 2026-11-01.
+        self.clean_env()
+        base = self.tmp()
+        repo, tree = make_repo(base, {"requirements.txt": f"docopt==0.6.2 --hash=sha256:{DOCOPT_SDIST_SHA}\n"})
+        scratch = base / "scratch"
+        scratch.mkdir()
+        calls = []
+        real_docker = sr.docker
+
+        def spy(context, *args, **kw):
+            calls.append(args)
+            return real_docker(context, *args, **kw)
+        with mock.patch.object(sr, "docker", spy):
+            code, out, err = run_main(["--repo", str(repo), "--scratch", str(scratch), "--tree", tree,
+                                       "--image", "python-test", "--deps", "requirements.txt",
+                                       "--timeout", "600", "--", "true"])
+        res = Run(code, out, err)
+        self.assertEqual(code, 2, err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("COMMAND_STATUS", res.info)
+        m = res.manifest()
+        self.assertEqual(m["runner_status"], "refused")
+        self.assertIn("docopt", m["reason"])
+        self.assertIsNone(m["deps"]["requirements"])
+        # nothing in the run dir's deps area, no other leftover beside the manifest
+        self.assertFalse((res.run_dir / "deps").exists())
+        self.assertEqual(sorted(p.name for p in res.run_dir.iterdir()), ["manifest.json"])
+        self.assertFalse((scratch / sf.QUARANTINE_DIR).exists())
+        # no container was even created
+        self.assertEqual([a for a in calls if a and a[0] in ("create", "start")], [])
+        run_ids = {p.name[len("run-"):] for p in (scratch / "sandbox").glob("run-*")}
+        self.assertEqual(set().union(*(docker_ids(f"claudex.run={i}") for i in run_ids)), set())
+
+
+DOCOPT_SDIST_SHA = "49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491"  # docopt-0.6.2.tar.gz
 
 
 class DeadlineOrderTests(unittest.TestCase):

@@ -190,8 +190,8 @@ looking at its own work, which is exactly what the doctrine forbids as a verdict
    sandbox, on the tree this gate pinned:
 
    ```bash
-   python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" \
-     --tree "$GATE_TREE" --image python-test --export coverage.xml \
+   python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" \
+     --tree "$GATE_TREE" --image python-test [--deps <hashed requirements file>] --export coverage.xml \
      -- python -m pytest --cov --cov-report=xml:/out/coverage.xml -q
    ```
 
@@ -206,7 +206,12 @@ looking at its own work, which is exactly what the doctrine forbids as a verdict
    `2`) — say so in the prompt ("no coverage data available, judge from the diff"); the
    human may run it themselves. A dependency the image lacks that the code imports fails
    inside the container (`COMMAND_EXIT` != 0): that is "no coverage data —
-   dependencies outside the image (B1.5)", not a coverage number. Coverage of the *changed lines* (`diff-cover`) is not part of
+   dependencies outside the image - the requirements are not hashed (B1.5)", not a
+   coverage number.
+
+   **Dependencies (B1.5).** When the repository has a fully hashed requirements file that the command needs (`requirements*.txt`, every line `name==version --hash=sha256:...`, no markers, no options), add `--deps <its path in the pinned tree>` (repeatable, at most 4) and use the **same** `--deps` on every run of this gate: the initial run, both mutation runs of Step 3b and every rerun after a fix. The runner selects wheels by hash alone from PyPI, installs them offline inside the container and checks the declared closure before the command starts; it prints `REQUIREMENTS_SHA256=` next to `MANIFEST_SHA256=`: log both with the tree id. `COMMAND_STATUS=deps_failed` (install or closure check failed) is a failure, never a pass, and is reported as a dependency problem, not as a test result. Unhashed or marker-bearing requirements are not run: report "dependencies outside the image - the requirements are not hashed (B1.5)" with the hint `uv pip compile --generate-hashes --python-version 3.13 --python-platform x86_64-manylinux_2_28` (output that still carries environment markers is refused as well), never a host run. The honest limit: the closure check proves only what the package metadata declares; a test that skips on a missing optional import still passes, and that is the project's test, not the runner's verdict.
+
+   Coverage of the *changed lines* (`diff-cover`) is not part of
    B1: it reads git on the host, and host git is unhardened until T23, so it is not run.
    Do not invent a number. Missing tooling is a `tests` finding, not a reason to skip.
 4. **Anything the reviewer must cite by line, hand it over WITH line numbers.** A
@@ -470,8 +475,8 @@ coderabbit review --agent --uncommitted --include-untracked --config CLAUDE.md A
    all-pass verdicts and zero findings on a non-trivial diff, is an **invalid
    review** — do not record it as a pass; rerun or surface it.
 3. For each finding: accept (fix it, re-pin the tree, rerun the affected tests/proof
-   through `scripts/sandbox_run.py` on the new tree — same pass rule as Step 1.3, never
-   on the host) or reject
+   through `scripts/sandbox_run.py` on the new tree — same pass rule and same `--deps`
+   as Step 1.3, never on the host) or reject
    *with a logged reason*. Append `### Claude's dispositions` to `LOG_FILE` —
    one line per finding, `accepted → <what changed>` or `rejected → <why>`.
 4. If anything was fixed and rechecks remain: resume the SAME session —
@@ -503,8 +508,8 @@ generate-and-ship tool cannot offer.
   work stays alone), after writing each version to the working tree:
 
   ```bash
-  python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" \
-    --pin <changed path> [<changed path> ...] --image python-test -- python -m pytest -q -rf <the new test id>
+  python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" \
+    --pin <changed path> [<changed path> ...] --image python-test [--deps <same file as Step 1.3>] -- python -m pytest -q -rf <the new test id>
   ```
 
   Record the `TREE=` of the first call as `BROKEN_TREE` and of the second (code

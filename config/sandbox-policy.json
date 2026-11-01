@@ -17,7 +17,16 @@
         "id",
         "sleep",
         "yes"
-      ]
+      ],
+      "_deps_comment": "Plan B1.5 (PLAN-B15-deps.md step 3). wheel_target: the tags a wheel may carry to be handed in with --deps. The image is Debian 13 with glibc 2.41 (measured 2026-11-01: platform.libc_ver() -> ('glibc', '2.41'); pip debug lists manylinux_2_41 down), CPython 3.13, amd64. All five deps_* keys or none; an image without them refuses --deps.",
+      "wheel_target": {
+        "python": "3.13",
+        "platforms": ["manylinux_2_41_x86_64", "manylinux_2_40_x86_64", "manylinux_2_39_x86_64", "manylinux_2_38_x86_64", "manylinux_2_37_x86_64", "manylinux_2_36_x86_64", "manylinux_2_35_x86_64", "manylinux_2_34_x86_64", "manylinux_2_33_x86_64", "manylinux_2_32_x86_64", "manylinux_2_31_x86_64", "manylinux_2_30_x86_64", "manylinux_2_29_x86_64", "manylinux_2_28_x86_64", "manylinux_2_27_x86_64", "manylinux_2_26_x86_64", "manylinux_2_25_x86_64", "manylinux_2_24_x86_64", "manylinux_2_23_x86_64", "manylinux_2_22_x86_64", "manylinux_2_21_x86_64", "manylinux_2_20_x86_64", "manylinux_2_19_x86_64", "manylinux_2_18_x86_64", "manylinux_2_17_x86_64", "manylinux2014_x86_64", "manylinux_2_12_x86_64", "manylinux2010_x86_64", "manylinux_2_5_x86_64", "manylinux1_x86_64", "any"]
+      },
+      "deps_max_bytes": 536870912,
+      "deps_max_file_bytes": 134217728,
+      "deps_tmpfs": "2g",
+      "deps_install_timeout": 300
     }
   }
 }

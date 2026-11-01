@@ -134,8 +134,22 @@ cheaper, and put the *results* into the reviewer's prompt:
   the log says so.
 
   ```bash
-  python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR"     --tree "$AUDIT_TREE" --image python-test -- <the entry point and its arguments>
+  python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" --tree "$AUDIT_TREE" --image python-test [--deps <hashed requirements file>] -- <the entry point and its arguments>
   ```
+
+  **Dependencies (B1.5).** When the repository has a fully hashed requirements file the
+  entry point needs (every line `name==version --hash=sha256:...`, no markers, no options),
+  add `--deps <its path in the pinned tree>` (repeatable, at most 4), the same on every run
+  of this audit. The runner selects wheels by hash alone from PyPI, installs them offline
+  inside the container and checks the declared closure; it prints `REQUIREMENTS_SHA256=`:
+  log it next to `MANIFEST_SHA256=`. `COMMAND_STATUS=deps_failed` is a failure, never a
+  pass, and is recorded as "not run: dependency problem", not as a test result.
+  Unhashed or marker-bearing requirements are not run: record "not run: dependencies outside
+  the image - the requirements are not hashed (B1.5)" with the hint
+  `uv pip compile --generate-hashes --python-version 3.13 --python-platform x86_64-manylinux_2_28`
+  (output that still carries markers is refused too), never a host run. Honest limit: the
+  closure check proves only what the metadata declares; a test that skips on a missing
+  optional import still passes.
 
   **Pass rule: only `COMMAND_STATUS=exited` with `COMMAND_EXIT=0` counts.** Anything
   else (`timeout`, `oom`, `output_limit`, `not_started`) is a failed run, and runner
@@ -144,9 +158,9 @@ cheaper, and put the *results* into the reviewer's prompt:
   the image missing, or a program that is not one of the image's tools, it is refused
   (runner exit `2`) — record "not run: refused" in the coverage note and say that the
   human may run it themselves. A dependency the image lacks that the program then
-  loads fails inside the container (`COMMAND_EXIT` != 0); record it as "not run:
-  dependencies outside the image (B1 supports only image-contained dependencies;
-  B1.5 is the rest)", not as a finding about the code.
+  loads and that no hashed `--deps` file supplies fails inside the container
+  (`COMMAND_EXIT` != 0); record it as "not run: dependencies outside the image - the
+  requirements are not hashed (B1.5)", not as a finding about the code.
 - **The standing four**, language-independent and worth running on almost any repo.
   Probe first — `command -v <tool>` — and name in the log which ones were absent;
   a tool that never ran is not a clean result:
@@ -175,14 +189,32 @@ cheaper, and put the *results* into the reviewer's prompt:
   |---|---|---|
   | static, reads files only | gitleaks, grype, hadolint, actionlint, interrogate, ruff | host |
   | loads project code or config | pytest and coverage, the repo's own entry points, eslint with project config, golangci-lint with plugins, Checkov with custom checks | `sandbox_run.py` with the `python-test` image, or refused. The image carries Python, pytest, pytest-cov, coverage and git only (`config/sandbox/requirements-test.txt`), and the runner accepts only the tools listed in `config/sandbox-policy.json`: a tool the image lacks is refused, never installed |
-  | dependency auditors | pip-audit, npm audit, OSV-Scanner | **not covered by B1**: host, at the user's own risk until B1.5 |
+  | dependency auditors | fully hashed requirements files (any file name) and `package-lock.json` v2/v3 | `scripts/dep_audit.py` (plugin code, runs no package tool: it queries the OSV API with exact name/version pairs); raw pip-audit, npm audit and osv-scanner are not prescribed for repositories under review |
 
-  ⛔ **Dependency auditors run on the host, at the user's own risk, until B1.5.**
-  pip-audit's requirements source can create a venv and install the requirements, and
-  that is project code; npm audit and OSV-Scanner read manifests and lockfiles the
-  repository controls. B1 has no non-installing, sandboxed invocation for them (B1.5
-  defines one), so say this warning in the log next to the result, and run them only
-  when the user accepts the risk. They are not a reason to fail an audit when skipped.
+  **Dependency audit (B1.5): `dep_audit.py`, never a package tool.** The helper reads the
+  listed files from the snapshot of the pinned tree (never the working tree), parses them
+  itself and asks the OSV API about exact name/version pairs, one answer per package:
+
+  ```bash
+  python -I "${CLAUDE_PLUGIN_ROOT}/scripts/dep_audit.py" --repo . --tree "$AUDIT_TREE" --scratch "$SCRATCH_DIR" --file <tree path> [--file <tree path> ...]
+  ```
+
+  It prints `RUN_DIR=`, `TREE=`, `STATUS=`, `VULNERABLE_PACKAGES=`, `REPORT=` and
+  `AUDIT_MANIFEST_SHA256=`. Exit `0` = complete, no known vulnerability; `1` = complete,
+  vulnerabilities found (read `REPORT=`); `2` = input refused; `5` = infrastructure or
+  incomplete, which is **never clean**: say "audit incomplete" in the coverage note. Log
+  `AUDIT_MANIFEST_SHA256=` together with the tree id; a manifest whose tree is not the
+  pinned `$AUDIT_TREE` is not evidence. Accepted inputs: `package-lock.json` lockfile
+  version 2 or 3 (registry entries only; links, workspaces, aliases and non-registry
+  sources refuse the file), and any other file is read as a requirements file, whatever its
+  name (`requirements.lock`, `locks/test.txt`): it must be fully hashed, with no markers and
+  no options, or it is refused. Known lockfiles of other tools are refused by name. The
+  report covers only the dependency inventory of those files, with no resolution; say so.
+  List every dependency file the audit found but did not cover as "no sandbox-safe audit
+  yet": `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, unhashed or
+  marker-bearing requirements, Cargo, Go, Maven. A dependency audit that did not run is a
+  gap in the coverage note, not a reason to fail the audit. The helper makes network
+  requests to api.osv.dev: package names and versions of the audited files leave the machine.
 
 Verified 2026-08-28 against gitleaks 8.30.1, grype 0.118.0, hadolint 2.15.1,
 actionlint 1.7.12 — flags differ across major versions, so check `--help` if a call is

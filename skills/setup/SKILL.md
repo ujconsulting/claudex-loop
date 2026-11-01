@@ -197,6 +197,13 @@ Plugins uebereinstimmen (Aenderung dort nur in einem geprueften Commit). Fehlt D
 Image, verweigern die Schritte den Lauf; der Mensch kann den Befehl auf eigene Verantwortung
 selbst ausfuehren. Der Codex-Build selbst laeuft bis B2 weiterhin roh.
 
+**Abhaengigkeiten und Audits (B1.5): kein neues Host-Werkzeug.** Weder ein Paket-Werkzeug (pip, npm)
+noch ein Audit-Werkzeug muss auf dem Host installiert sein; die Plugin-Skripte `sandbox_run.py --deps`
+und `dep_audit.py` laden und pruefen mit Python-Standardbibliothek. Netz-Ausgang noetig (nur die
+drei Hosts): `pypi.org` und `files.pythonhosted.org` (Raeder anhand ihres Hashes) und `api.osv.dev`
+(Audit); Paketnamen und Versionen der geprueften Dateien verlassen dabei den Rechner. Proxies und
+private Indizes werden nicht unterstuetzt. Jeder Aufruf beginnt mit `python -I`.
+
 ### 2. Bestandsaufnahme im Ziel-Repo
 
 Was existiert schon (`AGENTS.md`, `.codex/`, `CLAUDE.md`, `.gitignore`), wo liegen Pläne

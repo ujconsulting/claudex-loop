@@ -2,8 +2,9 @@
 #
 # A HUMAN builds this image (it needs the network) and records the resulting digest in
 # config/sandbox-policy.json in a reviewed commit; the runner itself never pulls or builds
-# (`--pull=never`, the image id must match). Everything a run needs is inside: no dependency is
-# fetched at run time (B1 supports only image-contained dependencies; B1.5 is the rest).
+# (`--pull=never`, the image id must match). The image fetches nothing at run time and has no
+# network. Dependencies beyond what is inside are handed in by the runner (B1.5, `--deps`): wheels
+# selected by hash and verified on the host, installed offline by pip inside the container.
 #
 #   docker --context desktop-linux build -f config/sandbox/python-test.Dockerfile \
 #     -t claudex-sandbox-python-test:2 config/sandbox

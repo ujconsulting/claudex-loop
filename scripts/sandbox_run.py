@@ -11,11 +11,17 @@ goes through this runner:
            hardened plumbing, every object id recomputed, complete or refused;
   policy   image and docker context come from the INSTALLED plugin's config/sandbox-policy.json,
            never from the checkout; the image's id must match (`--pull=never`);
+  deps     (plan B1.5, optional) `--deps <tree path>` up to 4 fully hashed requirements files,
+           read from the snapshot of the pinned tree and parsed strictly (sandbox_deps); wheels
+           are selected by hash and downloaded by the deadline-killed worker of sandbox_fetch,
+           re-verified here byte by byte, and handed in as a second tar after the snapshot;
+           the driver installs them offline as uid 65531 into a tmpfs /deps;
   run      `docker create` (id known before anything runs) with no network, read-only rootfs,
-           tmpfs /work /out /tmp /home/run, only SETUID/SETGID/KILL for the uid-0 driver
-           (scripts/sandbox_driver.py, passed as `python3 -I -S -c`), the command itself as uid
-           65532 without capabilities; nonce + spec + snapshot tar over stdin (`start -ai`), one
-           framed result tar back over stdout;
+           tmpfs /work /out /tmp /home/run (and /deps only with --deps), only SETUID/SETGID/KILL
+           for the uid-0 driver (scripts/sandbox_driver.py, handed over as a fixed
+           `python3 -I -S -c` zlib+base85 bootstrap of the plugin's own driver source), the
+           command itself as uid 65532 without capabilities; nonce + spec + snapshot tar (+ deps
+           tar) over stdin (`start -ai`), one framed result tar back over stdout;
   accept   only a result whose nonce matches, whose members are exactly the expected ones within
            their caps, and whose container (= driver) ended with ExitCode 0 and not OOMKilled;
   clean    `docker rm -f` on every exit path, confirmed by `docker inspect`; a janitor removes only
@@ -23,10 +29,11 @@ goes through this runner:
 
 The runner's own exit code says whether the run HAPPENED: 0 ok (the command's outcome is in
 COMMAND_STATUS= / COMMAND_EXIT= and the manifest), 2 refused, 5 infrastructure. A skill passes only
-on COMMAND_STATUS=exited and COMMAND_EXIT=0. There is no host fallback of any kind.
+on COMMAND_STATUS=exited and COMMAND_EXIT=0 (`deps_failed` is never a pass). There is no host
+fallback of any kind. With --deps the runner also prints REQUIREMENTS_SHA256=.
 
-    python scripts/sandbox_run.py --repo . --scratch <dir> --tree <sha> --image python-test \
-        [--export NAME]... [--timeout S] -- <argv...>
+    python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch <dir> --tree <sha> \
+        --image python-test [--deps <tree path>]... [--export NAME]... [--timeout S] -- <argv...>
 
 Messages are ASCII only.
 """
@@ -34,6 +41,8 @@ Messages are ASCII only.
 from __future__ import annotations
 
 import argparse
+import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -46,12 +55,16 @@ import sys
 import tarfile
 import threading
 import time
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hunt_io  # noqa: E402
 import hunt_snapshot  # noqa: E402
+import sandbox_deps  # noqa: E402
+import sandbox_fetch  # noqa: E402
 import sandbox_snapshot  # noqa: E402
+import sandbox_wheels  # noqa: E402
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 POLICY_FILE = PLUGIN_ROOT / "config" / "sandbox-policy.json"
@@ -72,6 +85,23 @@ WORK_TMPFS = "512m"
 LABEL = "claudex.run"
 SNAPSHOT_DEADLINE = 120  # plan step 1 default; sandbox_snapshot's own git timers stay below it
 SNAPSHOT_TAR_CAP = 256 * 1024 * 1024
+
+# Plan B1.5.
+MAX_DEPS_FILES = 4
+FETCH_DEADLINE = 600          # plan step 3: total deadline of the wheel worker
+DEFAULT_DEPS_TIMEOUT = 300    # spec deps_timeout when the image has no deps policy
+DEPS_TAR_SLACK = 1024 * 1024  # plan step 4: the deps tar is bounded by deps_max_bytes + 1 MiB
+MAX_DEPS_BYTES = 1024 ** 3    # the driver accepts at most 1 GiB + 1 MiB of deps tar
+INSTALL_CAP = 64 * 1024       # the driver's install.txt cap
+DEPS_POLICY_KEYS = ("wheel_target", "deps_max_bytes", "deps_max_file_bytes", "deps_tmpfs",
+                    "deps_install_timeout")
+TMPFS_SIZE_RE = re.compile(r"([1-9][0-9]{0,5})([kmg])")
+WHEEL_PY_RE = re.compile(r"3\.(0|[1-9][0-9]?)")
+# The driver bootstrap (post-approval change 1): fixed text around the plugin's own driver.
+B85_ALPHABET = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                         "!#$%&()*+-;<=>?@^_`{|}~")
+BOOTSTRAP = "import zlib,base64;exec(zlib.decompress(base64.b85decode('%s')))"
+DRIVER_PREFIX = ["python3", "-I", "-S", "-c"]
 
 
 class Refused(Exception):
@@ -154,6 +184,46 @@ def policy_entry(policy: dict, name: str) -> dict:
             or not all(isinstance(t, str) for t in entry["tools"]):
         raise Refused(f"image {name!r} is not in the plugin's sandbox policy")
     return entry
+
+
+def _policy_int(entry: dict, key: str, low: int, high: int) -> int:
+    value = entry[key]
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise Refused(f"sandbox policy: {key} must be an integer {low}..{high}")
+    return value
+
+
+def _tmpfs_bytes(text) -> int:
+    m = TMPFS_SIZE_RE.fullmatch(text) if isinstance(text, str) else None
+    if not m:
+        raise Refused("sandbox policy: deps_tmpfs must be a size like '2g' (digits + k, m or g)")
+    return int(m.group(1)) * {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}[m.group(2)]
+
+
+def deps_policy(entry: dict) -> dict | None:
+    """The image's B1.5 settings (plan step 3), validated strictly; None when the image has
+    none -- then --deps is refused. Either all of DEPS_POLICY_KEYS are present or none."""
+    present = [k for k in DEPS_POLICY_KEYS if k in entry]
+    if not present:
+        return None
+    if len(present) != len(DEPS_POLICY_KEYS):
+        raise Refused(f"sandbox policy: the deps settings are incomplete (need all of "
+                      f"{', '.join(DEPS_POLICY_KEYS)})")
+    target = entry["wheel_target"]
+    if not isinstance(target, dict) or set(target) != {"python", "platforms"} \
+            or not isinstance(target["python"], str) or not WHEEL_PY_RE.fullmatch(target["python"]):
+        raise Refused("sandbox policy: wheel_target must be {\"python\": \"3.N\", \"platforms\": [...]}")
+    try:
+        sandbox_wheels.accepted_tags(target)
+    except ValueError as exc:
+        raise Refused(f"sandbox policy: {_ascii(exc)}") from None
+    max_bytes = _policy_int(entry, "deps_max_bytes", 1, MAX_DEPS_BYTES)
+    max_file = _policy_int(entry, "deps_max_file_bytes", 1, max_bytes)
+    if _tmpfs_bytes(entry["deps_tmpfs"]) < max_bytes + DEPS_TAR_SLACK:
+        raise Refused("sandbox policy: deps_tmpfs is smaller than deps_max_bytes + 1 MiB")
+    return {"wheel_target": {"python": target["python"], "platforms": list(target["platforms"])},
+            "max_bytes": max_bytes, "max_file": max_file, "tmpfs": entry["deps_tmpfs"],
+            "install_timeout": _policy_int(entry, "deps_install_timeout", 1, MAX_TIMEOUT)}
 
 
 def resolve_image(policy: dict, name: str) -> str:
@@ -246,14 +316,18 @@ def _remove(context: str, ref: str) -> None:
 RECORD = 10240  # tarfile's default record size; the driver writes with the defaults
 
 
-def read_result(data: bytes, nonce: str, exports: list[str]) -> tuple[dict, dict[str, bytes]]:
+def read_result(data: bytes, nonce: str, exports: list[str],
+                with_deps: bool = False) -> tuple[dict, dict[str, bytes]]:
     """Parse the driver's framed result tar member by member (stream mode) under the caps. Accepts
     exactly the expected names, each a regular member, and exactly the standard framing: after the
     last member the end-of-archive blocks and the zero padding to the record size, nothing more,
-    not even more zeros (post-build inspection A, finding 7)."""
+    not even more zeros (post-build inspection A, finding 7). `install.txt` and a deps object
+    belong to a run with deps and to no other (plan B1.5 steps 5 and 6)."""
     if len(data) > RESULT_CAP:
         raise Infrastructure("result stream over the cap")
     caps = {"result.json": 1024 * 1024, "stdout.txt": CAPTURE_CAP, "stderr.txt": CAPTURE_CAP}
+    if with_deps:
+        caps["install.txt"] = INSTALL_CAP
     caps.update({f"out/{n}": EXPORT_CAP for n in exports})
     got: dict[str, bytes] = {}
     try:
@@ -273,7 +347,7 @@ def read_result(data: bytes, nonce: str, exports: list[str]) -> tuple[dict, dict
     framed = -(-(end + 1024) // RECORD) * RECORD
     if len(data) != framed or any(data[end:]):
         raise Infrastructure("the result archive is not framed exactly (trailing or missing bytes)")
-    for need in ("result.json", "stdout.txt", "stderr.txt"):
+    for need in ("result.json", "stdout.txt", "stderr.txt") + (("install.txt",) if with_deps else ()):
         if need not in got:
             raise Infrastructure(f"result member {need} missing")
     try:
@@ -284,9 +358,28 @@ def read_result(data: bytes, nonce: str, exports: list[str]) -> tuple[dict, dict
         raise Infrastructure("result does not carry this run's nonce")
     if result.get("infrastructure"):
         raise Infrastructure(f"driver: {_ascii(result['infrastructure'])[:200]}")
-    if result.get("command_status") not in ("exited", "timeout", "output_limit", "not_started"):
+    status = result.get("command_status")
+    if status not in ("exited", "timeout", "output_limit", "not_started", "deps_failed"):
         raise Infrastructure("result has no valid command_status")
+    _check_result_deps(result.get("deps"), status, with_deps)
     return result, got
+
+
+def _check_result_deps(deps, status: str, with_deps: bool) -> None:
+    """The driver's deps object must fit the run: null without deps; with deps an object whose
+    status agrees with command_status (deps_failed <-> failed; a failed install never ran)."""
+    if not with_deps:
+        if deps is not None or status == "deps_failed":
+            raise Infrastructure("result carries a deps outcome although no deps were sent")
+        return
+    if not isinstance(deps, dict) or set(deps) != {"status", "reason", "installed"} \
+            or deps["status"] not in ("installed", "failed") or not isinstance(deps["installed"], list):
+        raise Infrastructure("result has no valid deps outcome")
+    if deps["status"] == "installed" and (status == "deps_failed" or deps["reason"] is not None):
+        raise Infrastructure("result: deps installed but the command was not run")
+    if deps["status"] == "failed" and (status not in ("deps_failed", "not_started")
+                                       or not isinstance(deps["reason"], str)):
+        raise Infrastructure("result: the command ran although the deps failed")
 
 
 def stream_start(context: str, cid: str, stdin: bytes, timeout: float) -> tuple[bytes, bytes]:
@@ -417,8 +510,27 @@ def supervised_snapshot(repo: Path, tree: str | None, pin: list[str] | None, wor
 
 # --- the run -----------------------------------------------------------------------------
 
-def create_args(run_id: str, deadline: int, image_id: str, driver_source: str) -> list[str]:
-    """`docker create` arguments exactly as plan step 2 states them."""
+def driver_bootstrap(source: bytes) -> list[str]:
+    """The driver argv after the image (post-approval change 1 of plan B1.5): a fixed bootstrap
+    that decompresses the plugin's own driver source and executes it. The whole source as -c no
+    longer fits the Windows command line (WinError 206). The text around the payload is fixed;
+    the payload is base85, whose alphabet has neither a quote nor a backslash -- checked, so the
+    payload can never end the string literal. Nothing in it comes from the repository."""
+    packed = base64.b85encode(zlib.compress(source, 9)).decode("ascii")
+    if not set(packed) <= B85_ALPHABET:
+        raise Infrastructure("driver bootstrap: payload outside the base85 alphabet")
+    return [*DRIVER_PREFIX, BOOTSTRAP % packed]
+
+
+def create_args(run_id: str, deadline: int, image_id: str, driver_argv: list[str],
+                deps_tmpfs: str | None = None) -> list[str]:
+    """`docker create` arguments exactly as plan B1 step 2 states them. With deps (plan B1.5,
+    post-approval change 2) one more tmpfs: /deps, exec (extension modules), nosuid, nodev,
+    root-owned 1777; without deps the argv is B1's apart from the driver argv."""
+    if not isinstance(driver_argv, list) or len(driver_argv) != 5 or driver_argv[:4] != DRIVER_PREFIX:
+        raise ValueError("driver argv must be python3 -I -S -c <bootstrap>")
+    deps = [] if deps_tmpfs is None else [
+        "--tmpfs", f"/deps:rw,exec,nosuid,nodev,size={deps_tmpfs},mode=1777"]
     return [
         "create", "--name", f"claudex-run-{run_id}", "--label", f"{LABEL}={run_id}",
         "--label", f"claudex.deadline={deadline}", "--pull=never", "--network", "none", "--read-only",
@@ -429,9 +541,264 @@ def create_args(run_id: str, deadline: int, image_id: str, driver_source: str) -
         "--mount", "type=tmpfs,destination=/out,tmpfs-size=48m,tmpfs-mode=1777",
         # bandit B108: a tmpfs INSIDE the container, not the host's /tmp.
         "--tmpfs", "/tmp:size=256m",  # nosec B108
-        "--tmpfs", "/home/run:size=64m",
-        "-e", "HOME=/home/run", "-w", "/", "-i", image_id, "python3", "-I", "-S", "-c", driver_source,
+        "--tmpfs", "/home/run:size=64m", *deps,
+        "-e", "HOME=/home/run", "-w", "/", "-i", image_id, *driver_argv,
     ]
+
+
+# --- plan B1.5: the dependency set -----------------------------------------------------------
+
+def deps_paths(raw: list[str]) -> list[str]:
+    """--deps paths canonicalised like --pin paths; at most MAX_DEPS_FILES, each once. Static."""
+    if len(raw) > MAX_DEPS_FILES:
+        raise Refused(f"--deps: at most {MAX_DEPS_FILES} files")
+    paths = [sandbox_snapshot.canonical_path(p) for p in raw]
+    if len(set(paths)) != len(paths):
+        raise Refused("--deps names the same file twice")
+    return paths
+
+
+def read_deps_files(info: dict, tar_bytes: bytes, paths: list[str]) -> list[tuple[str, str, bytes]]:
+    """(path, content_sha256, bytes) of each --deps file, from the in-memory snapshot of the
+    pinned tree -- never the working tree. Each must be a regular-file entry of the snapshot
+    (a directory, a missing path or anything else is refused), and its bytes must hash to the
+    entry's verified content_sha256."""
+    entries = {}
+    for item in info.get("entries") or ():
+        if isinstance(item, list) and len(item) == 3 and isinstance(item[0], str):
+            entries[item[0]] = item[2]
+    want = {p: None for p in paths}
+    for p in paths:
+        if p not in entries:
+            raise Refused(f"--deps {_ascii(p)!r} is not a regular file of the pinned tree")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
+            for member in tf:
+                if member.name in want:
+                    if want[member.name] is not None or not member.isreg():
+                        raise Infrastructure(f"snapshot member {_ascii(member.name)!r} is not one regular file")
+                    if member.size > sandbox_deps.MAX_REQ_FILE:
+                        raise Refused(f"--deps {_ascii(member.name)!r} is over the "
+                                      f"{sandbox_deps.MAX_REQ_FILE} byte limit")
+                    handle = tf.extractfile(member)
+                    want[member.name] = handle.read() if handle else b""
+    except tarfile.TarError as exc:
+        raise Infrastructure(f"the snapshot tar cannot be read: {exc}") from exc
+    out = []
+    for p in paths:
+        data = want[p]
+        if data is None or hashlib.sha256(data).hexdigest() != entries[p]:
+            raise Infrastructure(f"snapshot member {_ascii(p)!r} does not match its entry")
+        out.append((p, entries[p], data))
+    return out
+
+
+def parse_deps(files: list[tuple[str, str, bytes]]) -> list:
+    """Strict parse (sandbox_deps) and merge of the --deps files; refusals name file and line."""
+    try:
+        groups = [sandbox_deps.parse_requirements(data, path) for path, _sha, data in files]
+        reqs = sandbox_deps.merge(groups)
+    except sandbox_deps.DepsRefused as exc:
+        raise Refused(f"--deps: {_ascii(exc)}") from None
+    if not reqs:
+        # an empty inventory is a caller mistake; the driver requires at least one wheel
+        # (post-build inspection B, finding 3 -- fixed here, not with an empty deps tar)
+        raise Refused("--deps: the files list no requirement")
+    if len(reqs) > sandbox_deps.MAX_REQUIREMENTS:
+        # each file is bounded by the parser, the merge is not -- and the driver accepts at most
+        # MAX_REQUIREMENTS (post-build inspection A, finding 6)
+        raise Refused(f"--deps: the files list {len(reqs)} requirements together, more than "
+                      f"{sandbox_deps.MAX_REQUIREMENTS}")
+    return reqs
+
+
+def _check_worker_files(result: dict, reqs: list, target: dict) -> dict:
+    """The worker's file list must be exactly one wheel per requirement, with the same name and
+    version, whose file name parses to that name and version and carries an accepted tag. The
+    worker is ours, so a mismatch is an infrastructure failure, not the input's fault."""
+    files = result.get("files")
+    if not isinstance(files, list) or len(files) != len(reqs):
+        raise Infrastructure("fetch worker: the file list does not match the requirements")
+    accepted = set(sandbox_wheels.accepted_tags(target))
+    by_name = {}
+    for item in files:
+        if not (isinstance(item, list) and len(item) == 5 and all(isinstance(x, str) for x in item[:4])):
+            raise Infrastructure("fetch worker: malformed file entry")
+        if item[0] in by_name:
+            raise Infrastructure(f"fetch worker: two files for {_ascii(item[0])}")
+        by_name[item[0]] = item
+    for req in reqs:
+        item = by_name.get(req.name)
+        if item is None or item[1] != req.version:
+            raise Infrastructure(f"fetch worker: no file for {req.name}=={req.version}")
+        try:
+            name, version, _build, tags = sandbox_wheels.parse_wheel_filename(item[2])
+        except sandbox_wheels.WheelRefused as exc:
+            raise Infrastructure(f"fetch worker: {_ascii(exc)}") from None
+        if name != req.name or version != req.version or not (set(tags) & accepted):
+            raise Infrastructure(f"fetch worker: {_ascii(item[2])} is not a wheel of "
+                                 f"{req.name}=={req.version} for the image")
+    return by_name
+
+
+def build_deps_tar(members: list[tuple[str, bytes]]) -> bytes:
+    """Flat regular members in the given order, mode 0644, uid/gid 0, no names, mtime 0."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT, encoding="utf-8") as tf:
+        for name, data in members:
+            ti = tarfile.TarInfo(name)
+            ti.type, ti.mode, ti.size = tarfile.REGTYPE, 0o644, len(data)
+            ti.mtime, ti.uid, ti.gid, ti.uname, ti.gname = 0, 0, 0, "", ""
+            tf.addfile(ti, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _diagnostic(line) -> None:
+    """Write one diagnostic line to stderr, best effort -- as sandbox_fetch._diagnostic: a full
+    redirected log (OSError) or a closed stream (ValueError) is swallowed, so a log line never
+    stands between a failure and its exit code, its manifest or its quarantine fields. `line` is
+    a callable so that formatting errors are covered too."""
+    try:
+        sys.stderr.write(line())
+    except Exception:  # noqa: BLE001 - the diagnostic is optional, the outcome is not
+        return
+
+
+def _emit(lines: list[str]) -> bool:
+    """Write the KEY=value result lines to stdout and flush; False when that fails. A lost line
+    means the caller cannot read the result, so the caller of _emit maps False to exit 5 -- the
+    manifest has already been written and stays the evidence."""
+    try:
+        sys.stdout.write("".join(f"{line}\n" for line in lines))
+        sys.stdout.flush()
+    except Exception:  # noqa: BLE001 - every failure of the stream means the same: not delivered
+        return False
+    return True
+
+
+def _flushes(stream) -> bool:
+    """True when the stream flushes; every failure of the stream means the same: lost output."""
+    try:
+        stream.flush()
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+def settle_std_streams() -> None:
+    """Make sure the interpreter's shutdown flush of stdout and stderr cannot fail.
+
+    A stream whose write failed (a reader that went away, a full redirected log) keeps its
+    unwritten bytes; Python flushes the stream once more while shutting down, and when that
+    flush fails it replaces the process exit code with 120 -- whatever main() returned. So the
+    entry point flushes both streams here; a stream that still fails gets os.devnull put under
+    its descriptor (os.dup2 -- the remedy the Python documentation gives for SIGPIPE), which
+    discards the bytes that could not be delivered anyway. A stream without a descriptor is
+    replaced by an os.devnull writer instead. Normal shutdown (atexit, finalisers) still runs;
+    only output that was already lost is dropped. Called only from entry(), never by main()."""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        if _flushes(stream):
+            continue
+        try:
+            null = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(null, stream.fileno())
+            finally:
+                os.close(null)
+            stream.flush()  # the pending bytes now go to os.devnull
+        except Exception:  # noqa: BLE001 - no descriptor, or still failing: swap the object
+            with contextlib.suppress(OSError):
+                setattr(sys, name, open(os.devnull, "w", encoding="ascii"))  # noqa: SIM115
+
+
+def entry(argv=None) -> int:
+    """The process entry point: main(), then settle_std_streams(), so that the exit code main()
+    chose (5 for a lost result line, 2 for a refusal) is the exit code of the process."""
+    code = main(argv)
+    settle_std_streams()
+    return code
+
+
+def _remove_job_dir(state: "_Run", job_dir: Path) -> str | None:
+    """Remove the download directory; None when it is gone. Otherwise record the retained path
+    in the manifest fields, name it on stderr and return the reason -- a retained directory is
+    an infrastructure failure, never a success (post-build inspection A, finding 9)."""
+    shutil.rmtree(job_dir, ignore_errors=True)
+    if not os.path.lexists(job_dir):
+        return None
+    state.fields["deps_dir_cleanup"] = "failed"
+    state.fields["deps_dir_retained"] = str(job_dir)
+    _diagnostic(lambda: f"sandbox_run: RETAINED path={ascii(str(job_dir))} -- the download directory "
+                        f"could not be removed; remove it by hand\n")
+    return f"the download directory {_ascii(str(job_dir))} could not be removed and is retained"
+
+
+def fetch_deps(state: "_Run", reqs: list, cfg: dict) -> bytes:
+    """Plan B1.5 steps 3 and 4: download in the deadline-killed worker, re-verify every byte
+    here, build the deps tar. The job directory is created fresh under the run directory and
+    removed on every exit path -- except after an unconfirmed worker termination, which leaves
+    it in place as quarantine (FetchUnconfirmed; manifest cleanup "unconfirmed"). A removal that
+    fails is Infrastructure naming the retained path, whatever the outcome before it was."""
+    job_dir = hunt_io.make_dir(state.run_dir, "deps", base=state.scratch)
+    job = {"kind": "wheels", "requirements": [[r.name, r.version, sorted(r.hashes)] for r in reqs],
+           "target": cfg["wheel_target"], "max_file": cfg["max_file"], "max_total": cfg["max_bytes"]}
+    keep = False
+    try:
+        try:
+            result = sandbox_fetch.run_job(job, job_dir, FETCH_DEADLINE, state.scratch, state.run_id)
+            by_name = _check_worker_files(result, reqs, cfg["wheel_target"])
+            expected = [(r.name, r.version, by_name[r.name][2], r.hashes) for r in reqs]
+            verified = sandbox_fetch.verify_download(job_dir, expected, cfg["max_file"], cfg["max_bytes"])
+        except sandbox_fetch.FetchUnconfirmed as exc:
+            keep = True
+            state.fields["cleanup"] = "unconfirmed"
+            # Every field is copied from the exception, which carries what sandbox_fetch wrote into
+            # the quarantine record -- the runner computes no deadline of its own (inspection A,
+            # finding 8). A missing attribute is recorded as null, never filled in.
+            state.fields["quarantine"] = {"cleanup": "unconfirmed", "pid": exc.pid, "path": str(exc.path),
+                                          "deadline_epoch": getattr(exc, "deadline_epoch", None),
+                                          "record": str(exc.record) if exc.record else None}
+            _diagnostic(lambda e=exc: f"sandbox_run: QUARANTINE path={ascii(str(e.path))} pid={e.pid} "
+                                      f"cleanup=unconfirmed -- remove by hand after checking that pid "
+                                      f"{e.pid} is gone\n")
+            raise Infrastructure(f"fetch: {_ascii(exc)}") from None
+        except sandbox_fetch.FetchRefused as exc:
+            raise Refused(f"fetch: {_ascii(exc)}") from None
+        except sandbox_fetch.FetchInfrastructure as exc:
+            raise Infrastructure(f"fetch: {_ascii(exc)}") from None
+        hashes = {r.name: r.hashes for r in reqs}
+        wheels, selected, listed = [], [], []
+        for (name, version, filename, digest, size), req in zip(verified, reqs):
+            # read once more and hash what goes into the tar: nothing between the check and the
+            # copy is trusted either
+            status, data = hunt_io.read_regular(job_dir / filename, limit=cfg["max_file"])
+            if status != "ok" or len(data) != size or hashlib.sha256(data).hexdigest() != digest \
+                    or digest not in hashes[name]:
+                raise Infrastructure(f"{_ascii(filename)} changed after its verification")
+            wheels.append((filename, data))
+            selected.append((req, digest))
+            listed.append({"name": name, "version": version, "wheel": filename, "sha256": digest})
+    except BaseException as exc:
+        if not keep:
+            failure = _remove_job_dir(state, job_dir)
+            if failure is not None and isinstance(exc, Exception):
+                # the retained directory is the outcome; the first failure stays in the reason
+                raise Infrastructure(f"{failure}; the fetch had already failed: {_ascii(exc)}") from None
+        raise
+    failure = _remove_job_dir(state, job_dir)
+    if failure is not None:
+        raise Infrastructure(failure)
+    members = sorted(wheels) + [("requirements.txt", sandbox_deps.render_requirements(selected))]
+    tar = build_deps_tar(members)
+    if len(tar) > cfg["max_bytes"] + DEPS_TAR_SLACK:
+        raise Refused(f"the deps tar ({len(tar)} bytes) is over its cap of "
+                      f"{cfg['max_bytes'] + DEPS_TAR_SLACK} bytes")
+    state.fields["deps"].update({"requirements": listed,
+                                 "deps_tar_sha256": hashlib.sha256(tar).hexdigest()})
+    return tar
 
 
 class _Run:
@@ -439,10 +806,15 @@ class _Run:
     included (post-build inspection A, finding 10)."""
 
     def __init__(self):
-        self.run_id = secrets.token_hex(8)
+        self.run_id = sandbox_fetch.new_run_id()  # one generator for run dirs and quarantine records
         self.run_dir: Path | None = None
         self.scratch: Path | None = None
-        self.fields: dict = {"run_id": self.run_id, "mode": "container", "cleanup": "not_needed"}
+        self.fields: dict = {"run_id": self.run_id, "mode": "container", "cleanup": "not_needed",
+                             "deps": None}
+
+    def requirements_sha256(self) -> str | None:
+        deps = self.fields.get("deps")
+        return deps.get("requirements_sha256") if isinstance(deps, dict) else None
 
     def open_run_dir(self) -> Path:
         if self.run_dir is None:
@@ -468,6 +840,9 @@ def run(args, state: _Run) -> int:
     # Known before any check, so that a static refusal can still be recorded (finding A10).
     state.scratch = Path(os.path.abspath(args.scratch))
     state.fields.update({"image": args.image, "argv": list(args.argv), "timeout": args.timeout})
+    # Plan B1.5 step 3: quarantine records are listed as data, never acted on.
+    for line in sandbox_fetch.list_quarantine(state.scratch):
+        _diagnostic(lambda q=line: f"sandbox_run: QUARANTINE {q}\n")
     policy = load_policy()
     check_environment()
     context = policy["context"]
@@ -482,7 +857,12 @@ def run(args, state: _Run) -> int:
         raise Refused("--tree must be a full tree id (or use --pin)")
     for rel in args.pin or ():
         sandbox_snapshot.canonical_path(rel)  # refuses before docker and before any git object
+    paths = deps_paths(list(args.deps))
     entry = policy_entry(policy, args.image)
+    cfg = deps_policy(entry)
+    if paths and cfg is None:
+        raise Refused(f"image {args.image!r} has no wheel_target in the plugin's sandbox policy; "
+                      f"--deps is not available for it")
     check_tool(entry, list(args.argv))
     # Everything above is static and refuses without a docker call; _report_failure records such
     # a refusal in a run directory of its own when the scratch directory exists.
@@ -502,12 +882,30 @@ def run(args, state: _Run) -> int:
     tree = info["tree"]
     state.fields.update({"tree": tree, "input_sha256": info["input_sha256"], "files": info["files"]})
 
+    deps_tar = b""
+    if paths:
+        # Every refusal of the input happens here, before the network and before any container.
+        files = read_deps_files(info, tar_bytes, paths)
+        reqs = parse_deps(files)
+        state.fields["deps"] = {
+            "files": [{"path": p, "content_sha256": h} for p, h, _data in files],
+            "requirements_sha256": sandbox_deps.requirements_sha256(reqs),
+            "wheel_target": cfg["wheel_target"], "requirements": None, "deps_tar_sha256": None,
+            "install": None, "install_txt_sha256": None,
+        }
+        deps_tar = fetch_deps(state, reqs, cfg)
+
     nonce = secrets.token_hex(16)
     deadline = int(time.time()) + args.timeout + 300
-    driver_source = DRIVER_FILE.read_bytes().decode("utf-8")
+    driver = DRIVER_FILE.read_bytes()
+    state.fields["driver_sha256"] = hashlib.sha256(driver).hexdigest()
     spec = {"argv": list(args.argv), "exports": list(args.export), "capture_cap": CAPTURE_CAP,
-            "export_cap": EXPORT_CAP, "timeout": args.timeout, "tar_len": len(tar_bytes)}
-    stdin = (nonce + "\n").encode() + (json.dumps(spec, sort_keys=True) + "\n").encode() + tar_bytes
+            "export_cap": EXPORT_CAP, "timeout": args.timeout, "tar_len": len(tar_bytes),
+            "deps_len": len(deps_tar),
+            "deps_sha256": hashlib.sha256(deps_tar).hexdigest() if deps_tar else "",
+            "deps_timeout": cfg["install_timeout"] if cfg else DEFAULT_DEPS_TIMEOUT}
+    stdin = (nonce + "\n").encode() + (json.dumps(spec, sort_keys=True) + "\n").encode() + tar_bytes \
+        + deps_tar
 
     name = f"claudex-run-{state.run_id}"
     state.fields["cleanup"] = "pending"
@@ -515,7 +913,8 @@ def run(args, state: _Run) -> int:
         # Creation is INSIDE the protected region: if docker creates the container but the client
         # times out or is interrupted, the finally still removes it by its predetermined name
         # (post-build inspection A, finding 5).
-        created = docker(context, *create_args(state.run_id, deadline, entry["id"], driver_source))
+        created = docker(context, *create_args(state.run_id, deadline, entry["id"], driver_bootstrap(driver),
+                                               deps_tmpfs=cfg["tmpfs"] if deps_tar else None))
         if created.returncode != 0:
             raise Infrastructure(f"docker create failed: {_tail(created.stderr)}")
         out, err = stream_start(context, name, stdin, args.timeout + 240)
@@ -532,7 +931,7 @@ def run(args, state: _Run) -> int:
         elif exit_code != "0":
             raise Infrastructure(f"driver ended with exit {exit_code}: {_tail(err)}")
         else:
-            result, got = read_result(out, nonce, list(args.export))
+            result, got = read_result(out, nonce, list(args.export), with_deps=bool(deps_tar))
     finally:
         try:
             _remove(context, name)
@@ -557,17 +956,28 @@ def run(args, state: _Run) -> int:
         "command_exit": result.get("command_exit") if result["command_status"] == "exited" else None,
         "truncated": bool(result.get("truncated")), "exported": exported,
     })
+    if isinstance(state.fields["deps"], dict):
+        state.fields["deps"]["install"] = result.get("deps")
+        if "install.txt" in got:
+            state.fields["deps"]["install_txt_sha256"] = hashlib.sha256(got["install.txt"]).hexdigest()
     digest = state.write("ok")
     if digest is None:
         # No manifest, no result: the pass rule needs MANIFEST_SHA256, and printing `None` next to
         # COMMAND_EXIT=0 would be a pass without evidence (inspection round 2, part A, finding 14).
         raise Infrastructure("the run manifest could not be written")
-    print(f"RUN_DIR={state.run_dir}")
-    print(f"TREE={tree}")
-    print(f"COMMAND_STATUS={state.fields['command_status']}")
     exit_shown = state.fields["command_exit"]
-    print(f"COMMAND_EXIT={exit_shown if exit_shown is not None else '-'}")
-    print(f"MANIFEST_SHA256={digest}")
+    lines = [f"RUN_DIR={state.run_dir}", f"TREE={tree}",
+             f"COMMAND_STATUS={state.fields['command_status']}",
+             f"COMMAND_EXIT={exit_shown if exit_shown is not None else '-'}"]
+    if state.requirements_sha256():
+        lines.append(f"REQUIREMENTS_SHA256={state.requirements_sha256()}")
+    lines.append(f"MANIFEST_SHA256={digest}")
+    if not _emit(lines):
+        # The manifest is written and stays the evidence, but a caller that cannot read
+        # MANIFEST_SHA256 cannot apply the pass rule: never exit 0.
+        _diagnostic(lambda: f"sandbox_run: INFRASTRUCTURE - the result lines could not be written "
+                            f"to stdout; manifest {ascii(str(state.run_dir))}/manifest.json\n")
+        return EXIT_INFRA
     return EXIT_OK
 
 
@@ -581,6 +991,8 @@ def parse_args(argv):
                      help="build a tree from HEAD plus these paths, without repository filters")
     ap.add_argument("--image", required=True, help="an image name from the plugin's sandbox policy")
     ap.add_argument("--export", action="append", default=[], help="file name under /out to return")
+    ap.add_argument("--deps", action="append", default=[], metavar="PATH",
+                    help="a fully hashed requirements file of the pinned tree (at most 4; plan B1.5)")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     ap.add_argument("argv", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv)
@@ -600,11 +1012,11 @@ def main(argv=None) -> int:
     except (Refused, sandbox_snapshot.SnapshotRefused, hunt_io.HuntIOError) as exc:
         kind = {Refused: "", sandbox_snapshot.SnapshotRefused: " (snapshot)",
                 hunt_io.HuntIOError: " (run dir)"}.get(type(exc), "")
-        sys.stderr.write(f"sandbox_run: REFUSED{kind} - {_ascii(exc)}\n")
+        _diagnostic(lambda e=exc: f"sandbox_run: REFUSED{kind} - {_ascii(e)}\n")
         _report_failure(state, "refused", exc)
         return EXIT_REFUSED
     except Infrastructure as exc:
-        sys.stderr.write(f"sandbox_run: INFRASTRUCTURE - {_ascii(exc)}\n")
+        _diagnostic(lambda e=exc: f"sandbox_run: INFRASTRUCTURE - {_ascii(e)}\n")
         _report_failure(state, "infrastructure", exc)
         return EXIT_INFRA
 
@@ -612,7 +1024,8 @@ def main(argv=None) -> int:
 def _report_failure(state: _Run, status: str, exc: Exception) -> None:
     """A failed run still leaves a manifest with what is known (inspection A, finding 10) --
     a static refusal too, as long as the scratch directory exists; the runner never creates
-    the scratch directory itself."""
+    the scratch directory itself. The stdout lines are best effort here: the outcome is
+    already a failure (2 or 5) and keeps its exit code when they are lost."""
     if state.run_dir is None and state.scratch is not None and state.scratch.is_dir():
         try:
             state.open_run_dir()
@@ -620,9 +1033,13 @@ def _report_failure(state: _Run, status: str, exc: Exception) -> None:
             pass
     digest = state.write(status, str(exc))
     if digest:
-        print(f"RUN_DIR={state.run_dir}")
-        print(f"MANIFEST_SHA256={digest}")
+        lines = [f"RUN_DIR={state.run_dir}"]
+        if state.requirements_sha256():
+            lines.append(f"REQUIREMENTS_SHA256={state.requirements_sha256()}")
+        lines.append(f"MANIFEST_SHA256={digest}")
+        if not _emit(lines):
+            _diagnostic(lambda: "sandbox_run: the result lines could not be written to stdout\n")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(entry())

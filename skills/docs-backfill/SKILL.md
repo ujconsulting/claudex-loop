@@ -117,9 +117,11 @@ filter, no `git add`): list the changed paths of this batch, run the runner with
 and use the tree it reports.
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" \
-  --pin <changed path> [<changed path> ...] --image python-test -- python -m pytest -q
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" \
+  --pin <changed path> [<changed path> ...] --image python-test [--deps <hashed requirements file>] -- python -m pytest -q
 ```
+
+**Dependencies (B1.5).** When the repository has a fully hashed requirements file that the command needs (`requirements*.txt`, every line `name==version --hash=sha256:...`, no markers, no options), add `--deps <its path in the pinned tree>` (repeatable, at most 4) and use the **same** `--deps` on every run of this gate: the initial run and every rerun. The runner selects wheels by hash alone from PyPI, installs them offline inside the container and checks the declared closure before the command starts; it prints `REQUIREMENTS_SHA256=` next to `MANIFEST_SHA256=`: log both with the tree id. `COMMAND_STATUS=deps_failed` (install or closure check failed) is a failure, never a pass, and is reported as a dependency problem, not as a test result. Unhashed or marker-bearing requirements are not run: report "dependencies outside the image - the requirements are not hashed (B1.5)" with the hint `uv pip compile --generate-hashes --python-version 3.13 --python-platform x86_64-manylinux_2_28` (output that still carries environment markers is refused as well), never a host run. The honest limit: the closure check proves only what the package metadata declares; a test that skips on a missing optional import still passes, and that is the project's test, not the runner's verdict. `--pin` must list the requirements file too, so that it is part of the pinned tree.
 
 Check that the batch's blob ids are in the `TREE=` it prints. **Pass rule: only
 `COMMAND_STATUS=exited` with `COMMAND_EXIT=0` counts** (`timeout`, `oom`, `output_limit`
@@ -128,7 +130,8 @@ are failures; runner exit `2` refused / `5` infrastructure is not a test result)
 image missing, or a program that is not one of the image's tools, the step is refused
 (runner exit `2`) and the human may run it themselves. A dependency the image lacks that
 the code imports fails inside the container (`COMMAND_EXIT` != 0): log it as
-"dependencies outside the image (B1.5)", not as a docs-only proof that failed.
+"dependencies outside the image - the requirements are not hashed (B1.5)" when no hashed
+requirements file exists, not as a docs-only proof that failed.
 
 ### Step 5 — Adversarial review (fresh read-only Codex session)
 
