@@ -187,15 +187,15 @@ Voraussetzung ist Docker (Docker Desktop, Context `desktop-linux`, Linux-Engine)
 von einem Menschen gebaute Image `python-test` (braucht Netz; der Runner baut und zieht nie):
 
 ```bash
-docker --context desktop-linux build -f "${CLAUDE_PLUGIN_ROOT}/config/sandbox/python-test.Dockerfile" -t claudex-sandbox-python-test:2 "${CLAUDE_PLUGIN_ROOT}/config/sandbox"
-docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-python-test:2
+docker --context desktop-linux build -f "${CLAUDE_PLUGIN_ROOT}/config/sandbox/python-test.Dockerfile" -t claudex-sandbox-python-test:3 "${CLAUDE_PLUGIN_ROOT}/config/sandbox"
+docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-python-test:3
 ```
 
 Dockerfile und Build-Kontext liegen ausdruecklich unter `${CLAUDE_PLUGIN_ROOT}`, nie relativ im
 geprueften Repo (ein feindliches Repo koennte dort ein eigenes Dockerfile mitbringen). Die ausgegebene Id muss mit dem Eintrag `python-test` in `config/sandbox-policy.json` des
 Plugins uebereinstimmen (Aenderung dort nur in einem geprueften Commit). Fehlt Docker oder das
 Image, verweigern die Schritte den Lauf; der Mensch kann den Befehl auf eigene Verantwortung
-selbst ausfuehren. Der Codex-Build selbst laeuft bis B2 weiterhin roh.
+selbst ausfuehren. Der Codex-Build nutzt sandbox_build.py; auch dort gibt es keinen Host-Fallback.
 
 **Abhaengigkeiten und Audits (B1.5): kein neues Host-Werkzeug.** Weder ein Paket-Werkzeug (pip, npm)
 noch ein Audit-Werkzeug muss auf dem Host installiert sein; die Plugin-Skripte `sandbox_run.py --deps`
@@ -517,3 +517,42 @@ sammeln: paralleles Anhängen an dieselbe Datei erzeugt Konflikte.
   prüfen; Erkennung im Lauf über die stderr-Datei (429/„usage limit" — auch
   deshalb nie `2>/dev/null`; ein 401/429 tarnt sich als exit 0 + leere
   Verdict-Datei). Volles Protokoll: `docs/betrieb.md` des Plugins → „Kontingent-Ausfall".
+
+
+## B2: Codex-Bau und Token-Proxy
+
+Der Host muss einen Linux-Docker-Engine-Stand aus `build.engines` der installierten
+Policy verwenden (aktuell 29.8.2). Windows, macOS und Linux verwenden dieselben
+Linux-Container; arm64 wird in dieser Version verweigert. Nach dem Bau von
+`claudex-sandbox-python-test:3` zuerst dessen Image-ID mit der Policy vergleichen,
+dann das darauf aufbauende Codex-Image bauen:
+
+```bash
+docker --context desktop-linux build -f "${CLAUDE_PLUGIN_ROOT}/config/sandbox/codex-build.Dockerfile" -t claudex-sandbox-codex-build:1 "${CLAUDE_PLUGIN_ROOT}/config/sandbox"
+docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-codex-build:1
+```
+
+Auch diese ID muss der installierten Policy entsprechen. Der Runner zieht und baut
+keine Images. Host-Login mit ChatGPT ist erforderlich; API-Key-Modus wird verweigert.
+Das echte Token erreicht nur den Proxy nach bestandener Netzprobe. Der Bauende
+bekommt Platzhalter und kann innerhalb der Laufzeit- und Volumengrenzen Modellanfragen
+als Nutzer stellen. Ein Refresh-Versuch beendet den Lauf mit auth_failed.
+
+```bash
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_build.py" run --repo "$TARGET" --scratch "$SCRATCH_DIR" --pin "$SPEC_FILE" --prompt-file "$P"
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/change_apply.py" show --run-dir "$RUN_DIR" --manifest-sha256 "$MANIFEST_SHA256" --repo "$TARGET" --summary --page 1
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/change_apply.py" show --run-dir "$RUN_DIR" --manifest-sha256 "$MANIFEST_SHA256" --repo "$TARGET" --file 0 --page 1
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/change_apply.py" apply --run-dir "$RUN_DIR" --manifest-sha256 "$MANIFEST_SHA256" --target "$TARGET"
+```
+
+RUN_DIR, TREE und MANIFEST_SHA256 aus der eigenen Runner-Ausgabe festhalten.
+Erfolg verlangt BUILD_STATUS=exited, CODEX_EXIT=0 und einen nichtleeren Bericht.
+Alle PAGE k/N der Zusammenfassung und jeder Datei lesen, bevor apply ausgeführt
+wird; Binärdateien und nicht vollständig gezeigte Dateien brauchen eine ausdrückliche
+pfadbezogene Freigabe. Teilweise Veröffentlichung ist möglich: PUBLISHED,
+NOT_PUBLISHED und RECOVERY an den Menschen melden. Wiederherstellung nie automatisch.
+Fix-Runden sind neue Container auf dem geprüften Tree, ohne Session-Resume.
+Es gibt keinen Host-Fallback. Der Proxy leitet nur POST /backend-api/codex/responses
+an chatgpt.com weiter; Account-Routing bleibt lokal, Websockets werden verweigert.
+Antworten werden auf Credential-Kodierungen geprüft; unbekannte Transformationen
+sind nicht durch diese Prüfung abgedeckt.

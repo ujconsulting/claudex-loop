@@ -409,6 +409,36 @@ def test_batch_failure_without_deadline_stays_a_refusal(repo):
         batch.close()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Git for Windows launcher behavior")
+def test_batch_pipe_deadline_survives_failed_taskkill(repo, tmp_path, monkeypatch):
+    """A child keeping stdout open cannot keep the caller blocked when taskkill fails."""
+    marker = tmp_path / "child.pid"
+    code = ("import pathlib,subprocess,sys,time;"
+            "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],stdout=sys.stdout);"
+            f"pathlib.Path({str(marker)!r}).write_text(str(p.pid));time.sleep(30)")
+    original_popen, original_run = ss.subprocess.Popen, ss.subprocess.run
+    def launcher(argv, *args, **kwargs):
+        if argv[-2:] == ["cat-file", "--batch"]:
+            return original_popen([sys.executable, "-c", code], *args, **kwargs)
+        return original_popen(argv, *args, **kwargs)
+    def broken_taskkill(argv, *args, **kwargs):
+        if argv[0] == "taskkill":
+            raise OSError("taskkill unavailable")
+        return original_run(argv, *args, **kwargs)
+    monkeypatch.setattr(ss.subprocess, "Popen", launcher)
+    monkeypatch.setattr(ss.subprocess, "run", broken_taskkill)
+    monkeypatch.setattr(ss, "BATCH_DEADLINE", 0.2)
+    batch = ss._Batch(repo, ss.object_format(repo))
+    try:
+        with pytest.raises(ss.SnapshotInfrastructure, match="timed out"):
+            batch.get("0" * batch.hashlen, "blob", 1024)
+    finally:
+        batch.close()
+        if marker.exists():
+            original_run(["taskkill", "/F", "/T", "/PID", marker.read_text()],
+                         capture_output=True, timeout=10)
+
+
 def _timeout_below_the_api(monkeypatch):
     """Let `git --version` through (require_git) and time out the first real git call -- the
     failure is injected BELOW the public APIs, so their own exception handling is what is

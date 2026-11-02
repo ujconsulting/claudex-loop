@@ -12,8 +12,10 @@ when the promise is broken -- not by reading the code again:
   only containers well past their deadline and reports a survivor; `--pin` refuses unsafe
   paths before any git object is written.
 - Part A, B1.5 (plan PLAN-B15-deps.md steps 2, 3, 4 runner side, 6; post-approval changes 1
-  and 2): the driver bootstrap keeps `docker create` under the Windows command-line limit and
-  carries nothing from the snapshot; `--deps` refuses before any network call or container;
+  and 2) and B2 U6 (approach 3b): the driver goes in through a fixed stdin loader -- argv carries
+  only the loader and the source's sha256, the source arrives first on stdin, bounded and
+  hash-checked -- so `docker create` stays below 8 000 characters and carries nothing from the
+  snapshot; `--deps` refuses before any network call or container;
   the fetch result is cross-checked and re-verified; the deps tar is framed deterministically
   after the snapshot; `/deps` is mounted only with `--deps`; the manifest records it all; an
   unconfirmed worker leaves its directory in quarantine. docker and the fetch worker are faked.
@@ -44,7 +46,6 @@ import time
 import unittest
 import uuid
 import zipfile
-import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -298,7 +299,8 @@ class ReadResultTests(unittest.TestCase):
             sr.read_result(b"\0" * (sr.RESULT_CAP + 1), NONCE, [])
 
 
-DRIVER_TAIL = ["python3", "-I", "-S", "-c", "print('driver')"]
+# The loader argv for a fixed source hash (plan B2 approach 3b); create_args accepts no other tail.
+DRIVER_TAIL = ["python3", "-I", "-S", "-c", sr.LOADER % ("1" * 64)]
 
 # B1's `docker create` argv up to the image, verbatim (commit f9acbfe/995cbec). Without --deps the
 # B1.5 runner must produce exactly this; only the driver argv after the image may differ (plan
@@ -375,7 +377,7 @@ class CreateArgsTests(unittest.TestCase):
         self.assertFalse(any(x.startswith(("--network=", "--privileged=", "--volume=")) for x in a))
 
     def test_image_and_driver_form_the_tail(self):
-        self.assertEqual(self.args[-6:], ["sha256:" + "1" * 64, "python3", "-I", "-S", "-c", "print('driver')"])
+        self.assertEqual(self.args[-6:], ["sha256:" + "1" * 64, *DRIVER_TAIL])
 
     def test_without_deps_the_flags_are_b1s(self):
         # Plan B1.5 step 2: without --deps the same flags, mounts and limits as B1.
@@ -392,8 +394,13 @@ class CreateArgsTests(unittest.TestCase):
         i = args.index(flag)
         self.assertEqual(args[:i - 1] + args[i + 1:], self.args)
 
-    def test_driver_tail_must_be_the_bootstrap_shape(self):
-        for bad in ("print(1)", ["python3", "-c", "x"], ["sh", "-I", "-S", "-c", "x"]):
+    def test_driver_tail_must_be_the_loader_shape(self):
+        # plan B2 approach 3b: only the fixed loader with a 64-hex digest reaches the container
+        loader = sr.LOADER % ("a" * 64)
+        for bad in ("print(1)", ["python3", "-c", "x"], ["sh", "-I", "-S", "-c", loader],
+                    ["python3", "-I", "-S", "-c", "print(1)"], ["python3", "-I", "-S", "-c", loader + ";x"],
+                    ["python3", "-I", "-S", "-c", sr.LOADER % ("A" * 64)],
+                    ["python3", "-I", "-S", "-c", sr.LOADER % ("a" * 63)]):
             with self.subTest(bad=bad), self.assertRaises((TypeError, ValueError)):
                 sr.create_args("abcd", 1, "sha256:" + "1" * 64, bad)
 
@@ -846,6 +853,113 @@ class JanitorTests(unittest.TestCase):
             sr.janitor("ctx")
         self.assertIn("label=claudex.run", seen[0])
 
+    # Plan B2 approach 11 (U6): networks, the order, the per-pass bound, the survivors ---------
+    def fleet(self, containers, networks, stuck=()):
+        """A fake daemon with labelled containers and networks; `stuck` refs survive removal."""
+        calls = []
+
+        def docker(context, *args, **kw):
+            calls.append(args)
+            if args[0] == "ps":
+                return subprocess.CompletedProcess([], 0, stdout="\n".join(containers).encode(), stderr=b"")
+            if args[:2] == ("network", "ls"):
+                return subprocess.CompletedProcess([], 0, stdout="\n".join(networks).encode(), stderr=b"")
+            if args[0] == "rm" or args[:2] == ("network", "rm"):
+                return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+            if args[:2] == ("inspect", "--type"):
+                kind, ref = args[2], args[3]
+                if ref in stuck:
+                    return subprocess.CompletedProcess([], 0, stdout=b"[{}]", stderr=b"")
+                msg = (f"Error response from daemon: No such container: {ref}" if kind == "container"
+                       else f"Error response from daemon: network {ref} not found")
+                return subprocess.CompletedProcess([], 1, stdout=b"[]\n", stderr=msg.encode())
+            raise AssertionError(f"unexpected docker call {args}")
+        return docker, calls
+
+    def test_default_kinds_touch_no_network(self):
+        old = int(time.time()) - sr.JANITOR_GRACE - 60
+        docker, calls = self.fleet([f"c1 {old}"], [f"n1 {old}"])
+        with mock.patch.object(sr, "docker", docker):
+            self.assertEqual(sr.janitor("ctx"), ["c1"])
+        self.assertFalse(any(a[0] == "network" for a in calls), calls)
+
+    def test_networks_are_removed_after_containers_and_proven_gone(self):
+        now = int(time.time())
+        old, live = now - sr.JANITOR_GRACE - 60, now + 600
+        docker, calls = self.fleet([f"c1 {old}", f"c2 {live}"], [f"n1 {old}", f"n2 {live}", "n3"])
+        with mock.patch.object(sr, "docker", docker):
+            # the tuple order does not matter: containers always go first
+            removed = sr.janitor("ctx", kinds=("network", "container"))
+        self.assertEqual(removed, ["c1", "n1"])
+        order = [a for a in calls if a[0] == "rm" or a[:2] == ("network", "rm")]
+        self.assertEqual(order, [("rm", "-f", "c1"), ("network", "rm", "n1")])
+        listing = next(a for a in calls if a[:2] == ("network", "ls"))
+        self.assertIn("label=claudex.run", listing)
+        self.assertIn(("inspect", "--type", "network", "n1"), calls)
+
+    def test_network_listing_is_narrowed_by_run_id(self):
+        docker, calls = self.fleet([], [])
+        with mock.patch.object(sr, "docker", docker):
+            sr.janitor("ctx", run_id="abc", kinds=("container", "network"))
+        self.assertIn("label=claudex.run=abc", next(a for a in calls if a[:2] == ("network", "ls")))
+        self.assertIn("label=claudex.run=abc", next(a for a in calls if a[0] == "ps"))
+
+    def test_an_unknown_kind_is_a_programming_error(self):
+        for kinds in (("volume",), (), ("container", "container"), "container"):
+            with self.subTest(kinds=kinds), self.assertRaises(ValueError):
+                sr.janitor("ctx", kinds=kinds)
+
+    def test_at_most_fifty_removals_per_pass_and_the_rest_reported(self):
+        old = int(time.time()) - sr.JANITOR_GRACE - 60
+        docker, _calls = self.fleet([f"c{i:02d} {old}" for i in range(40)],
+                                    [f"n{i:02d} {old}" for i in range(20)])
+        err = io.StringIO()
+        with mock.patch.object(sr, "docker", docker), contextlib.redirect_stderr(err):
+            removed = sr.janitor("ctx", kinds=("container", "network"))
+        self.assertEqual(sr.JANITOR_MAX, 50)
+        self.assertEqual(len(removed), 50)
+        self.assertEqual(removed[:40], [f"c{i:02d}" for i in range(40)])
+        self.assertIn("deferred=10", err.getvalue())
+
+    def test_every_survivor_is_named_after_the_whole_pass(self):
+        old = int(time.time()) - sr.JANITOR_GRACE - 60
+        docker, calls = self.fleet([f"c1 {old}", f"c2 {old}"], [f"n1 {old}"], stuck=("c1", "n1"))
+        with mock.patch.object(sr, "docker", docker):
+            with self.assertRaises(sr.Infrastructure) as caught:
+                sr.janitor("ctx", kinds=("container", "network"))
+        self.assertIn(("rm", "-f", "c2"), calls)   # the pass went on after the first survivor
+        self.assertIn("c1", str(caught.exception))
+        self.assertIn("n1", str(caught.exception))
+
+    def test_remove_object_per_kind(self):
+        docker, calls = self.fleet([], [])
+        with mock.patch.object(sr, "docker", docker):
+            sr.remove_object("ctx", "container", "c9")
+            sr.remove_object("ctx", "network", "n9")
+            with self.assertRaises(ValueError):
+                sr.remove_object("ctx", "volume", "v9")
+        self.assertEqual(calls, [("rm", "-f", "c9"), ("inspect", "--type", "container", "c9"),
+                                 ("network", "rm", "n9"), ("inspect", "--type", "network", "n9")])
+        docker, _calls = self.fleet([], [], stuck=("n9",))
+        with mock.patch.object(sr, "docker", docker), self.assertRaises(sr.Infrastructure):
+            sr.remove_object("ctx", "network", "n9")
+
+    def test_network_absence_is_dockers_own_answer_for_exactly_that_ref(self):
+        # docker 29.8.2 measured 2026-11-01: `docker inspect --type network <ref>` on a missing
+        # network answers "Error response from daemon: network <ref> not found".
+        done = subprocess.CompletedProcess([], 1, stdout=b"[]\n",
+                                           stderr=b"Error response from daemon: network n1 not found")
+        self.assertTrue(sr._absent(done, "network", "n1"))
+        self.assertFalse(sr._absent(done, "network", "other"))
+        self.assertFalse(sr._absent(done, "container", "n1"))
+        done.stderr = b"Error response from daemon: No such network: n1"
+        self.assertTrue(sr._absent(done, "network", "n1"))
+        done.stderr = b"error during connect: network n1 not found here"
+        self.assertFalse(sr._absent(done, "network", "n1"))
+        done.returncode = 0
+        done.stderr = b"Error response from daemon: network n1 not found"
+        self.assertFalse(sr._absent(done, "network", "n1"))
+
 
 @NEEDS_GIT
 class PinRefusalTests(TempMixin, unittest.TestCase):
@@ -1001,6 +1115,50 @@ class StreamStartTests(unittest.TestCase):
         self.assertEqual(killed, [])
         self.assertEqual(self.argv[-3:], ["start", "-ai", "cid"])
 
+    # Plan B2 approach 5 (U6): explicit per-run caps through the shared transport -------------
+    def explicit(self, code, cap):
+        killed = []
+
+        def docker(context, *args, **kw):
+            killed.append(args)
+            return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+
+        with mock.patch.object(sr.subprocess, "Popen", self.fake_popen(code)), mock.patch.object(sr, "docker", docker):
+            try:
+                return sr.stream_start("ctx", "cid", b"", 30, result_cap=cap), killed
+            except sr.Infrastructure as exc:
+                return exc, killed
+
+    def test_an_explicit_cap_below_the_default_kills_on_its_byte_plus_one(self):
+        result, killed = self.explicit("import sys\nsys.stdout.buffer.write(b'x' * 4097)", 4096)
+        self.assertIsInstance(result, sr.Infrastructure)
+        self.assertIn("over the cap", str(result))
+        self.assertIn(("kill", "cid"), killed)
+        result, killed = self.explicit("import sys\nsys.stdout.buffer.write(b'x' * 4096)", 4096)
+        self.assertEqual(result, (b"x" * 4096, b""))
+
+    def test_an_explicit_cap_above_the_default_is_honoured(self):
+        # 2 MiB through a 3 MiB cap while the module default is patched down to 1 MiB
+        with mock.patch.object(sr, "RESULT_CAP", 1024 * 1024):
+            result, killed = self.explicit("import sys\nsys.stdout.buffer.write(b'x' * (2 * 1024 * 1024))",
+                                           3 * 1024 * 1024)
+        self.assertEqual(len(result[0]), 2 * 1024 * 1024)
+        self.assertEqual(killed, [])
+
+    def test_the_default_cap_is_b1s(self):
+        import inspect
+        self.assertIsNone(inspect.signature(sr.stream_start).parameters["result_cap"].default)
+        self.assertEqual(sr.RESULT_CAP, 64 * 1024 * 1024)
+
+    def test_an_invalid_cap_is_refused_before_docker(self):
+        def popen(*_a, **_k):
+            raise AssertionError("docker started")
+
+        with mock.patch.object(sr.subprocess, "Popen", popen):
+            for bad in (0, -1, True, 1.5, "64", sr.MAX_RESULT_CAP + 1):
+                with self.subTest(cap=bad), self.assertRaises(ValueError):
+                    sr.stream_start("ctx", "cid", b"", 1, result_cap=bad)
+
 
 @NEEDS_GIT
 class CreateCleanupTests(TempMixin, unittest.TestCase):
@@ -1104,10 +1262,8 @@ class CreateCleanupTests(TempMixin, unittest.TestCase):
         self.assertEqual(manifest["cleanup"], "UNCONFIRMED")
 
 
-# --- part A, B1.5: --deps, the driver bootstrap, the deps tar ---------------------------------
+# --- part A, B1.5: --deps, the stdin driver loader (B2 U6), the deps tar ---------------------
 
-B85_ALPHABET = set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~")
-BOOTSTRAP_RE = re.compile(r"import zlib,base64;exec\(zlib\.decompress\(base64\.b85decode\('([^'\\]*)'\)\)\)")
 POLICY_DEPS = {
     "wheel_target": {"python": "3.13", "platforms": ["manylinux_2_17_x86_64", "any"]},
     "deps_max_bytes": 512 * 1024 * 1024, "deps_max_file_bytes": 128 * 1024 * 1024,
@@ -1217,9 +1373,15 @@ class FakeDocker:
                 [], 1, stdout=b"[]\n", stderr=b"Error response from daemon: No such container: " + args[-1].encode())
         raise AssertionError(f"unexpected docker call {args}")
 
-    def stream(self, context, cid, stdin, timeout):
+    def stream(self, context, cid, stdin, timeout, result_cap=None):
         self.stdin = stdin
-        nonce_line, rest = stdin.split(b"\n", 1)
+        # plan B2 approach 3b: the loader block comes first -- `<len>\n<source>`, and the source
+        # must hash to the sha256 the created container's loader carries
+        loader = self.creates()[-1][-1]
+        length_line, rest = stdin.split(b"\n", 1)
+        self.source, rest = rest[:int(length_line)], rest[int(length_line):]
+        assert loader == sr.LOADER % sha(self.source), "stdin source does not match the loader hash"
+        nonce_line, rest = rest.split(b"\n", 1)
         spec_line, rest = rest.split(b"\n", 1)
         self.spec = json.loads(spec_line)
         self.snapshot = rest[:self.spec["tar_len"]]
@@ -1241,38 +1403,215 @@ class FakeDocker:
         return [a for a in self.calls if a[0] == "create"]
 
 
-class BootstrapTests(unittest.TestCase):
-    """Post-approval change 1: the driver goes in as a fixed zlib+b85 bootstrap."""
+def run_loader(tail, stdin: bytes):
+    """Run a loader argv tail (`python3 -I -S -c <loader>`) with this interpreter."""
+    return subprocess.run([sys.executable, *tail[1:]], input=stdin, capture_output=True, timeout=60,
+                          check=False)
+
+
+class LoaderTests(unittest.TestCase):
+    """Plan B2 approach 3b (U6): argv carries only a fixed loader and the sha256 of the driver
+    source; the source arrives FIRST on stdin as `<decimal length>\\n<bytes>`, bounded and
+    hash-checked, and is executed as __main__; the driver's own protocol follows unchanged."""
+
+    PROBE = (b"import sys\nprint('BOOT', __name__, sys.flags.isolated, sys.flags.no_site)\n"
+             b"sys.stdout.write('REST=' + sys.stdin.buffer.read().decode() + '\\n')\n")
 
     def driver(self) -> bytes:
         return sr.DRIVER_FILE.read_bytes()
 
-    def test_bootstrap_shape_and_round_trip(self):
-        tail = sr.driver_bootstrap(self.driver())
+    def test_shape_tail_and_stdin_prefix(self):
+        source = self.driver()
+        tail, prefix = sr.bootstrap(source)
         self.assertEqual(tail[:4], ["python3", "-I", "-S", "-c"])
-        m = BOOTSTRAP_RE.fullmatch(tail[4])
-        self.assertIsNotNone(m, tail[4][:120])
-        self.assertTrue(set(m.group(1)) <= B85_ALPHABET)
-        self.assertNotIn("'", m.group(1))
-        self.assertNotIn("\\", m.group(1))
-        self.assertEqual(zlib.decompress(base64.b85decode(m.group(1))), self.driver())
+        self.assertEqual(len(tail), 5)
+        self.assertEqual(tail[4], sr.LOADER % sha(source))
+        self.assertIsNotNone(sr.LOADER_RE.fullmatch(tail[4]))
+        self.assertEqual(prefix, str(len(source)).encode() + b"\n" + source)
 
-    def test_bootstrap_runs_its_source_under_minus_I_minus_S(self):
-        source = b"import sys\nprint('BOOT', __name__, sys.flags.isolated, sys.flags.no_site)\n"
-        tail = sr.driver_bootstrap(source)
-        done = subprocess.run([sys.executable, *tail[1:]], capture_output=True, timeout=60)
-        self.assertEqual(done.stdout.decode().split(), ["BOOT", "__main__", "1", "1"], done.stderr)
+    def test_the_loader_text_is_fixed_and_needs_no_quoting(self):
+        # no double quote and no backslash: list2cmdline and docker pass it verbatim
+        text = sr.LOADER % ("0" * 64)
+        self.assertNotIn('"', text)
+        self.assertNotIn("\\", text)
+        self.assertNotIn("\n", text)
+        text.encode("ascii")
 
-    def test_whole_create_argv_stays_under_the_windows_limit(self):
-        args = sr.create_args("0123456789abcdef", 1234567890, "sha256:" + "1" * 64,
-                              sr.driver_bootstrap(self.driver()), deps_tmpfs="2g")
-        joined = " ".join(["docker", "--context", "desktop-linux", *args])
-        self.assertLess(len(joined), 30000)
+    def test_the_loader_imports_only_sys_and_hashlib(self):
+        import ast
+        tree = ast.parse(sr.LOADER % ("0" * 64))
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                self.fail(f"from-import in the loader: {node.module}")
+            if isinstance(node, ast.Import):
+                names |= {a.name for a in node.names}
+        self.assertEqual(names, {"sys", "hashlib"})
 
-    def test_a_source_that_would_need_quoting_is_refused(self):
-        with mock.patch.object(sr.base64, "b85encode", lambda _b: b"abc'def"):
-            with self.assertRaises(sr.Infrastructure):
-                sr.driver_bootstrap(b"print(1)")
+    def test_runs_the_source_as_main_under_minus_I_minus_S_and_leaves_the_rest_of_stdin(self):
+        tail, prefix = sr.bootstrap(self.PROBE)
+        done = run_loader(tail, prefix + b"nonce\nspec\npayload")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        boot, rest = done.stdout.decode().replace("\r\n", "\n").split("\n", 1)
+        self.assertEqual(boot.split(), ["BOOT", "__main__", "1", "1"])
+        # the driver's protocol starts exactly after the source block
+        self.assertEqual(rest, "REST=nonce\nspec\npayload\n")
+
+    def test_a_source_whose_sha256_differs_is_refused_and_never_runs(self):
+        good = b"print('GOOD')\n"
+        evil = b"print('EVIL')\n"
+        self.assertEqual(len(good), len(evil))
+        tail, _prefix = sr.bootstrap(good)
+        done = run_loader(tail, str(len(evil)).encode() + b"\n" + evil + b"rest")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertNotIn(b"EVIL", done.stdout)
+        self.assertIn(b"sha256", done.stderr)
+
+    def test_bad_length_lines_are_refused(self):
+        tail, _prefix = sr.bootstrap(self.PROBE)
+        over = str(sr.LOADER_MAX + 1).encode()
+        for bad in (b"", b"\n", b"0\n", b"-5\n", b" 5\n", b"5 \n", b"abc\n", b"0012\n", b"+12\n",
+                    over + b"\n", b"123456789\n", b"9" * 64 + b"\n", b"12"):
+            with self.subTest(line=bad):
+                done = run_loader(tail, bad + self.PROBE)
+                self.assertNotEqual(done.returncode, 0, done.stdout)
+                self.assertNotIn(b"BOOT", done.stdout)
+
+    def test_a_short_source_is_refused_even_when_its_hash_matches(self):
+        # the length check on its own: the digest is that of the bytes actually sent
+        short = self.PROBE[:-1]
+        tail = [*sr.DRIVER_PREFIX, sr.LOADER % sha(short)]
+        done = run_loader(tail, str(len(self.PROBE)).encode() + b"\n" + short)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertNotIn(b"BOOT", done.stdout)
+
+    def test_a_source_over_the_bound_is_refused_even_when_its_hash_matches(self):
+        # the length bound on its own: a correctly hashed source one byte over LOADER_MAX
+        big = b"print('BOOT')\n" + b"#" * (sr.LOADER_MAX + 1 - 14)
+        self.assertEqual(len(big), sr.LOADER_MAX + 1)
+        tail = [*sr.DRIVER_PREFIX, sr.LOADER % sha(big)]
+        done = run_loader(tail, str(len(big)).encode() + b"\n" + big)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertNotIn(b"BOOT", done.stdout)
+        at_bound = big[:-1]
+        tail = [*sr.DRIVER_PREFIX, sr.LOADER % sha(at_bound)]
+        done = run_loader(tail, str(len(at_bound)).encode() + b"\n" + at_bound)
+        self.assertEqual(done.returncode, 0, done.stderr[-300:])
+        self.assertIn(b"BOOT", done.stdout)
+
+    def test_the_host_refuses_an_empty_or_over_long_source(self):
+        for bad in (b"", b"x" * (sr.LOADER_MAX + 1)):
+            with self.subTest(size=len(bad)), self.assertRaises(sr.Infrastructure):
+                sr.bootstrap(bad)
+
+    def test_the_argv_does_not_grow_with_the_source(self):
+        small, _ = sr.bootstrap(b"pass\n")
+        big, _ = sr.bootstrap(b"#" * sr.LOADER_MAX)
+        self.assertEqual(len(small[4]), len(big[4]))
+        self.assertLess(sr.cmdline_length(big), 1000)
+
+    def test_the_old_argv_bootstrap_is_removed_not_aliased(self):
+        for gone in ("driver_bootstrap", "BOOTSTRAP", "B85_ALPHABET"):
+            self.assertFalse(hasattr(sr, gone), gone)
+
+    def test_the_driver_fits_the_loader_bound(self):
+        self.assertLessEqual(len(self.driver()), sr.LOADER_MAX)
+
+
+class CommandLineLengthTests(unittest.TestCase):
+    """Plan B2 approach 3b: every `docker create` variant stays below 8 000 characters as
+    joined by subprocess.list2cmdline -- the form Windows hands to CreateProcess. B1 and B1.5
+    are built here; the B2 probe, builder and proxy variants are U7's create-args functions and
+    are measured with the same sandbox_run.cmdline_length in tests/test_sandbox_build.py."""
+
+    LIMIT = 8000
+
+    def variants(self):
+        tail, _prefix = sr.bootstrap(sr.DRIVER_FILE.read_bytes())
+        image = "sha256:" + "f" * 64
+        head = ["docker", "--context", sr.load_policy()["context"]]
+        return {
+            "B1": head + sr.create_args("0123456789abcdef", 9999999999, image, tail),
+            "B1.5 --deps": head + sr.create_args("0123456789abcdef", 9999999999, image, tail,
+                                                 deps_tmpfs="1023g"),
+        }
+
+    def test_cmdline_length_is_list2cmdline(self):
+        argv = ["docker", "a b", 'q"x', "back\\slash\\", ""]
+        self.assertEqual(sr.cmdline_length(argv), len(subprocess.list2cmdline(argv)))
+
+    def test_every_b1_variant_is_below_the_limit(self):
+        for name, argv in self.variants().items():
+            with self.subTest(variant=name):
+                self.assertLess(sr.cmdline_length(argv), self.LIMIT)
+
+
+class ReadFramedTests(unittest.TestCase):
+    """Plan B2 interfaces (U6): the framed-tar reader with explicit member caps, prefix members
+    (`change/<n>`) and a total cap; read_result is the B1 wrapper around it."""
+
+    EXPECTED = {"result.json": 1024, "codex-last.txt": 64}
+    PREFIX = {"change/": 32}
+
+    def read(self, members, total_cap=1024 * 1024, trailing=b"", nonce=NONCE):
+        return sr.read_framed(make_tar(members, trailing=trailing), nonce, self.EXPECTED, self.PREFIX,
+                              total_cap)
+
+    def doc(self, **over):
+        return json.dumps({"nonce": NONCE, "infrastructure": None, **over}).encode()
+
+    def test_exact_and_prefix_members_are_accepted(self):
+        result, got = self.read([("result.json", self.doc(x=1)), ("change/0", b"a"), ("change/17", b"b"),
+                                 ("codex-last.txt", b"ok")])
+        self.assertEqual(result["x"], 1)
+        self.assertEqual(got["change/0"], b"a")
+        self.assertEqual(got["change/17"], b"b")
+        self.assertEqual(got["codex-last.txt"], b"ok")
+
+    def test_optional_exact_members_may_be_absent(self):
+        _result, got = self.read([("result.json", self.doc())])
+        self.assertEqual(sorted(got), ["result.json"])
+
+    def test_prefix_suffix_must_be_a_canonical_index(self):
+        for name in ("change/", "change/01", "change/x", "change/1/2", "change/-1", "change/1.txt",
+                     "change/" + "9" * 7, "changes/1", "out/x"):
+            with self.subTest(name=name), self.assertRaises(sr.Infrastructure):
+                self.read([("result.json", self.doc()), (name, b"a")])
+
+    def test_caps_duplicates_nonce_and_total(self):
+        cases = {
+            "prefix cap": [("result.json", self.doc()), ("change/1", b"x" * 33)],
+            "exact cap": [("result.json", self.doc()), ("codex-last.txt", b"x" * 65)],
+            "duplicate prefix member": [("result.json", self.doc()), ("change/1", b"a"), ("change/1", b"b")],
+            "duplicate exact member": [("result.json", self.doc()), ("result.json", self.doc())],
+            "no result.json": [("codex-last.txt", b"ok")],
+            "other nonce": [("result.json", json.dumps({"nonce": "f" * 32}).encode())],
+            "driver infrastructure": [("result.json", self.doc(infrastructure="boom"))],
+            "not json": [("result.json", b"{")],
+        }
+        for what, members in cases.items():
+            with self.subTest(what), self.assertRaises(sr.Infrastructure):
+                self.read(members)
+        with self.assertRaises(sr.Infrastructure):
+            self.read([("result.json", self.doc())], total_cap=10)
+        with self.assertRaises(sr.Infrastructure):
+            self.read([("result.json", self.doc())], trailing=b"junk")
+
+    def test_read_result_keeps_b1s_caps(self):
+        self.assertEqual(sr.RESULT_CAP, 64 * 1024 * 1024)
+        seen = {}
+        real = sr.read_framed
+
+        def spy(data, nonce, expected, prefix_caps, total_cap):
+            seen.update(expected=dict(expected), prefix=dict(prefix_caps), total=total_cap)
+            return real(data, nonce, expected, prefix_caps, total_cap)
+
+        with mock.patch.object(sr, "read_framed", spy):
+            sr.read_result(make_tar(good_members()), NONCE, ["cov.xml"])
+        self.assertEqual(seen["expected"], {"result.json": 1024 * 1024, "stdout.txt": sr.CAPTURE_CAP,
+                                            "stderr.txt": sr.CAPTURE_CAP, "out/cov.xml": sr.EXPORT_CAP})
+        self.assertEqual(seen["prefix"], {})
+        self.assertEqual(seen["total"], sr.RESULT_CAP)
 
 
 class DepsPolicyTests(unittest.TestCase):
@@ -1483,7 +1822,9 @@ class DepsRunTests(TempMixin, unittest.TestCase):
         create = list(self.fake.creates()[0])
         self.assertIn("/deps:rw,exec,nosuid,nodev,size=2g,mode=1777", create)
         self.assertEqual(create[-5:-1], ["python3", "-I", "-S", "-c"])
-        self.assertIsNotNone(BOOTSTRAP_RE.fullmatch(create[-1]))
+        self.assertEqual(create[-1], sr.LOADER % sha(sr.DRIVER_FILE.read_bytes()))
+        # the driver source went in first on stdin, verified by the fake against that hash
+        self.assertEqual(self.fake.source, sr.DRIVER_FILE.read_bytes())
         joined = " ".join(create)
         self.assertNotIn(self.marker, joined)
         self.assertNotIn(sha(self.alpha[1]), joined)
@@ -2668,6 +3009,29 @@ class ContainerProbes(TempMixin, unittest.TestCase):
         self.assertNotIn(made["abandoned"][:12], {c[:12] for c in present})
         # positive control: the container within its deadline is untouched
         self.assertIn(made["live"][:12], {c[:12] for c in present})
+
+    def test_v5_janitor_removes_an_expired_network_and_keeps_a_live_one(self):
+        # Plan B2 approach 11 (U6), against the real daemon: listing by label, removal and the
+        # absence proof ("network <ref> not found"). Narrowed to this test's own run id.
+        env = sr.client_env()
+        run_id = "janitor-net-" + uuid.uuid4().hex[:12]
+        now = int(time.time())
+        made = {}
+        for name, deadline in (("abandoned", now - sr.JANITOR_GRACE - 600), ("live", now + 3600)):
+            res = subprocess.run(["docker", "--context", CONTEXT, "network", "create", "--internal",
+                                  "--label", f"claudex.run={run_id}", "--label", f"claudex.deadline={deadline}",
+                                  f"claudex-{run_id}-{name}"], capture_output=True, env=env, timeout=60)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            made[name] = res.stdout.decode().strip()
+        self.addCleanup(lambda: subprocess.run(["docker", "--context", CONTEXT, "network", "rm", *made.values()],
+                                               capture_output=True, env=env, timeout=60))
+        removed = sr.janitor(CONTEXT, run_id=run_id, kinds=("container", "network"))
+        self.assertEqual(removed, [made["abandoned"]])
+        left = subprocess.run(["docker", "--context", CONTEXT, "network", "ls", "-q", "--no-trunc", "--filter",
+                               f"label=claudex.run={run_id}"], capture_output=True, env=env, timeout=60)
+        self.assertEqual(left.stdout.decode().split(), [made["live"]])
+        gone = sr.docker(CONTEXT, "inspect", "--type", "network", made["abandoned"])
+        self.assertTrue(sr._absent(gone, "network", made["abandoned"]), gone.stderr)
 
     # B1.5, real container, no network: only the fetch is bypassed (the worker is faked; the
     # parent's re-verification, the deps tar, the driver's install and closure check are real).

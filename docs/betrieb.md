@@ -550,8 +550,8 @@ mit `COMMAND_EXIT=0`**; `MANIFEST_SHA256=` wird mit der Tree-Id protokolliert.
 ein Mensch einmal (braucht Netz, der Runner baut und zieht nie):
 
 ```text
-docker --context desktop-linux build -f "${CLAUDE_PLUGIN_ROOT}/config/sandbox/python-test.Dockerfile" -t claudex-sandbox-python-test:2 "${CLAUDE_PLUGIN_ROOT}/config/sandbox"
-docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-python-test:2
+docker --context desktop-linux build -f "${CLAUDE_PLUGIN_ROOT}/config/sandbox/python-test.Dockerfile" -t claudex-sandbox-python-test:3 "${CLAUDE_PLUGIN_ROOT}/config/sandbox"
+docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-python-test:3
 ```
 
 Dockerfile und Kontext stehen ausdruecklich unter `${CLAUDE_PLUGIN_ROOT}` (nie relativ im geprueften Repo).
@@ -612,8 +612,7 @@ der Tabelle steht, gilt als Code-ladend, bis es eingeordnet ist):
 | loads project code or config | pytest and coverage, the repo's own entry points, eslint with project config, golangci-lint with plugins, Checkov with custom checks | `sandbox_run.py` with the `python-test` image, or refused. The image carries Python, pytest, pytest-cov, coverage and git only: a tool the image lacks is refused, never installed |
 | dependency auditors | fully hashed requirements files (any file name) and `package-lock.json` v2/v3 | `scripts/dep_audit.py` (plugin code, no package tool; queries the OSV API); raw pip-audit, npm audit and osv-scanner are not prescribed for repositories under review |
 
-Die Grenze ist ein Container in einer Docker-Desktop-VM mit Root-Rechten. Roh bleiben: der Codex-Bau (bis
-B2), die CI (`.github/workflows/checks.yml`) und die Pre-Commit-Prüfung dieses Repos (eigener, vertrauter Code).
+Die Grenze ist ein Container in einer Docker-Desktop-VM mit Root-Rechten. Roh bleiben: die CI (`.github/workflows/checks.yml`) und die Pre-Commit-Prüfung dieses Repos (eigener, vertrauter Code).
 
 ---
 
@@ -702,3 +701,42 @@ Lauf dieselbe Startliste — unter Windows zwei Dateien, `node.exe` und `codex.j
 dazwischen keine der beiden ersetzt wurde, beweist das nicht; ein Ersatz einer oder beider
 durch denselben Benutzer zwischen den zwei Starts ist ausdrücklich nicht abgedeckt.
 
+
+
+## B2: Codex-Bau und Token-Proxy
+
+Der Host muss einen Linux-Docker-Engine-Stand aus `build.engines` der installierten
+Policy verwenden (aktuell 29.8.2). Windows, macOS und Linux verwenden dieselben
+Linux-Container; arm64 wird in dieser Version verweigert. Nach dem Bau von
+`claudex-sandbox-python-test:3` zuerst dessen Image-ID mit der Policy vergleichen,
+dann das darauf aufbauende Codex-Image bauen:
+
+```bash
+docker --context desktop-linux build -f "${CLAUDE_PLUGIN_ROOT}/config/sandbox/codex-build.Dockerfile" -t claudex-sandbox-codex-build:1 "${CLAUDE_PLUGIN_ROOT}/config/sandbox"
+docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-codex-build:1
+```
+
+Auch diese ID muss der installierten Policy entsprechen. Der Runner zieht und baut
+keine Images. Host-Login mit ChatGPT ist erforderlich; API-Key-Modus wird verweigert.
+Das echte Token erreicht nur den Proxy nach bestandener Netzprobe. Der Bauende
+bekommt Platzhalter und kann innerhalb der Laufzeit- und Volumengrenzen Modellanfragen
+als Nutzer stellen. Ein Refresh-Versuch beendet den Lauf mit auth_failed.
+
+```bash
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_build.py" run --repo "$TARGET" --scratch "$SCRATCH_DIR" --pin "$SPEC_FILE" --prompt-file "$P"
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/change_apply.py" show --run-dir "$RUN_DIR" --manifest-sha256 "$MANIFEST_SHA256" --repo "$TARGET" --summary --page 1
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/change_apply.py" show --run-dir "$RUN_DIR" --manifest-sha256 "$MANIFEST_SHA256" --repo "$TARGET" --file 0 --page 1
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/change_apply.py" apply --run-dir "$RUN_DIR" --manifest-sha256 "$MANIFEST_SHA256" --target "$TARGET"
+```
+
+RUN_DIR, TREE und MANIFEST_SHA256 aus der eigenen Runner-Ausgabe festhalten.
+Erfolg verlangt BUILD_STATUS=exited, CODEX_EXIT=0 und einen nichtleeren Bericht.
+Alle PAGE k/N der Zusammenfassung und jeder Datei lesen, bevor apply ausgeführt
+wird; Binärdateien und nicht vollständig gezeigte Dateien brauchen eine ausdrückliche
+pfadbezogene Freigabe. Teilweise Veröffentlichung ist möglich: PUBLISHED,
+NOT_PUBLISHED und RECOVERY an den Menschen melden. Wiederherstellung nie automatisch.
+Fix-Runden sind neue Container auf dem geprüften Tree, ohne Session-Resume.
+Es gibt keinen Host-Fallback. Der Proxy leitet nur POST /backend-api/codex/responses
+an chatgpt.com weiter; Account-Routing bleibt lokal, Websockets werden verweigert.
+Antworten werden auf Credential-Kodierungen geprüft; unbekannte Transformationen
+sind nicht durch diese Prüfung abgedeckt.

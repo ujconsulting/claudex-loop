@@ -7,3 +7,11 @@ packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb55
 pygments==2.21.0 --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
 pytest-cov==7.1.0 --hash=sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678
 coverage==7.17.0 --hash=sha256:045c1eeb19fb4eae949850a761102fffb3a5f638b97f977912f95843e54f6669
+# Plan B2 (PLAN-B2-build.md approach 1): cryptography for the injecting proxy (per-run CA, TLS leaf),
+# which runs in this image. Versions and sha256 taken 2026-11-01 from PyPI's JSON index (latest
+# releases; wheels for CPython 3.13 manylinux x86_64 -- cryptography's abi3 wheel for glibc 2.34,
+# the most specific tag the image's glibc 2.41 accepts). cffi is required on CPython, pycparser by
+# cffi; typing-extensions is only required below Python 3.11 and therefore absent.
+cryptography==50.0.2 --hash=sha256:9dab55f57c74c3cad24c323bacbbd04be4705ba6eb0d92e920b1fc4837ed5079
+cffi==2.1.1 --hash=sha256:a931079504ecc49efed7744c476a5c343a92fabf66dec2db95edb1b2fdc770e2
+pycparser==3.12 --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e

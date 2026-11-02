@@ -1,11 +1,15 @@
 """sandbox_driver: the in-container driver of the B1 sandbox runner.
 
 Plan B1 (docs/plans/2026-10-27-sicherheitskette, approved round 6), Approach 2 and 5.
-The driver runs inside the container through the runner's fixed bootstrap
-`python3 -I -S -c "import zlib,base64;exec(zlib.decompress(base64.b85decode('<b85>')))"`,
-which decompresses this plugin's own driver source and executes it as __main__ (plan B1.5,
-post-approval change 1; the bootstrap itself is tested in tests/test_sandbox_run.py). The
-source must therefore stay one self-contained, ASCII, top-imports-only file; the pure parts
+The driver runs inside the container through the runner's fixed stdin loader (plan B2
+approach 3b, unit U6; it replaced B1.5's zlib+base85 argv bootstrap): argv is
+`python3 -I -S -c <sandbox_run.LOADER with the 64-hex sha256 of this source>`, and stdin
+starts with `<decimal length>
+<source bytes>` -- at most sandbox_run.LOADER_MAX bytes,
+hash-checked by the loader, then executed as __main__ -- followed by the driver's own,
+unchanged protocol (nonce, spec, snapshot tar, deps tar). The loader itself is tested in
+tests/test_sandbox_run.py (LoaderTests). The source must therefore stay one self-contained,
+ASCII, top-imports-only file; the pure parts
 (spec validation, result.json, tar framing, the zombie-aware /proc parser) are tested on
 the host. The container-level behaviour has an OPTIONAL smoke class below, skipped unless
 CLAUDEX_DOCKER_TESTS=1. Written before scripts/sandbox_driver.py and seen failing first.
@@ -833,8 +837,9 @@ class ProcParserTests(unittest.TestCase):
 
 
 class SourceShapeTests(unittest.TestCase):
-    """The file travels compressed inside the `python3 -I -S -c` bootstrap and is executed
-    whole as __main__ after decompression; it must stay self-contained."""
+    """The file travels as the first block on stdin behind the fixed `python3 -I -S -c` loader
+    (plan B2 approach 3b) and is executed whole as __main__ after its sha256 is checked; it
+    must stay self-contained and within the loader's bound."""
 
     def setUp(self):
         self.src = (REPO / "scripts" / "sandbox_driver.py").read_text(encoding="utf-8")
@@ -1666,23 +1671,19 @@ def _snapshot_tar(files):
 class ContainerSmokeTests(unittest.TestCase):
     def setUp(self):
         self.ids = []
-        # The runner's own bootstrap (plan B1.5, post-approval change 1): the raw source as -c
-        # exceeds the Windows command-line limit (WinError 206).
+        # The runner's own launcher (plan B2 approach 3b): argv carries only the fixed loader and
+        # the source's sha256; the source goes in first on stdin (self.loader_prefix).
         import sandbox_run
-        self.driver_argv = sandbox_run.driver_bootstrap((REPO / "scripts" / "sandbox_driver.py").read_bytes())
+        self.sandbox_run = sandbox_run
+        self.source = (REPO / "scripts" / "sandbox_driver.py").read_bytes()
+        self.driver_argv, self.loader_prefix = sandbox_run.bootstrap(self.source)
 
     def tearDown(self):
         for cid in self.ids:
             _docker("rm", "-f", cid, timeout=60)
 
-    def run_driver(self, argv, exports=(), files=(), timeout=60, capture_cap=8 * 1024 * 1024,
-                   deps=b""):
-        tar = _snapshot_tar(files)
-        nonce = uuid.uuid4().hex
-        spec = {"argv": list(argv), "exports": list(exports), "capture_cap": capture_cap,
-                "export_cap": 16 * 1024 * 1024, "timeout": timeout, "tar_len": len(tar),
-                "deps_len": len(deps), "deps_sha256": hashlib.sha256(deps).hexdigest() if deps else "",
-                "deps_timeout": 120}
+    def create(self, deps=False):
+        """`docker create` with the runner's flags and the loader argv; returns the id."""
         # B1.5: /deps root-owned 1777. --mount tmpfs is noexec by default (measured 2026-11-01:
         # an extension module then fails with "failed to map segment"), so this uses --tmpfs.
         deps_mount = ("--tmpfs", "/deps:rw,exec,nosuid,nodev,size=268435456,mode=1777") if deps else ()
@@ -1700,7 +1701,19 @@ class ContainerSmokeTests(unittest.TestCase):
         self.assertEqual(create.returncode, 0, create.stderr.decode(errors="replace"))
         cid = create.stdout.decode().strip()
         self.ids.append(cid)
-        payload = nonce.encode() + b"\n" + json.dumps(spec).encode() + b"\n" + tar + deps
+        return cid
+
+    def run_driver(self, argv, exports=(), files=(), timeout=60, capture_cap=8 * 1024 * 1024,
+                   deps=b""):
+        tar = _snapshot_tar(files)
+        nonce = uuid.uuid4().hex
+        spec = {"argv": list(argv), "exports": list(exports), "capture_cap": capture_cap,
+                "export_cap": 16 * 1024 * 1024, "timeout": timeout, "tar_len": len(tar),
+                "deps_len": len(deps), "deps_sha256": hashlib.sha256(deps).hexdigest() if deps else "",
+                "deps_timeout": 120}
+        cid = self.create(deps=bool(deps))
+        # the loader block first, then the driver's protocol exactly as before B2
+        payload = self.loader_prefix + nonce.encode() + b"\n" + json.dumps(spec).encode() + b"\n" + tar + deps
         start = _docker("start", "-ai", cid, input_bytes=payload, timeout=timeout + 60)
         inspect = _docker("inspect", "--format", "{{.State.ExitCode}} {{.State.OOMKilled}}", cid)
         self.assertEqual(inspect.stdout.decode().strip(), "0 false", start.stderr.decode(errors="replace"))
@@ -1804,6 +1817,38 @@ class ContainerSmokeTests(unittest.TestCase):
     def test_not_started(self):
         result, _ = self.run_driver(["/no/such/binary"])
         self.assertEqual(result["command_status"], "not_started")
+
+    # Plan B2 approach 3b (U6): the loader in the real image ---------------------------------
+    def start_raw(self, payload):
+        cid = self.create()
+        start = _docker("start", "-ai", cid, input_bytes=payload, timeout=120)
+        inspect = _docker("inspect", "--format", "{{.State.ExitCode}}", cid)
+        return start, inspect.stdout.decode().strip()
+
+    def test_loader_refuses_a_tampered_source_in_the_container(self):
+        # same length, one byte changed: the loader's hash check stops it before anything runs
+        evil = self.source.replace(b"sandbox_driver", b"sandbox_DRIVER", 1)
+        self.assertEqual(len(evil), len(self.source))
+        payload = str(len(evil)).encode() + b"\n" + evil + NONCE.encode() + b"\n{}\n"
+        start, code = self.start_raw(payload)
+        self.assertNotEqual(code, "0")
+        self.assertEqual(start.stdout, b"")
+        self.assertIn(b"sha256", start.stderr)
+
+    def test_loader_refuses_an_over_long_length_line_in_the_container(self):
+        start, code = self.start_raw(b"123456789\n" + self.source)
+        self.assertNotEqual(code, "0")
+        self.assertEqual(start.stdout, b"")
+
+    def test_argv_shows_only_the_loader_and_the_hash(self):
+        # /proc/1/cmdline is world readable: it carries the fixed loader and the source's
+        # sha256, never the source, the nonce or the spec
+        result, members = self.run_driver(["sh", "-c", "tr '\\0' '\\n' < /proc/1/cmdline"])
+        self.assertEqual(result["command_status"], "exited")
+        cmdline = members["stdout.txt"].decode().split("\n")
+        self.assertEqual(cmdline[:5], self.driver_argv)
+        self.assertIn(hashlib.sha256(self.source).hexdigest(), cmdline[4])
+        self.assertNotIn(result["nonce"], members["stdout.txt"].decode())
 
 
 if __name__ == "__main__":

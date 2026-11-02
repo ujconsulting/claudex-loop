@@ -50,6 +50,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -184,21 +185,46 @@ class _Batch:
     def __init__(self, repo: Path, fmt: str):
         self.fmt, self.hashlen = fmt, _HASHLEN[fmt]
         self._err = tempfile.TemporaryFile()
+        argv = [*HARDENED_GIT, "cat-file", "--batch"]
+        if os.name == "nt":
+            # Git for Windows' PATH entry may be a launcher. The core binary
+            # itself handles cat-file without a child that could retain pipes.
+            core = _git(repo, ["--exec-path"]).decode("utf-8", "replace").strip()
+            binary = Path(core) / "git.exe"
+            if not binary.is_file():
+                self._err.close()
+                _infrastructure("cannot locate the Git core executable")
+            argv[0] = str(binary)
         try:
-            self.proc = subprocess.Popen([*HARDENED_GIT, "cat-file", "--batch"], cwd=str(repo),
+            self.proc = subprocess.Popen(argv, cwd=str(repo),
                                          env=git_env(), stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, stderr=self._err)
         except OSError as exc:
             self._err.close()
             _infrastructure(f"cannot run git: {exc}")
         self.timed_out = False
+        self.deadline_at = time.monotonic() + BATCH_DEADLINE
+        self._reader = None
         self._timer = threading.Timer(BATCH_DEADLINE, self._expire)
         self._timer.daemon = True
         self._timer.start()
 
     def _expire(self):
         self.timed_out = True
-        self.proc.kill()
+        # Git for Windows can put a launcher in front of cat-file. Killing only
+        # the launcher leaves its child holding the pipes open past the deadline.
+        if os.name == "nt":
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=10,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        try:
+            self.proc.kill()
+        except OSError:
+            pass  # Already reaped by taskkill or concurrent close().
 
     def close(self):
         self._timer.cancel()
@@ -211,7 +237,8 @@ class _Batch:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait()
-        self.proc.stdout.close()
+        if self._reader is None or not self._reader.is_alive():
+            self.proc.stdout.close()  # BufferedReader.close may wait for a blocked reader.
         self._err.close()
 
     def _fail(self, why: str):
@@ -220,6 +247,32 @@ class _Batch:
         _refuse(f"cat-file: {why}")
 
     def get(self, oid: str, expect_type: str, limit: int) -> bytes:
+        result = []
+        done = threading.Event()
+        def read():
+            try:
+                result.append((True, self._get(oid, expect_type, limit)))
+            except BaseException as exc:
+                result.append((False, exc))
+            finally:
+                done.set()
+        self._reader = threading.Thread(target=read, daemon=True)
+        self._reader.start()
+        if not done.wait(max(0, self.deadline_at - time.monotonic())):
+            self.timed_out = True
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+            _infrastructure(f"cat-file: timed out after {BATCH_DEADLINE} s (pipe read)")
+        ok, value = result[0]
+        if not ok:
+            raise value
+        return value
+
+    def _get(self, oid: str, expect_type: str, limit: int) -> bytes:
+        if self.timed_out:
+            self._fail("deadline elapsed before request")
         try:
             self.proc.stdin.write(oid.encode("ascii") + b"\n")
             self.proc.stdin.flush()
@@ -245,6 +298,8 @@ class _Batch:
         digest = hashlib.new(self.fmt, f"{otype} {size}".encode("ascii") + b"\0" + content).hexdigest()
         if digest != oid:
             self._fail(f"object id mismatch for {oid} (content hashes to {digest})")
+        if self.timed_out:
+            self._fail("deadline elapsed while reading object")
         return content
 
 

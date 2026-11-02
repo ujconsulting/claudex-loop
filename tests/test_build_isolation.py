@@ -125,21 +125,22 @@ class FlagsTest(unittest.TestCase):
 
 
 class SkillContractTest(unittest.TestCase):
-    """The build skill must actually USE the flags, on exec and on resume."""
+    """B2 routes both build rounds through the container orchestrator."""
 
     def setUp(self):
         self.text = BUILD_SKILL.read_text(encoding="utf-8")
 
     def test_isolation_is_computed_before_the_build_and_its_exit_stops_it(self):
-        self.assertIn("scripts/build_isolation.py", self.text)
-        self.assertIn("build-isolation.txt", self.text)
+        self.assertIn("scripts/sandbox_build.py", self.text)
+        self.assertIn("No host fallback", self.text)
 
     def test_every_codex_exec_in_the_skill_carries_the_flags(self):
-        launches = [ln for ln in self.text.splitlines()
-                    if ln.lstrip().startswith("codex exec")]
-        self.assertGreaterEqual(len(launches), 2, "exec and resume")
+        self.assertFalse(any(ln.lstrip().startswith("codex exec") for ln in self.text.splitlines()))
+        launches = [ln for ln in self.text.splitlines() if 'scripts/sandbox_build.py" run' in ln]
+        self.assertGreaterEqual(len(launches), 2, "initial and fresh fix round")
         for line in launches:
-            self.assertIn('"${ISO[@]}"', line, line)
+            self.assertIn('python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_build.py"', line)
+            self.assertIn('--repo "$TARGET"', line)
 
 
 if __name__ == "__main__":

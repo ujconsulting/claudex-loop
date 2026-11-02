@@ -6,12 +6,16 @@
 # network. Dependencies beyond what is inside are handed in by the runner (B1.5, `--deps`): wheels
 # selected by hash and verified on the host, installed offline by pip inside the container.
 #
-#   docker --context desktop-linux build -f config/sandbox/python-test.Dockerfile \
-#     -t claudex-sandbox-python-test:2 config/sandbox
-#   docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-python-test:2
+# Tag :3 (plan B2, PLAN-B2-build.md approach 1): adds `cryptography` (+ cffi, pycparser) for the
+# injecting proxy of the Codex build, which runs in this image; it is also the base of
+# config/sandbox/codex-build.Dockerfile. Rebuilding changes B1's pinned id and B1.5's image closure.
 #
-# Base pinned by digest (python:3.13-slim, pulled 2026-10-30). pytest and its dependencies are
-# installed with --require-hashes from the pinned set below (wheels only). git comes from the
+#   docker --context desktop-linux build -f config/sandbox/python-test.Dockerfile \
+#     -t claudex-sandbox-python-test:3 config/sandbox
+#   docker --context desktop-linux image inspect --format '{{.Id}}' claudex-sandbox-python-test:3
+#
+# Base pinned by digest (python:3.13-slim, pulled 2026-10-30). pytest, cryptography and their
+# dependencies are installed with --require-hashes from the pinned set (wheels only). git comes from the
 # Debian archive of the base image and is NOT hash-pinned: the resulting image digest is what
 # pins it, and that digest is what the runner checks.
 FROM python@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb

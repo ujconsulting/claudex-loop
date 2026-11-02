@@ -18,14 +18,19 @@ goes through this runner:
            the driver installs them offline as uid 65531 into a tmpfs /deps;
   run      `docker create` (id known before anything runs) with no network, read-only rootfs,
            tmpfs /work /out /tmp /home/run (and /deps only with --deps), only SETUID/SETGID/KILL
-           for the uid-0 driver (scripts/sandbox_driver.py, handed over as a fixed
-           `python3 -I -S -c` zlib+base85 bootstrap of the plugin's own driver source), the
-           command itself as uid 65532 without capabilities; nonce + spec + snapshot tar (+ deps
-           tar) over stdin (`start -ai`), one framed result tar back over stdout;
+           for the uid-0 driver (scripts/sandbox_driver.py), the command itself as uid 65532
+           without capabilities. The driver is handed over by the stdin loader (plan B2
+           approach 3b, bootstrap()): argv is a fixed `python3 -I -S -c <LOADER>` carrying only
+           the sha256 of the plugin's own driver source; stdin (`start -ai`) carries, in this
+           order, `<len>\n<driver source>` (bounded, hash-checked by the loader, then executed
+           as __main__), nonce + spec + snapshot tar (+ deps tar) -- the driver's protocol,
+           unchanged by B2; one framed result tar comes back over stdout;
   accept   only a result whose nonce matches, whose members are exactly the expected ones within
-           their caps, and whose container (= driver) ended with ExitCode 0 and not OOMKilled;
+           their caps (read_framed; the per-run stream cap goes through stream_start), and whose
+           container (= driver) ended with ExitCode 0 and not OOMKilled;
   clean    `docker rm -f` on every exit path, confirmed by `docker inspect`; a janitor removes only
-           labelled containers more than 600 s past their deadline.
+           labelled containers (and, for plan B2's callers, networks) more than 600 s past their
+           deadline.
 
 The runner's own exit code says whether the run HAPPENED: 0 ok (the command's outcome is in
 COMMAND_STATUS= / COMMAND_EXIT= and the manifest), 2 refused, 5 infrastructure. A skill passes only
@@ -41,7 +46,6 @@ Messages are ASCII only.
 from __future__ import annotations
 
 import argparse
-import base64
 import contextlib
 import hashlib
 import io
@@ -55,7 +59,6 @@ import sys
 import tarfile
 import threading
 import time
-import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -97,11 +100,30 @@ DEPS_POLICY_KEYS = ("wheel_target", "deps_max_bytes", "deps_max_file_bytes", "de
                     "deps_install_timeout")
 TMPFS_SIZE_RE = re.compile(r"([1-9][0-9]{0,5})([kmg])")
 WHEEL_PY_RE = re.compile(r"3\.(0|[1-9][0-9]?)")
-# The driver bootstrap (post-approval change 1): fixed text around the plugin's own driver.
-B85_ALPHABET = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-                         "!#$%&()*+-;<=>?@^_`{|}~")
-BOOTSTRAP = "import zlib,base64;exec(zlib.decompress(base64.b85decode('%s')))"
+
+# The stdin driver loader (plan B2 approach 3b, unit U6; replaces B1.5's zlib+base85 argv
+# bootstrap). argv carries only this fixed text with the 64-hex sha256 of the driver source
+# filled in; the source itself arrives FIRST on stdin as `<decimal length>\n<bytes>`. The
+# loader reads the length line (at most 9 bytes, canonical decimal, 1..LOADER_MAX), exactly that
+# many bytes, checks their sha256 and executes them as __main__ -- through sys.stdin.buffer, the
+# same buffered reader the driver reads its protocol from, so nothing the loader's reads buffered
+# ahead is lost and the protocol after the source block is unchanged. It imports only sys and
+# hashlib, contains no double quote and no backslash (list2cmdline and docker pass it verbatim),
+# and its length does not depend on the source. Any refusal is sys.exit(<ASCII text>): exit 1,
+# nothing executed, nothing on stdout.
+LOADER_MAX = 4 * 1024 * 1024
+LOADER = ("import sys,hashlib;i=sys.stdin.buffer;n=i.readline(9);"
+          "k=int(n) if n[-1:]==bytes((10,)) and n[:-1].isdigit() and n[:1]!=b'0' else 0;"
+          "0<k<=" + str(LOADER_MAX) + " or sys.exit('loader: bad length line');"
+          "s=i.read(k);"
+          "len(s)==k and hashlib.sha256(s).hexdigest()=='%s' or sys.exit('loader: driver source sha256 mismatch');"
+          "c=compile(s,'sandbox_driver','exec');del i,n,k,s;exec(c)")
+LOADER_RE = re.compile(re.escape(LOADER).replace(re.escape("%s"), "[0-9a-f]{64}"))
 DRIVER_PREFIX = ["python3", "-I", "-S", "-c"]
+# Upper bound for an explicit stream cap (B2 uses 256 MiB for the build result).
+MAX_RESULT_CAP = 1024 ** 3
+JANITOR_MAX = 50  # removals per janitor pass, all kinds together (plan B2 approach 11)
+JANITOR_KINDS = ("container", "network")  # removal order: containers before their networks
 
 
 class Refused(Exception):
@@ -272,43 +294,93 @@ def _absent(done, kind: str, ref: str) -> bool:
     round 2, part A, findings A4 and A6)."""
     if done.returncode == 0:
         return False
-    line = re.compile(r"(?:Error(?: response from daemon)?: )?No such (?:%s|object): %s"
-                      % (re.escape(kind), re.escape(ref)), re.IGNORECASE)
+    prefix = r"(?:Error(?: response from daemon)?: )?"
+    forms = [r"No such (?:%s|object): %s" % (re.escape(kind), re.escape(ref))]
+    if kind == "network":
+        # docker 29.8.2, measured 2026-11-01: `docker inspect --type network <ref>` on a missing
+        # network answers "Error response from daemon: network <ref> not found".
+        forms.append("network " + re.escape(ref) + " not found")
+    line = re.compile(prefix + "(?:" + "|".join(forms) + ")", re.IGNORECASE)
     return any(line.fullmatch(t.strip())
                for t in done.stderr.decode("utf-8", "replace").splitlines())
 
 
-def janitor(context: str, now: float | None = None, run_id: str | None = None) -> list[str]:
-    """Remove labelled containers more than JANITOR_GRACE seconds past their deadline -- never one
-    within its deadline, whoever started it. Returns the ids it removed; raises Infrastructure for
-    a survivor it could not remove.
-
-    `now` and `run_id` only narrow it, for a test that checks ONE abandoned run "after expiry"
-    without touching any other session's container; the runner calls it with neither."""
-    selector = f"label={LABEL}" if run_id is None else f"label={LABEL}={run_id}"
-    done = docker(context, "ps", "-a", "--filter", selector,
-                  "--format", '{{.ID}} {{.Label "claudex.deadline"}}')
+def _expired(context: str, kind: str, selector: str, now: float) -> list[str]:
+    """The ids of `kind` objects carrying `selector` whose claudex.deadline + JANITOR_GRACE is
+    past `now`. An object without a numeric deadline label is never expired."""
+    fmt = '{{.ID}} {{.Label "claudex.deadline"}}'
+    if kind == "container":
+        done = docker(context, "ps", "-a", "--filter", selector, "--format", fmt)
+    else:
+        done = docker(context, "network", "ls", "--no-trunc", "--filter", selector, "--format", fmt)
     if done.returncode != 0:
-        raise Infrastructure("cannot list sandbox containers")
-    removed, now = [], time.time() if now is None else now
+        raise Infrastructure(f"cannot list sandbox {kind}s")
+    out = []
     for line in done.stdout.decode("ascii", "replace").splitlines():
         parts = line.split()
-        if len(parts) != 2 or not parts[1].isdigit():
-            continue
-        if int(parts[1]) + JANITOR_GRACE < now:
-            _remove(context, parts[0])
-            removed.append(parts[0])
+        if len(parts) == 2 and parts[1].isdigit() and int(parts[1]) + JANITOR_GRACE < now:
+            out.append(parts[0])
+    return out
+
+
+def janitor(context: str, now: float | None = None, run_id: str | None = None,
+            kinds: tuple[str, ...] = ("container",)) -> list[str]:
+    """Remove labelled objects more than JANITOR_GRACE seconds past their deadline -- never one
+    within its deadline, whoever started it. Returns the ids it removed.
+
+    `kinds` names what to collect: B1 and B1.5 keep the container-only default; plan B2 adds
+    "network" (approach 11). Containers always go first, then networks (a network with an
+    attached container cannot be removed). At most JANITOR_MAX objects are removed per pass,
+    all kinds together; the expired rest is left for the next pass and reported on stderr as
+    `deferred=<n>`. Every object whose removal cannot be proven is a survivor: the pass goes on,
+    and afterwards Infrastructure names all of them.
+
+    `now` and `run_id` only narrow it, for a test that checks ONE abandoned run "after expiry"
+    without touching any other session's objects; the runner calls it with neither."""
+    if isinstance(kinds, str) or not kinds or len(set(kinds)) != len(kinds) \
+            or any(k not in JANITOR_KINDS for k in kinds):
+        raise ValueError(f"janitor kinds must be distinct names from {JANITOR_KINDS}")
+    selector = f"label={LABEL}" if run_id is None else f"label={LABEL}={run_id}"
+    now = time.time() if now is None else now
+    removed, survivors, deferred = [], [], 0
+    for kind in (k for k in JANITOR_KINDS if k in kinds):
+        for ref in _expired(context, kind, selector, now):
+            if len(removed) + len(survivors) >= JANITOR_MAX:
+                deferred += 1
+                continue
+            try:
+                remove_object(context, kind, ref)
+            except Infrastructure:
+                survivors.append(f"{kind} {ref[:24]}")
+                continue
+            removed.append(ref)
+    if deferred:
+        _diagnostic(lambda: f"sandbox_run: JANITOR deferred={deferred} expired objects are left for "
+                            f"the next pass (at most {JANITOR_MAX} per pass)\n")
+    if survivors:
+        raise Infrastructure(f"janitor could not confirm the removal of: {', '.join(survivors)}")
     return removed
 
 
+def remove_object(context: str, kind: str, ref: str) -> None:
+    """Remove a container or a network by id or name and PROVE it is gone: only docker's own
+    absence answer for exactly `ref` to the follow-up `inspect --type <kind>` counts (_absent). A
+    disconnected daemon or a permission error is not a removal (post-build inspection A,
+    finding 4)."""
+    if kind == "container":
+        docker(context, "rm", "-f", ref)
+    elif kind == "network":
+        docker(context, "network", "rm", ref)
+    else:
+        raise ValueError(f"cannot remove a {kind!r}")
+    gone = docker(context, "inspect", "--type", kind, ref)
+    if not _absent(gone, kind, ref):
+        raise Infrastructure(f"{kind} {ref[:24]} could not be confirmed removed")
+
+
 def _remove(context: str, ref: str) -> None:
-    """Remove a container by id or name and PROVE it is gone: only docker's "No such container:
-    <ref>" answer to the follow-up inspect counts. A disconnected daemon or a permission error is
-    not a removal (post-build inspection A, finding 4)."""
-    docker(context, "rm", "-f", ref)
-    gone = docker(context, "inspect", "--type", "container", ref)
-    if not _absent(gone, "container", ref):
-        raise Infrastructure(f"container {ref[:24]} could not be confirmed removed")
+    """B1's container removal with absence proof; remove_object(context, "container", ref)."""
+    remove_object(context, "container", ref)
 
 
 # --- the result stream -------------------------------------------------------------------
@@ -316,40 +388,57 @@ def _remove(context: str, ref: str) -> None:
 RECORD = 10240  # tarfile's default record size; the driver writes with the defaults
 
 
-def read_result(data: bytes, nonce: str, exports: list[str],
-                with_deps: bool = False) -> tuple[dict, dict[str, bytes]]:
-    """Parse the driver's framed result tar member by member (stream mode) under the caps. Accepts
-    exactly the expected names, each a regular member, and exactly the standard framing: after the
-    last member the end-of-archive blocks and the zero padding to the record size, nothing more,
-    not even more zeros (post-build inspection A, finding 7). `install.txt` and a deps object
-    belong to a run with deps and to no other (plan B1.5 steps 5 and 6)."""
-    if len(data) > RESULT_CAP:
+INDEX_RE = re.compile(r"0|[1-9][0-9]{0,5}")  # the <n> of a prefix member such as change/<n>
+
+
+def read_framed(data: bytes, nonce: str, expected: dict[str, int], prefix_caps: dict[str, int],
+                total_cap: int) -> tuple[dict, dict[str, bytes]]:
+    """Parse a driver's framed result tar member by member (stream mode) under explicit caps --
+    the shared reader of B1, B1.5 and B2 (plan B2 interfaces, U6).
+
+    `expected` maps each allowed exact member name to its byte cap; `prefix_caps` maps a prefix
+    to the cap of each member named `<prefix><n>`, n a canonical decimal index (0..999999, no
+    sign, no leading zero, nothing after it) -- B2's `change/<n>`. Every member is a regular file
+    within its cap and appears at most once; `result.json` must be among `expected` and present,
+    and it must be a JSON object carrying `nonce` and no `infrastructure` reason. Which other
+    members are REQUIRED is the caller's rule. The framing is exact: after the last member the
+    end-of-archive blocks and the zero padding to the record size, nothing more, not even more
+    zeros (post-build inspection A, finding 7); the whole stream is at most `total_cap` bytes."""
+    if "result.json" not in expected:
+        raise ValueError("read_framed: result.json must be an expected member")
+    if len(data) > total_cap:
         raise Infrastructure("result stream over the cap")
-    caps = {"result.json": 1024 * 1024, "stdout.txt": CAPTURE_CAP, "stderr.txt": CAPTURE_CAP}
-    if with_deps:
-        caps["install.txt"] = INSTALL_CAP
-    caps.update({f"out/{n}": EXPORT_CAP for n in exports})
+
+    def cap_of(name: str) -> int | None:
+        if name in expected:
+            return expected[name]
+        for prefix, cap in prefix_caps.items():
+            if name.startswith(prefix) and INDEX_RE.fullmatch(name[len(prefix):]):
+                return cap
+        return None
+
     got: dict[str, bytes] = {}
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r|") as tf:
             for member in tf:
-                if member.name not in caps or member.name in got:
-                    raise Infrastructure(f"unexpected result member {member.name!r}")
-                if not member.isreg() or member.size > caps[member.name]:
-                    raise Infrastructure(f"result member {member.name!r} is not a regular file within its cap")
+                cap = cap_of(member.name)
+                if cap is None or member.name in got:
+                    raise Infrastructure(f"unexpected result member {_ascii(member.name)!r}")
+                if not member.isreg() or member.size > cap:
+                    raise Infrastructure(f"result member {_ascii(member.name)!r} is not a regular file "
+                                         f"within its cap")
                 handle = tf.extractfile(member)
                 got[member.name] = handle.read(member.size + 1) if handle else b""
                 if len(got[member.name]) != member.size:
-                    raise Infrastructure(f"result member {member.name!r} has the wrong size")
+                    raise Infrastructure(f"result member {_ascii(member.name)!r} has the wrong size")
             end = tf.offset
     except tarfile.TarError as exc:
         raise Infrastructure(f"result stream is not a valid tar: {exc}") from exc
     framed = -(-(end + 1024) // RECORD) * RECORD
     if len(data) != framed or any(data[end:]):
         raise Infrastructure("the result archive is not framed exactly (trailing or missing bytes)")
-    for need in ("result.json", "stdout.txt", "stderr.txt") + (("install.txt",) if with_deps else ()):
-        if need not in got:
-            raise Infrastructure(f"result member {need} missing")
+    if "result.json" not in got:
+        raise Infrastructure("result member result.json missing")
     try:
         result = json.loads(got["result.json"].decode("utf-8"))
     except ValueError as exc:
@@ -358,6 +447,23 @@ def read_result(data: bytes, nonce: str, exports: list[str],
         raise Infrastructure("result does not carry this run's nonce")
     if result.get("infrastructure"):
         raise Infrastructure(f"driver: {_ascii(result['infrastructure'])[:200]}")
+    return result, got
+
+
+def read_result(data: bytes, nonce: str, exports: list[str],
+                with_deps: bool = False) -> tuple[dict, dict[str, bytes]]:
+    """The B1/B1.5 result: read_framed with B1's caps (RESULT_CAP, looked up at call time),
+    exactly the names result.json, stdout.txt, stderr.txt, out/<export> -- the first three
+    required -- and `install.txt`, which belongs to a run with deps and to no other, as does a
+    deps object (plan B1.5 steps 5 and 6)."""
+    caps = {"result.json": 1024 * 1024, "stdout.txt": CAPTURE_CAP, "stderr.txt": CAPTURE_CAP}
+    if with_deps:
+        caps["install.txt"] = INSTALL_CAP
+    caps.update({f"out/{n}": EXPORT_CAP for n in exports})
+    result, got = read_framed(data, nonce, caps, {}, RESULT_CAP)
+    for need in ("stdout.txt", "stderr.txt") + (("install.txt",) if with_deps else ()):
+        if need not in got:
+            raise Infrastructure(f"result member {need} missing")
     status = result.get("command_status")
     if status not in ("exited", "timeout", "output_limit", "not_started", "deps_failed"):
         raise Infrastructure("result has no valid command_status")
@@ -382,10 +488,20 @@ def _check_result_deps(deps, status: str, with_deps: bool) -> None:
         raise Infrastructure("result: the command ran although the deps failed")
 
 
-def stream_start(context: str, cid: str, stdin: bytes, timeout: float) -> tuple[bytes, bytes]:
-    """`docker start -ai`: write stdin from a thread, read stdout under RESULT_CAP and stderr under
-    its own small cap WHILE receiving; on byte RESULT_CAP + 1, or on the deadline, kill the
-    container at once (post-build inspection A, finding 3)."""
+def stream_start(context: str, cid: str, stdin: bytes, timeout: float,
+                 result_cap: int | None = None) -> tuple[bytes, bytes]:
+    """`docker start -ai`: write stdin from a thread, read stdout under the result cap and stderr
+    under its own small cap WHILE receiving; on byte cap + 1, or on the deadline, kill the
+    container at once (post-build inspection A, finding 3).
+
+    `result_cap` is the explicit per-run cap of the shared transport (plan B2 approach 5: the
+    build result is bounded by the policy's `result_cap`); None means B1's RESULT_CAP, looked up
+    at call time. It is validated before docker is started."""
+    if result_cap is None:
+        result_cap = RESULT_CAP
+    if isinstance(result_cap, bool) or not isinstance(result_cap, int) \
+            or not 1 <= result_cap <= MAX_RESULT_CAP:
+        raise ValueError(f"result_cap must be an integer 1..{MAX_RESULT_CAP}")
     env = client_env()
     try:
         proc = subprocess.Popen(["docker", "--context", context, "start", "-ai", cid], env=env,
@@ -393,7 +509,7 @@ def stream_start(context: str, cid: str, stdin: bytes, timeout: float) -> tuple[
     except OSError as exc:
         raise Infrastructure(f"docker not available: {exc}") from exc
     try:
-        return _stream(context, cid, proc, stdin, timeout)
+        return _stream(context, cid, proc, stdin, timeout, result_cap)
     finally:
         # The local docker client never outlives this call -- on success, on a failed `docker
         # kill`, on a deadline and on KeyboardInterrupt alike (inspection round 2, part A,
@@ -411,7 +527,8 @@ def stream_start(context: str, cid: str, stdin: bytes, timeout: float) -> tuple[
                 pass
 
 
-def _stream(context: str, cid: str, proc, stdin: bytes, timeout: float) -> tuple[bytes, bytes]:
+def _stream(context: str, cid: str, proc, stdin: bytes, timeout: float,
+            result_cap: int) -> tuple[bytes, bytes]:
     out, err, failure = bytearray(), bytearray(), []
 
     def feed():
@@ -453,7 +570,7 @@ def _stream(context: str, cid: str, proc, stdin: bytes, timeout: float) -> tuple
                 if not chunk:
                     return
                 out.extend(chunk)
-                if len(out) > RESULT_CAP:
+                if len(out) > result_cap:
                     stop("result stream over the cap")
                     return
         finally:
@@ -510,25 +627,33 @@ def supervised_snapshot(repo: Path, tree: str | None, pin: list[str] | None, wor
 
 # --- the run -----------------------------------------------------------------------------
 
-def driver_bootstrap(source: bytes) -> list[str]:
-    """The driver argv after the image (post-approval change 1 of plan B1.5): a fixed bootstrap
-    that decompresses the plugin's own driver source and executes it. The whole source as -c no
-    longer fits the Windows command line (WinError 206). The text around the payload is fixed;
-    the payload is base85, whose alphabet has neither a quote nor a backslash -- checked, so the
-    payload can never end the string literal. Nothing in it comes from the repository."""
-    packed = base64.b85encode(zlib.compress(source, 9)).decode("ascii")
-    if not set(packed) <= B85_ALPHABET:
-        raise Infrastructure("driver bootstrap: payload outside the base85 alphabet")
-    return [*DRIVER_PREFIX, BOOTSTRAP % packed]
+def bootstrap(source: bytes) -> tuple[list[str], bytes]:
+    """The driver hand-over for EVERY producer (plan B2 approach 3b): returns the argv tail after
+    the image -- `python3 -I -S -c <LOADER with sha256(source)>` -- and the bytes that must come
+    FIRST on the container's stdin, `<len(source)>\\n<source>`; the producer's own protocol
+    follows them unchanged. The argv length does not depend on the source (it replaced B1.5's
+    compressed argv bootstrap, which grew with the driver towards the Windows command-line
+    limit). Nothing in either part comes from the repository; the source is the plugin's own."""
+    if not isinstance(source, bytes) or not 1 <= len(source) <= LOADER_MAX:
+        raise Infrastructure(f"driver source must be 1..{LOADER_MAX} bytes")
+    tail = [*DRIVER_PREFIX, LOADER % hashlib.sha256(source).hexdigest()]
+    return tail, str(len(source)).encode("ascii") + b"\n" + source
+
+
+def cmdline_length(argv: list[str]) -> int:
+    """The length of `argv` as Windows' CreateProcess receives it (subprocess.list2cmdline)."""
+    return len(subprocess.list2cmdline(argv))
 
 
 def create_args(run_id: str, deadline: int, image_id: str, driver_argv: list[str],
                 deps_tmpfs: str | None = None) -> list[str]:
     """`docker create` arguments exactly as plan B1 step 2 states them. With deps (plan B1.5,
     post-approval change 2) one more tmpfs: /deps, exec (extension modules), nosuid, nodev,
-    root-owned 1777; without deps the argv is B1's apart from the driver argv."""
-    if not isinstance(driver_argv, list) or len(driver_argv) != 5 or driver_argv[:4] != DRIVER_PREFIX:
-        raise ValueError("driver argv must be python3 -I -S -c <bootstrap>")
+    root-owned 1777; without deps the argv is B1's apart from the driver argv, which must be
+    bootstrap()'s loader tail and nothing else."""
+    if not isinstance(driver_argv, list) or len(driver_argv) != 5 or driver_argv[:4] != DRIVER_PREFIX \
+            or not isinstance(driver_argv[4], str) or not LOADER_RE.fullmatch(driver_argv[4]):
+        raise ValueError("driver argv must be python3 -I -S -c <loader>")
     deps = [] if deps_tmpfs is None else [
         "--tmpfs", f"/deps:rw,exec,nosuid,nodev,size={deps_tmpfs},mode=1777"]
     return [
@@ -899,13 +1024,15 @@ def run(args, state: _Run) -> int:
     deadline = int(time.time()) + args.timeout + 300
     driver = DRIVER_FILE.read_bytes()
     state.fields["driver_sha256"] = hashlib.sha256(driver).hexdigest()
+    loader_argv, loader_block = bootstrap(driver)
     spec = {"argv": list(args.argv), "exports": list(args.export), "capture_cap": CAPTURE_CAP,
             "export_cap": EXPORT_CAP, "timeout": args.timeout, "tar_len": len(tar_bytes),
             "deps_len": len(deps_tar),
             "deps_sha256": hashlib.sha256(deps_tar).hexdigest() if deps_tar else "",
             "deps_timeout": cfg["install_timeout"] if cfg else DEFAULT_DEPS_TIMEOUT}
-    stdin = (nonce + "\n").encode() + (json.dumps(spec, sort_keys=True) + "\n").encode() + tar_bytes \
-        + deps_tar
+    # The loader block first (plan B2 approach 3b), then the driver's protocol unchanged.
+    stdin = loader_block + (nonce + "\n").encode() + (json.dumps(spec, sort_keys=True) + "\n").encode() \
+        + tar_bytes + deps_tar
 
     name = f"claudex-run-{state.run_id}"
     state.fields["cleanup"] = "pending"
@@ -913,7 +1040,7 @@ def run(args, state: _Run) -> int:
         # Creation is INSIDE the protected region: if docker creates the container but the client
         # times out or is interrupted, the finally still removes it by its predetermined name
         # (post-build inspection A, finding 5).
-        created = docker(context, *create_args(state.run_id, deadline, entry["id"], driver_bootstrap(driver),
+        created = docker(context, *create_args(state.run_id, deadline, entry["id"], loader_argv,
                                                deps_tmpfs=cfg["tmpfs"] if deps_tar else None))
         if created.returncode != 0:
             raise Infrastructure(f"docker create failed: {_tail(created.stderr)}")

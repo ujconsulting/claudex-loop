@@ -75,7 +75,8 @@ class IndexFingerprint(unittest.TestCase):
     def test_build_verify_reads_staged_changes_too(self):
         s = section(BUILD.read_text(encoding="utf-8"), "## Step 3 — Verify")
         self.assertIn("git diff HEAD", s, "plain `git diff` hides what the builder staged")
-        self.assertIn("git diff --cached", s)
+        self.assertIn("printed STAGE and CHECK", s)
+        self.assertLess(s.index('change_apply.py" show'), s.index('change_apply.py" apply'))
 
     def test_build_pins_the_reviewed_tree_and_checks_it_before_the_commit(self):
         """Inspection round 1, finding 19: the build path recorded no reviewed tree."""
@@ -95,7 +96,7 @@ class IndexFingerprint(unittest.TestCase):
         self.assertIn("never commit it as inspected", loop)
         text = BUILD.read_text(encoding="utf-8")
         verify = section(text, "## Step 3 — Verify")
-        self.assertIn("record `git write-tree` as `REVIEWED_TREE`", verify)
+        self.assertIn("record `git write-tree` as REVIEWED_TREE", verify)
         gate = section(text, "## Step 5 — Human gate")
         self.assertIn('tree_check.py" --tree "$REVIEWED_TREE" --log "$LOG_FILE" --spec "$SPEC_FILE"', gate)
         self.assertIn("never commit it as reviewed", gate)
@@ -133,7 +134,10 @@ class IndexFingerprint(unittest.TestCase):
     def test_build_does_not_misdescribe_git_restore(self):
         s = section(BUILD.read_text(encoding="utf-8"), "## Step 3 — Verify")
         self.assertNotIn("reset the index to the working tree (`git restore --staged", s)
-        self.assertIn("back to **`HEAD`**", s)
+        # The container cannot stage the host index. B2 reviews quarantined
+        # content before publication, then stages only explicitly reviewed paths.
+        self.assertIn("quarantine", BUILD.read_text(encoding="utf-8"))
+        self.assertIn("explicit published paths", s)
 
 
 if __name__ == "__main__":

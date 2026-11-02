@@ -1,11 +1,11 @@
 ---
 name: build
-description: "Hand a frozen spec (PLAN.md or any locked plan) to OpenAI Codex to IMPLEMENT with full write access, while Claude stays the spec-writer and reviewer — the exact role-flip of /plan-review. Codex builds from the spec in a --yolo sandbox, Claude reads the full diff like a contributor PR, runs the proof through `sandbox_run.py`, and iterates fixes via the SAME Codex session up to MAX_FIX_ROUNDS before taking over. Human approves the diff before any commit. Use when the user says \"/build\", \"have codex build this\", \"codex implement the plan\", \"hand the plan to codex\", \"delegate the build to codex\", or right after a plan survives /grill-me-codex, /grill-with-docs-codex, or /plan-review and they choose Codex for implementation (Act 3). Also for standalone delegation: refactors, mechanical migrations, bug fixes with a known repro, test/coverage writing — anything that reads as a work order. NOT for tiny edits (~<20 lines — delegation overhead loses), NOT for design work (if writing the spec forces decisions, that's /grill-me-codex first), NOT for reviewing existing code (/codex:review), and NOT for anything needing Claude-session tools (MCP, secrets, browser)."
+description: "Hand a frozen spec (PLAN.md or any locked plan) to OpenAI Codex to IMPLEMENT with full write access, while Claude stays the spec-writer and reviewer — the exact role-flip of /plan-review. Codex builds from the spec in a hardened container, Claude reads the full diff like a contributor PR, runs the proof through `sandbox_run.py`, and iterates fixes in fresh containers up to MAX_FIX_ROUNDS. Human approves the diff before any commit. Use when the user says \"/build\", \"have codex build this\", \"codex implement the plan\", \"hand the plan to codex\", \"delegate the build to codex\", or right after a plan survives /grill-me-codex, /grill-with-docs-codex, or /plan-review and they choose Codex for implementation (Act 3). Also for standalone delegation: refactors, mechanical migrations, bug fixes with a known repro, test/coverage writing — anything that reads as a work order. NOT for tiny edits (~<20 lines — delegation overhead loses), NOT for design work (if writing the spec forces decisions, that's /grill-me-codex first), NOT for reviewing existing code (/codex:review), and NOT for anything needing Claude-session tools (MCP, secrets, browser)."
 ---
 
 # Codex-Build — Codex Types, Claude Verifies
 
-The role-flip of `/plan-review`: there, Claude builds the plan and Codex critiques read-only. Here, **Codex is the builder with write access; Claude is the spec-writer and reviewer.** Codex implements a frozen spec end-to-end; Claude judges the diff like a contributor PR, demands proof, and iterates fixes in the same Codex session. The human enters at exactly two points: kickoff and diff sign-off.
+The role-flip of `/plan-review`: there, Claude builds the plan and Codex critiques read-only. Here, **Codex is the builder with write access; Claude is the spec-writer and reviewer.** Codex implements a frozen spec end-to-end; Claude judges the diff like a contributor PR, demands proof, and iterates fixes in fresh containers. The human enters at exactly two points: kickoff and diff sign-off.
 
 Adapted from Peter Steinberger's `codex-first` pattern (agent-scripts), rebuilt on this house's verified Codex mechanics.
 
@@ -30,40 +30,24 @@ When an adversary role resolves to `claude`, it runs as the plugin agent `claude
 connector) — never as a sub-agent with the session's tools. Measured 2026-10-27: a
 sub-agent without a tool list reached the session's write-capable claude.ai connectors
 through ToolSearch; `claudex-reader` reached none. See `ROLES.md`.
-## Prerequisites (verify once, fast)
+## Prerequisites
 
-- `codex --version` must actually PRINT a version, ≥ 0.162.1 for codex (the minimum for the
-  default `gpt-6.1-sol`, which is HTTP 400 on older CLIs). **Empty output with a non-zero exit is neither a hang nor an
-  auth failure** — it is a dead binary; do not retry it. Exit 137 (SIGKILL) on macOS
-  means a stale npm-global `codex` shadows the current CLI, which now ships inside the
-  ChatGPT desktop app at `/Applications/ChatGPT.app/Contents/Resources/codex`. Symlink
-  that into a PATH dir ahead of the stale one, then have the *user* run
-  `sudo npm uninstall -g @openai/codex` (needs their password). ⛔ Never delete
-  `~/.codex/`. (upstream [issue #10](https://github.com/chaseai-yt/claudex-loop/issues/10))
-- Codex authenticated (prior `codex login`; ChatGPT account is fine). On auth/model error, surface it — don't silently retry.
-- Do NOT pin `-m` or model config (e.g. `model_reasoning_effort`) unless the user asks. Pinning `gpt-5.x-codex` variants 400s on ChatGPT-account auth; config defaults come from `~/.codex/config.toml`.
-- **Echo the active model at kickoff** so the user can confirm: read the `model` line from `~/.codex/config.toml` (absent = "CLI default"); state it with the resolved tunables. If the user objects, stop before launching the build.
-- **Codex has a native image-generation tool** in `codex exec` sessions (ChatGPT-account backed, no API key; verified 2026-07-08 — it saved a generated PNG to disk headless). Specs may therefore include "generate these image assets yourself" steps: name exact file paths, dimensions, and style in the prompt contract.
-- Run from the target repo's root (both `exec` and `resume` then need no `-C`; `resume` doesn't support `-C` anyway).
-- **This skill needs a git repo — but for diff isolation, not as a sandbox boundary.**
-  Without git there is no baseline to diff against, nothing to revert, and no way to
-  show what Codex changed. That reason stands on its own. Greenfield: `git init` first.
-
-  ⛔ **Correction (2026-09-09).** This bullet used to claim the startup trust check
-  "scopes Codex's writable root to the repo", and forbade `--skip-git-repo-check` on
-  that basis. @mraol08831 measured it on [upstream PR #15](https://github.com/chaseai-yt/claudex-loop/pull/15)
-  and falsified it: `workspace-write` reports its roots as `[cwd, /tmp, $TMPDIR]` —
-  cwd, not the repo root — with and without the flag alike, and under `--yolo` the
-  trust gate is not enforced at all. The flag gates a startup **trust** check; it does
-  not widen the sandbox. The claim came from upstream issue #10 and was repeated here
-  without measuring, which is the exact failure this repo's own rules warn about.
+- Docker must use a Linux engine listed in the installed `build.engines` policy.
+- The pinned `python-test:3` and `codex-build` images must already exist. The runner
+  never pulls or builds them. The latter contains the policy's exact `codex_version`.
+- Host ChatGPT login supplies credentials through `sandbox_auth.py`; never print or
+  copy the token. The builder receives placeholder credentials only.
+- Echo model and effort from `claudex_roles.py --spec build`, not host config defaults.
+- TARGET is the human-supplied checkout path. Work from its root; a Git repository is
+  required for input snapshots and publication identity. On Windows, macOS and Linux
+  the container boundary is the same; arm64 images are outside this version's scope.
 
 ## Tunables (read from args, else default)
 
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `SPEC_FILE` | `PLAN.md` | The frozen spec Codex implements. |
-| `MAX_FIX_ROUNDS` | `2` | Fix iterations via resume before Claude takes over and finishes directly. |
+| `MAX_FIX_ROUNDS` | `2` | Fix iterations as fresh container runs before stopping with remaining findings. |
 | `LOG_FILE` | `PLAN-REVIEW-LOG.md` | Append-only build transcript. If it exists (Act 1/2 ran), append `## Act 3 — Build`; else create it. |
 | `PROOF_CMD` | from spec | Exact test/verify command Codex must run as proof. If the spec lacks one, ask the user ONE question to get it before launching. Claude's own proof run in Step 3.3 goes through `scripts/sandbox_run.py` only (never on the host). |
 | `SCRATCH_DIR` | harness scratchpad, else `<repo>/.claudex-tmp/` | Disposable staging for the prompt contract, the `-o` capture and stderr. ⛔ Never `/tmp`. |
@@ -101,19 +85,30 @@ need to find them after the run.
 ## Step 0 — Gates (before any Codex launch)
 
 1. **Spec gate.** `SPEC_FILE` must exist and read as a work order (goal, concrete steps, bounds). No spec → offer `/grill-me-codex` (interview first) or `/plan-review` (have a plan, want it stress-tested) instead. If the user insists on building from a rough idea, write the spec WITH them first — that's design, and design stays with Claude.
-2. **Clean-tree gate.** `git status -sb`. Codex writes with full access, so the build must start from a tree where **its diff is the only diff** — otherwise you cannot isolate what it did or revert it cleanly. That requirement is non-negotiable; how you satisfy it depends on whose the dirt is.
+Use absolute TARGET and SCRATCH_DIR paths, with SPEC_FILE relative to TARGET; refuse an absolute SPEC_FILE or any parent traversal. Before host Git operations, change directory to TARGET.
+
+2. **Clean-tree gate.** `git status -sb`. Publication updates reviewed paths, so the build must start from a tree where **its diff is the only diff** — otherwise you cannot isolate what it did or revert it cleanly. That requirement is non-negotiable; how you satisfy it depends on whose the dirt is.
    - **The user's own uncommitted work** → STOP and ask them to commit or stash.
    - **Another session's live work** — a parallel agent, a long-running task, anything you did not put there → do **not** stash it; that takes work out from under a running session. Build in a detached worktree instead, which satisfies the gate properly:
 
      ```bash
-     git worktree add --detach "$SCRATCH_DIR/build" HEAD
+     git -C "$TARGET" worktree add --detach "$SCRATCH_DIR/build" HEAD
      # An untracked SPEC_FILE does not exist in a fresh worktree — copy it in.
-     cp "$SPEC_FILE" "$SCRATCH_DIR/build/" 2>/dev/null || true
+     mkdir -p "$SCRATCH_DIR/build/$(dirname "$SPEC_FILE")"
+     cp "$TARGET/$SPEC_FILE" "$SCRATCH_DIR/build/$SPEC_FILE"
      ```
+
+     Stop this session before any build launch. Give the human the absolute path
+     of the prepared worktree and have them start a new session there with that
+     explicit `target=`. TARGET is a human scope assertion and must never be
+     reassigned from scratch paths. The new session then runs every build,
+     publication, Git operation and review against that worktree.
 
      Remove it with `git worktree remove` once the diff is merged or abandoned.
    - Either way, **say which you chose and why before launching.** Never launch into a dirty tree on the reasoning that the subtree you care about happens to be clean.
-3. **Path-scope gate** — it only bites in a worktree, and it bites silently. If `SPEC_FILE` cites findings by absolute path (`D:\...\repo\src\foo.py:210`, `/Users/.../repo/src/foo.py:210`), those resolve to the **original** checkout, and a `--yolo` Codex will happily edit it — undoing the isolation you just set up. Grep the spec for absolute paths; if there are any, the prompt contract must say: resolve every such path relative to your own repo root, and never write outside the current working directory. **State the forbidden prefixes literally.**
+3. **Path references.** Translate absolute spec references to repository-relative
+   paths in the prompt. The container has no host checkout mount; references do not
+   select the builder's host working directory.
 4. Confirm scope in one line, then go. No round-by-round approvals; the human gate is at the end.
 
 > Gates 2 and 3 come from [upstream PR #12](https://github.com/chaseai-yt/claudex-loop/pull/12) by @Dwodgaming, written up from a real run. Gate 3 is the one this repo's own audit should have caught and did not: the build step is the only place in the plugin with write access, so a spec that walks a `--yolo` session out of its worktree belongs in the same class as "the caller can widen its own confinement" (baseline A2).
@@ -137,45 +132,31 @@ SPEC: Read <SPEC_FILE> at the repo root. It is a frozen, already-reviewed spec.
 KEY PATHS: <files/dirs Codex will touch or must read first>
 CONSTRAINTS: <"don't touch X", style rules, deps that must not change>
 NON-GOALS: <explicitly out of scope — from the plan's Out of scope section>
-PROOF (the Codex build itself runs raw until B2; Claude's own proof run goes through `sandbox_run.py`): Run `<the proof command — from the plan's Verification section when it has one, its real-output inputs and old-vs-new comparison included>` and include its full output in your report.
+PROOF (the Codex build runs through sandbox_build.py; Claude's own proof run goes through `sandbox_run.py`): Run `<the proof command — from the plan's Verification section when it has one, its real-output inputs and old-vs-new comparison included>` and include its full output in your report.
 OUTPUT: End with a report — files changed (one line each: path + what/why),
   proof output, and any deviations from the spec with reasons.
 EOF
 ```
 
-## Step 2 — Isolate, then launch Codex (fresh session, capture `thread_id`)
+## Step 2 - Build in quarantine
 
-⛔ **The builder gets the shell and the files, nothing that acts elsewhere.** `--yolo`
-means no sandbox and no approvals, so every MCP server, plugin, app, hook and
-computer/browser control the user configured for Codex would run with it, unprompted.
-Measured on 2026-10-27 (codex-cli 0.162.1): a plain build here would have loaded
-`n8n`, `node_repl`, `codex_app` and `cua_repl`. Upstream found the same gap in its
-runner ([#43](https://github.com/chaseai-yt/claudex-loop/issues/43),
-[#45](https://github.com/chaseai-yt/claudex-loop/pull/45)).
+The build does NOT go through `tools/codex_ro.py`: that wrapper forbids writes;
+`sandbox_build.py` confines the writable builder to a disposable container.
+Resolve model and effort from `claudex_roles.py --spec build` and echo them.
+Require the policy-supported Docker engine, pinned python-test:3 and codex-build
+images, and host ChatGPT login. API-key mode is refused. No host fallback.
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/build_isolation.py" >"$SCRATCH_DIR/build-isolation.txt" \
-  2>"$SCRATCH_DIR/build-isolation-stderr.txt"
-mapfile -t ISO <"$SCRATCH_DIR/build-isolation.txt"
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_build.py" run --repo "$TARGET" --scratch "$SCRATCH_DIR" --pin "$SPEC_FILE" --prompt-file "$P" >"$SCRATCH_DIR/build-r$ROUND.stdout" 2>"$SCRATCH_DIR/build-r$ROUND.stderr"
 ```
 
-**A non-zero exit means stop** — it printed no flags because it could not trust the
-MCP listing; read the stderr file and tell the user. Never launch without `"${ISO[@]}"`.
-It switches off every enabled MCP server by name, plus apps, plugins, hooks,
-computer and browser control and `notify`; image generation and the model from
-`~/.codex/config.toml` stay. A build that genuinely needs one MCP server gets
-`--allow-mcp <name>` — say so at kickoff and log it under `## Act 3 — Build`.
-
-```bash
-codex exec --yolo "${ISO[@]}" --json -o "$SCRATCH_DIR/codex-build-r$ROUND.txt" - <"$P" \
-  2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" | grep '"type":"thread.started"'
-```
-
-- Prompt goes via stdin (`- <"$P"`) — this both avoids quoting bugs AND sidesteps the non-TTY stdin hang (`codex exec` blocks forever waiting on stdin EOF under Claude Code's Bash tool; feeding the file gives immediate EOF).
-- Parse `thread_id` from the `{"type":"thread.started","thread_id":"..."}` line → `THREAD_ID`. Codex's final report lands in `$SCRATCH_DIR/codex-build-r$ROUND.txt` — read that file; don't parse the JSONL stream for content.
-- **stderr goes to a file, never `/dev/null`.** It carries cosmetic MCP/auth noise, but it is also the ONLY place a quota or auth failure appears: a 401 or 429 presents as exit 0 with a valid `thread_id` and an empty report file, which is indistinguishable from a model that said nothing. Confirm success by the report file + a `thread.started` line; neither → failed run — read the stderr file, then stop and tell the user.
-- **Timing:** foreground with `timeout: 600000` on the Bash tool call (default 2-min tool timeout kills real builds). If the spec is clearly >10 min of work (multi-file feature, migration, anything with image generation), launch with `run_in_background: true` instead and read the `-o` file when it exits. Don't kill a quiet background run early — Codex builds are legitimately slow.
-- **Heads-up on completion (required):** when a background Codex run finishes, the FIRST line of your next message to the user must be a loud standalone banner — `🔔 CODEX FINISHED — <what> (exit ok/fail) — verifying now` — BEFORE any verification output. The user is not watching tool calls; never let a completed build slide silently into the verify phase.
+Use the same hashed `--deps` inputs as the proof through `sandbox_run.py`.
+Capture RUN_DIR, TREE and MANIFEST_SHA256 from this invocation's stdout yourself;
+record them in LOG_FILE. Never replace that digest with builder-written output.
+Require runner exit 0, BUILD_STATUS=exited, CODEX_EXIT=0 and non-empty codex-last.txt.
+The report is advisory. Refused websocket attempts add about seven seconds before HTTPS.
+An auth_failed result is a login problem: report it and stop, never retry in a loop.
+Infrastructure errors, isolation failures and unconfirmed cleanup stop the workflow.
 
 ## Step 3 — Verify (Claude, always, never delegated)
 
@@ -183,11 +164,31 @@ Codex's report is advisory — **and so is any QA, self-review or verification s
 
 Verify yourself:
 
-1. `git status -sb` + read the FULL diff with `git diff HEAD` — **not** plain `git diff`, which shows only unstaged changes and hides anything Codex staged (upstream [#18](https://github.com/chaseai-yt/claudex-loop/pull/18)). Untracked files from `git status` are read too. If `git diff --cached` is non-empty, Codex staged something although it must not commit: where index and working tree differ (`git diff --name-only` for those paths), the commit would carry the index. Decide which state you review: `git restore --staged <path>` puts the index back to **`HEAD`** (it does *not* copy the working tree), after which `git diff HEAD` shows the working-tree change alone; log which you did. Judge it like a contributor PR: correctness, spec fidelity, style match with surrounding code, nothing touched outside scope.
+1. **Review before publication.** Use the independently captured digest:
 
-   **Pin what you reviewed** (the same binding as the post-build inspection in `claudex-loop`): once the diff read is done, stage exactly the reviewed paths (`git add <path> …` — never `-A`), check that `git diff --name-only -- <those paths>` prints nothing, and record `git write-tree` as `REVIEWED_TREE` in `LOG_FILE`. Every fix round re-stages and re-pins.
+   ```bash
+   python -I "${CLAUDE_PLUGIN_ROOT}/scripts/change_apply.py" show --run-dir "$RUN_DIR" --manifest-sha256 "$MANIFEST_SHA256" --repo "$TARGET" --summary --page 1
+   python -I "${CLAUDE_PLUGIN_ROOT}/scripts/change_apply.py" show --run-dir "$RUN_DIR" --manifest-sha256 "$MANIFEST_SHA256" --repo "$TARGET" --file 0 --page 1
+   ```
+
+   Read every PAGE k/N of the summary and every page of every numbered file.
+   Decide every binary and NOT FULLY SHOWN file explicitly. Rejected changes stay
+   in quarantine. Apply only after review, adding exact `--accept-binary` and
+   `--accept-large` paths for the decisions recorded in LOG_FILE:
+
+   ```bash
+   python -I "${CLAUDE_PLUGIN_ROOT}/scripts/change_apply.py" apply --run-dir "$RUN_DIR" --manifest-sha256 "$MANIFEST_SHA256" --target "$TARGET"
+   ```
+
+   A partial stop is a failure. Show PUBLISHED, NOT_PUBLISHED and the printed
+   RECOVERY commands to the human; never run recovery automatically.
+   After successful publication inspect and execute the printed STAGE and CHECK
+   commands with their explicit published paths and `git --literal-pathspecs`.
+   On Windows execute the printed MODE_TODO commands after staging. Never evaluate
+   the output as a script. Check `git --literal-pathspecs diff --name-only -- <published paths>`
+   is empty, record `git write-tree` as REVIEWED_TREE, and read `git diff HEAD`.
 2. **Trace every changed test back to a spec line.** A green suite proves the code does what its tests say; it does not prove the tests were asked for. The failure mode to hunt is **unrequested code paired with a test asserting it** — that combination reads as verified and sails through a green check. List the tests the diff added, and for each name the spec item it covers. A test with no spec line behind it is the tell: either Codex solved a problem the spec had already settled differently, or it invented a requirement. Both are findings.
-3. Run the proof yourself — through `scripts/sandbox_run.py`, never on the host. The repository under review controls what its tests execute, so they run in a disposable container on exactly the tree you just pinned (B1; the Codex build itself still runs raw until B2). Codex's pasted output doesn't count as proof.
+3. Run the proof yourself — through `scripts/sandbox_run.py`, never on the host. The repository under review controls what its tests execute, so they run in a disposable container on exactly the tree you just pinned (B1; the Codex build runs through sandbox_build.py). Codex's pasted output doesn't count as proof.
 
    ```bash
    python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_run.py" --repo . --scratch "$SCRATCH_DIR" --tree "$REVIEWED_TREE" --image python-test [--deps <hashed requirements file>] -- <the proof command or the focused tests>
@@ -201,42 +202,37 @@ Verify yourself:
 4. **Read the "Deviations" section as a claim, not a summary.** `Deviations: None` is common on builds that did deviate — a spec step that turns out impossible gets quietly resolved the right way and never reported. Where the diff diverges from the spec text, decide whether the spec or the code was wrong, and log which.
 5. Append to `LOG_FILE` under `## Act 3 — Build`: `### Round <n> — Codex build` + its report summary + `### Claude's verdict` + what passed/failed review.
 
-## Step 4 — Fix loop (same session, bounded)
+## Step 4 - Fresh fix rounds, bounded
 
-Problems found → resume the SAME session (Codex keeps its context; cheaper and better than a fresh run). Write the fix list to a temp file (`$P2`), same contract discipline: exact problem, exact file, proof expected.
+Each round starts a fresh container and a fresh Codex execution. Write a new prompt
+with the spec reference, reviewer findings verbatim and the reviewed diff pages.
+For accepted and published changes use the newly pinned REVIEWED_TREE:
 
 ```bash
-ROUND=$((ROUND + 1))   # never reuse r0 — that report is the only record of the build
+ROUND=$((ROUND + 1))
 P2=$(mktemp "$SCRATCH_DIR/fix-prompt.XXXXXX")
-# ... write the fix list into "$P2" ...
-
-# resume has no --yolo and no -C: run from the repo dir and spell the long flag,
-# or Codex inherits config.toml's sandbox (possibly read-only) and can't write.
-# The isolation is per process, not per thread: pass the SAME "${ISO[@]}" again.
-codex exec resume "$THREAD_ID" --dangerously-bypass-approvals-and-sandbox "${ISO[@]}" --json \
-  -o "$SCRATCH_DIR/codex-build-r$ROUND.txt" - <"$P2" \
-  2>"$SCRATCH_DIR/codex-stderr-r$ROUND.txt" >/dev/null
+# Write the complete fix work order into P2 before launching.
+python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_build.py" run --repo "$TARGET" --scratch "$SCRATCH_DIR" --tree "$REVIEWED_TREE" --prompt-file "$P2" >"$SCRATCH_DIR/build-r$ROUND.stdout" 2>"$SCRATCH_DIR/build-r$ROUND.stderr"
 ```
 
-This is the one place in the plugin that does NOT go through `tools/codex_ro.py`, and
-deliberately so: the wrapper exists to make write access impossible, and this step is
-the build. Everything else — ping, review, resume-for-review — goes through it.
-
-Re-verify (Step 3) after each round — re-pin, and rerun the proof through `sandbox_run.py` (same `--deps` as before) on the new `REVIEWED_TREE`; an older manifest is not evidence for the new tree. After `MAX_FIX_ROUNDS` failed rounds: STOP delegating — Claude takes over and finishes the remaining fixes directly. Log the takeover. Ping-ponging trivia through delegation burns more than it saves.
+For rejected, unpublished changes reuse the original input TREE and inline the rejected
+pages and findings. Reapply Step 3 and rerun the proof through `sandbox_run.py` with the
+same `--deps`. After MAX_FIX_ROUNDS stop and report the remaining findings.
+Direct host takeover is out of scope; no host fallback.
 
 ## Step 5 — Human gate (diff sign-off)
 
 Present: 3-bullet summary of what was built, files-changed list, proof-test output (pass/fail, verbatim tail), rounds used, any spec deviations. Ask: *"Codex built it, proof passes, diff reviewed. Commit?"*
 
 - Commit ONLY on yes — and Claude writes the commit, never Codex.
-- **Right before the commit:** `git diff --name-only -- <paths>` empty, and `python "${CLAUDE_PLUGIN_ROOT}/scripts/tree_check.py" --tree "$REVIEWED_TREE" --log "$LOG_FILE" --spec "$SPEC_FILE"` exits 0 — the index equals the last `REVIEWED_TREE` except that the log grew and the plan's `claudex-gate:` line changed. Anything else changed after the review — re-read it or show it at the gate as unreviewed; never commit it as reviewed.
-- Rejected → ask what's wrong, route back to Step 4 (or take over directly if fix rounds are spent).
+- **Right before the commit:** `git --literal-pathspecs diff --name-only -- <paths>` empty, and `python "${CLAUDE_PLUGIN_ROOT}/scripts/tree_check.py" --tree "$REVIEWED_TREE" --log "$LOG_FILE" --spec "$SPEC_FILE"` exits 0 — the index equals the last `REVIEWED_TREE` except that the log grew and the plan's `claudex-gate:` line changed. Anything else changed after the review — re-read it or show it at the gate as unreviewed; never commit it as reviewed.
+- Rejected → ask what's wrong, route back to Step 4 (or stop with remaining findings if fix rounds are spent).
 
 ## Hard rules
 
 - Codex's diff is the only diff in the tree it builds in. Always. A detached worktree is how you get that when the dirt belongs to another session — not `git stash`.
 - Claude never skips the diff read. Every Codex claim is advisory until Claude has read the diff and run the proof through `sandbox_run.py`, and that includes any QA or self-review Codex ran inside its own session.
-- Fix loop terminates at `MAX_FIX_ROUNDS` — then Claude takes over. No unbounded delegation ping-pong.
+- Fix loop terminates at `MAX_FIX_ROUNDS` with remaining findings reported. No unbounded delegation ping-pong.
 - Commits, pushes, releases, GitHub mutations: Claude-side only, after the human gate. Codex never commits.
 - `LOG_FILE` is the deliverable — with Acts 1/2 it tells the whole story: grilled → reviewed → built → verified.
 - After the human gate, run the `code-review` skill as the closing acceptance gate (DoD / quality / security, selectable via `scope=`) — same `SPEC_FILE` and `LOG_FILE`. **Default on, never a blocker:** it is skipped only when the user opts out or the Codex quota is out and no fallback is chosen, and then the skip is logged (`## Closing gate skipped — <reason>`). Either way, flip the **state word** of the plan's marker from `pending` to `done` or `skipped` and leave its `due-after:` standing as a record. ⛔ For a plan built in stages, "after the human gate" means after the human gate of the **last** stage — the step the marker names as `due-after:`. An earlier stage ends with its own proof and, if wanted, an interim review of what is finished; that is not the closing gate and does not touch the marker. **Not optional when the diff touches anything that faces the network** — routes, auth, sessions, webhooks, `ports:`, proxy/tunnel or DNS config: then `code-review` runs *before* the commit question, and its exposure pass (`exposure-review` role, own model/effort) with it. A build that opened a door is not done until someone standing outside has tried the handle.
@@ -246,6 +242,5 @@ Present: 3-bullet summary of what was built, files-changed list, proof-test outp
 - Don't build without a spec — that's designing by delegation, and it fails. Route to `/grill-me-codex` or `/plan-review` first.
 - Don't use for ~<20-line single-obvious-change edits — just make the edit.
 - Don't pin `-codex` model variants on ChatGPT-account auth — 400s.
-- Don't resume with `--last` — capture and use the explicit `THREAD_ID` (parallel sessions make `--last` grab the wrong thread). And ECHO the id into the command visibly before running: `resume` with a missing/garbage id can silently fall back to the most recent session instead of erroring (observed 2026-07-08) — a wrong-target resume looks exactly like a successful one.
 - Don't parse the JSONL stream for the report — read the `-o` file.
 - Don't let Codex commit, and don't auto-commit yourself — human gate first.

@@ -1,10 +1,10 @@
 {
-  "_comment": "Plan B1 (docs/plans/2026-10-27-sicherheitskette/PLAN-B1-sandbox-run.md). Read only from the INSTALLED plugin directory, never from the checkout under review. An image is accepted only if `docker image inspect` reports exactly this id. Change it in a reviewed commit after a human built the image from config/sandbox/python-test.Dockerfile.",
+  "_comment": "Plan B1 (docs/plans/2026-10-27-sicherheitskette/PLAN-B1-sandbox-run.md), B1.5 (PLAN-B15-deps.md) and B2 (PLAN-B2-build.md). Read only from the INSTALLED plugin directory, never from the checkout under review. An image is accepted only if `docker image inspect` reports exactly this id. Change it in a reviewed commit after a human built the image from config/sandbox/python-test.Dockerfile (and config/sandbox/codex-build.Dockerfile on top of it). Ids recorded 2026-11-01 (python-test:3 with cryptography 50.0.2; codex-build:1 with codex-cli 0.162.1).",
   "context": "desktop-linux",
   "images": {
     "python-test": {
-      "ref": "claudex-sandbox-python-test:2",
-      "id": "sha256:378312ca3ce2bf03df93593fd1aba5f60c63016b23d6b65b4f761b67ca3843fd",
+      "ref": "claudex-sandbox-python-test:3",
+      "id": "sha256:b1a752d13a9b80adaf54c2e02251931e354b6e55a785af02152fbebecec9e6ed",
       "_tools_comment": "argv[0] must be one of these (plan Approach 4: only image-contained dependencies; anything else is refused with the B1.5 explanation).",
       "tools": [
         "python3",
@@ -18,7 +18,7 @@
         "sleep",
         "yes"
       ],
-      "_deps_comment": "Plan B1.5 (PLAN-B15-deps.md step 3). wheel_target: the tags a wheel may carry to be handed in with --deps. The image is Debian 13 with glibc 2.41 (measured 2026-11-01: platform.libc_ver() -> ('glibc', '2.41'); pip debug lists manylinux_2_41 down), CPython 3.13, amd64. All five deps_* keys or none; an image without them refuses --deps.",
+      "_deps_comment": "Plan B1.5 (PLAN-B15-deps.md step 3). wheel_target: the tags a wheel may carry to be handed in with --deps. The image is Debian 13 with glibc 2.41 (measured 2026-11-01: platform.libc_ver() -> ('glibc', '2.41'); pip debug lists manylinux_2_41 down; re-measured on python-test:3 2026-11-01, unchanged), CPython 3.13, amd64. All five deps_* keys or none; an image without them refuses --deps.",
       "wheel_target": {
         "python": "3.13",
         "platforms": ["manylinux_2_41_x86_64", "manylinux_2_40_x86_64", "manylinux_2_39_x86_64", "manylinux_2_38_x86_64", "manylinux_2_37_x86_64", "manylinux_2_36_x86_64", "manylinux_2_35_x86_64", "manylinux_2_34_x86_64", "manylinux_2_33_x86_64", "manylinux_2_32_x86_64", "manylinux_2_31_x86_64", "manylinux_2_30_x86_64", "manylinux_2_29_x86_64", "manylinux_2_28_x86_64", "manylinux_2_27_x86_64", "manylinux_2_26_x86_64", "manylinux_2_25_x86_64", "manylinux_2_24_x86_64", "manylinux_2_23_x86_64", "manylinux_2_22_x86_64", "manylinux_2_21_x86_64", "manylinux_2_20_x86_64", "manylinux_2_19_x86_64", "manylinux_2_18_x86_64", "manylinux_2_17_x86_64", "manylinux2014_x86_64", "manylinux_2_12_x86_64", "manylinux2010_x86_64", "manylinux_2_5_x86_64", "manylinux1_x86_64", "any"]
@@ -27,6 +27,97 @@
       "deps_max_file_bytes": 134217728,
       "deps_tmpfs": "2g",
       "deps_install_timeout": 300
+    },
+    "codex-build": {
+      "_comment": "Plan B2 approach 1: FROM claudex-sandbox-python-test:3 (the id pinned above) plus the Codex npm tarball @openai/codex@0.162.1-linux-x64 (ADD --checksum sha256:7417711678b464eee70664126e39e88bb3c84c2928da0e71f14b56e04ff5c09f) under /opt/codex/, codex on PATH, CODEX_HOME=/codex-home. tools = python-test's list plus codex; the five deps keys are python-test's values, written out explicitly (same base, same interpreter and glibc).",
+      "ref": "claudex-sandbox-codex-build:1",
+      "id": "sha256:0ec5a6063f2958b5cbd95bfd767302511229928884b510b7363493c215a3fe72",
+      "codex_version": "0.162.1",
+      "tools": [
+        "python3",
+        "python",
+        "pytest",
+        "git",
+        "sh",
+        "true",
+        "false",
+        "id",
+        "sleep",
+        "yes",
+        "codex"
+      ],
+      "wheel_target": {
+        "python": "3.13",
+        "platforms": ["manylinux_2_41_x86_64", "manylinux_2_40_x86_64", "manylinux_2_39_x86_64", "manylinux_2_38_x86_64", "manylinux_2_37_x86_64", "manylinux_2_36_x86_64", "manylinux_2_35_x86_64", "manylinux_2_34_x86_64", "manylinux_2_33_x86_64", "manylinux_2_32_x86_64", "manylinux_2_31_x86_64", "manylinux_2_30_x86_64", "manylinux_2_29_x86_64", "manylinux_2_28_x86_64", "manylinux_2_27_x86_64", "manylinux_2_26_x86_64", "manylinux_2_25_x86_64", "manylinux_2_24_x86_64", "manylinux_2_23_x86_64", "manylinux_2_22_x86_64", "manylinux_2_21_x86_64", "manylinux_2_20_x86_64", "manylinux_2_19_x86_64", "manylinux_2_18_x86_64", "manylinux_2_17_x86_64", "manylinux2014_x86_64", "manylinux_2_12_x86_64", "manylinux2010_x86_64", "manylinux_2_5_x86_64", "manylinux1_x86_64", "any"]
+      },
+      "deps_max_bytes": 536870912,
+      "deps_max_file_bytes": 134217728,
+      "deps_tmpfs": "2g",
+      "deps_install_timeout": 300
+    }
+  },
+  "build": {
+    "_comment": "Plan B2 approach 2 (measurement 2026-11-01, PLAN-B2-REVIEW-LOG.md 'Step 0 measurements, proxy design'). Validated as strictly as deps_policy(); a missing or malformed section refuses every build. On chatgpt.com every method, path or query other than `forward` and `local` is answered 404 locally, a websocket upgrade 403; the `local` route is answered with the fixed routing response of measurement (d) carrying the PLACEHOLDER account id. Sizes are bytes.",
+    "endpoints": {
+      "chatgpt.com": {
+        "forward": {"method": "POST", "path": "/backend-api/codex/responses", "query": false},
+        "local": {"method": "GET", "path": "/backend-api/wham/accounts/check", "query": false},
+        "request_headers": [
+          "content-type",
+          "content-encoding",
+          "accept",
+          "originator",
+          "version",
+          "session-id",
+          "thread-id",
+          "x-client-request-id",
+          "x-codex-window-id",
+          "x-codex-turn-metadata",
+          "x-codex-routing-hint"
+        ],
+        "placeholder_headers": ["authorization", "chatgpt-account-id"]
+      }
+    },
+    "refused_hosts_fatal": ["auth.openai.com"],
+    "engines": ["29.8.2"],
+    "subnet_pool": "10.240.0.0/16",
+    "subnet_prefix": 29,
+    "timeout_default": 3000,
+    "timeout_max": 3000,
+    "work_tmpfs": "2g",
+    "memory": "6g",
+    "pids": 1024,
+    "codex_home_tmpfs": "256m",
+    "placeholder_exp_days": 30,
+    "change_caps": {
+      "entries": 20000,
+      "total_bytes": 209715200,
+      "file_bytes": 16777216,
+      "added_files": 2000
+    },
+    "_generated_paths_comment": "Added paths matching these are excluded and reported, never published; a changed baseline path is never excluded. Glob relative to the repository root, `**` = any number of segments.",
+    "generated_paths": [
+      "**/__pycache__/**",
+      "**/*.pyc",
+      "**/.pytest_cache/**",
+      "**/.coverage"
+    ],
+    "withheld_paths": [".codex/**"],
+    "result_cap": 268435456,
+    "proxy_log_cap": 4194304,
+    "proxy_caps": {
+      "requests": 2000,
+      "concurrent": 16,
+      "bytes_up": 268435456,
+      "bytes_down": 2147483648,
+      "header_block": 65536
+    },
+    "_probe_comment": "Sample ports: common service ports, the Docker API ports, the Docker Desktop host-service port 18765 seen on 192.168.65.254 and the VM listener 44837 found open on a non-isolated gateway (measurement 2026-11-01). Never 3128, where the proxy listens. Budget with these values: 6 x 8 (the /29 minus probe and proxy) + 2 x (8 + at most 16 published) + 8 (169.254.169.254) + 6 (IPv6 literal, 1.1.1.1:443, 8.8.8.8:53, three names) = 110 <= max_targets.",
+    "probe": {
+      "deadline": 20,
+      "ports": [22, 53, 80, 443, 2375, 2376, 18765, 44837],
+      "max_published": 16,
+      "max_targets": 160
     }
   }
 }

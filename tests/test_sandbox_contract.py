@@ -34,6 +34,47 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SKILLS = sorted((ROOT / "skills").glob("*/SKILL.md"))
 
+
+class B2BuildContract(unittest.TestCase):
+    """An installed workflow must not bypass the B2 container boundary."""
+
+    def test_multiline_unsafe_launch_is_detected(self):
+        text = '```bash\ncodex exec \\\n  --yolo -\n```'
+        commands = [command for _, command, kind in _units(text) if kind == FENCE]
+        self.assertTrue(any(re.search(r'codex\s+exec[^\n]*--yolo', command) for command in commands))
+
+    def test_build_publication_uses_literal_paths(self):
+        text = (ROOT / 'skills/build/SKILL.md').read_text(encoding='utf-8')
+        self.assertIn('printed STAGE and CHECK', text)
+        self.assertIn('git --literal-pathspecs', text)
+        for _, command, _ in _units(text):
+            if re.search(r'git\s+(?:add|restore|update-index)\b', command):
+                self.fail('Publication instructions must use literal pathspecs: ' + command)
+        self.assertNotIn('TARGET="$SCRATCH_DIR/build"', text)
+        self.assertIn('Stop this session before any build launch', text)
+        self.assertIn('explicit `target=`', text)
+        self.assertIn('cp "$TARGET/$SPEC_FILE" "$SCRATCH_DIR/build/$SPEC_FILE"', text)
+
+    def test_no_raw_build_launch_in_installed_instructions(self):
+        paths = [*SKILLS, ROOT / "docs/betrieb.md", ROOT / "README.md", ROOT / "README_DE.md"]
+        raw = re.compile(r"codex\s+exec[^\n]*(?:--yolo|--dangerously-bypass-approvals-and-sandbox)")
+        for path in paths:
+            with self.subTest(path=path.relative_to(ROOT)):
+                for _, command, _ in _units(path.read_text(encoding="utf-8")):
+                    self.assertIsNone(raw.search(command))
+
+    def test_build_uses_quarantine_review_and_fresh_rounds(self):
+        text = (ROOT / "skills/build/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn('python -I "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox_build.py" run', text)
+        self.assertNotRegex(text, r"codex\s+exec\s+resume|THREAD_ID|--allow-mcp")
+        calls = [line for _, line, kind in _units(text)
+                 if kind == FENCE and 'scripts/change_apply.py"' in line]
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertIn('--manifest-sha256 "$MANIFEST_SHA256"', call)
+            self.assertIn('python -I "${CLAUDE_PLUGIN_ROOT}/scripts/change_apply.py"', call)
+        self.assertLess(text.index('change_apply.py" show'), text.index('change_apply.py" apply'))
+
 # Code-loading commands. `make` is an English verb, so it only counts as a command.
 _RUNVERB = r"(?:run|runs|running|rerun|reruns|rerunning|execute|executes|executing)"
 LOADING = re.compile(
@@ -338,11 +379,11 @@ def auditor_problem(unit: str, kind: str):
     return None
 
 
-BUILD = re.compile(r"\bdocker\b[^\n]*?\bbuild\b[^\n]*")
+BUILD = re.compile(r"\bdocker\b[^\n]*?\sbuild\s[^\n]*")
 
 
 def build_violations(text: str) -> list[str]:
-    """Every sandbox image `docker build` names Dockerfile and context beneath the plugin root, tag :2."""
+    """Every sandbox image `docker build` names Dockerfile and context beneath the plugin root, pinned image tag."""
     out = []
     for no, unit, _kind in _units(text):
         m = BUILD.search(unit)
@@ -354,8 +395,8 @@ def build_violations(text: str) -> list[str]:
             out.append(f"line {no}: docker build Dockerfile not under CLAUDE_PLUGIN_ROOT: {cmd[:100]}")
         if not re.search(r'"\$\{CLAUDE_PLUGIN_ROOT\}/config/sandbox"\s*$', cmd.strip()):
             out.append(f"line {no}: docker build context not under CLAUDE_PLUGIN_ROOT: {cmd[:100]}")
-        if "python-test:2" not in cmd:
-            out.append(f"line {no}: docker build tag is not claudex-sandbox-python-test:2: {cmd[:100]}")
+        if not any(tag in cmd for tag in ("claudex-sandbox-python-test:3", "claudex-sandbox-codex-build:1")):
+            out.append(f"line {no}: docker build tag is not claudex-sandbox-python-test:3: {cmd[:100]}")
     return out
 
 
@@ -891,11 +932,11 @@ class MatcherTests(unittest.TestCase):
 
     def test_build_paths_must_be_plugin_rooted(self):
         bad = ("```bash\ndocker --context desktop-linux build -f config/sandbox/python-test.Dockerfile "
-               "-t claudex-sandbox-python-test:2 config/sandbox\n```\n")
+               "-t claudex-sandbox-python-test:3 config/sandbox\n```\n")
         self.assertTrue(build_violations(bad))
         good = ('```bash\ndocker --context desktop-linux build '
                 '-f "${CLAUDE_PLUGIN_ROOT}/config/sandbox/python-test.Dockerfile" '
-                '-t claudex-sandbox-python-test:2 "${CLAUDE_PLUGIN_ROOT}/config/sandbox"\n```\n')
+                '-t claudex-sandbox-python-test:3 "${CLAUDE_PLUGIN_ROOT}/config/sandbox"\n```\n')
         self.assertEqual(build_violations(good), [])
 
     def test_pass_rule_requires_exit_zero(self):

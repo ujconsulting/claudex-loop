@@ -55,7 +55,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest
+      # cryptography: the B2 proxy's CA tests fail without it (plan PLAN-B2-build.md approach 1);
+      # same pin as pyproject.toml [dev] and config/sandbox/requirements-test.txt. It does not
+      # bring PyYAML -- the assertion below still proves that.
+      - run: pip install pytest "cryptography==50.0.2"
       # Assert the premise before relying on it. `pip install pytest` does not
       # bring PyYAML, but nothing here PROVED it was absent -- so a runner image
       # that happened to ship it would turn this job into a duplicate of the one
