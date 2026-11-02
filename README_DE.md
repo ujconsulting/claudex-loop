@@ -20,7 +20,40 @@
 > Beide Fassungen werden zusammen gepflegt; `tests/test_readme_sync.py` schlägt fehl,
 > sobald die Kommandos in einer der beiden abweichen.
 
+> **Neu hier?** Der [Einstieg](docs/einstieg.md) erklärt ohne Vorwissen, worum es geht, warum man
+> das heute braucht, welche Werkzeuge wofür laufen und wie man es in neue und bestehende Projekte
+> einbindet. English: [Getting started](docs/getting-started.md).
+>
+> **Fremde Werkzeuge prüfen** (Plugins, Skills, MCP-Server, Pakete), bevor sie installiert werden,
+> übernimmt das Schwesterprojekt [ujc-security-checker](https://github.com/ujconsulting/ujc-security-checker).
+> Wie sich beide unterscheiden und ergänzen:
+> [Einstieg, Abschnitt 13](docs/einstieg.md#13-das-schwesterprojekt-ujc-security-checker).
+
 ---
+
+## Was dieses Projekt gegenüber Upstream ergänzt
+
+Am Fork-Punkt (24.08.2026, Upstream-Commit `f8c111d`) bestand das Projekt aus **drei Skill-Dateien und einer README**: `claudex-loop`, `codex-review` und `codex-build`. Kein Skript, kein Hook, kein Test. Alles, was die Skills versprachen — *read-only*, *das andere Modell benotet* — war eine Anweisung an das Modell, und nichts prüfte, ob sie befolgt wurde. Dieses Projekt hat aus den Versprechen Kontrollen gemacht, die Kontrollen dann auditiert und die meisten zunächst umgehbar gefunden. Was es heute gibt:
+
+| Bereich | Upstream am Fork-Punkt | Hier | Seit |
+|---|---|---|---|
+| **Read-only-Review** | `-s read-only` im Skill-Text, rohes `codex exec` | Ein Wrapper ([`codex_ro.py`](./scripts/codex_ro.py)) für jeden Codex-Aufruf: Sandbox bei `exec` *und* `resume` festgenagelt, `-c`-Überschreibungen, die die Sandbox berühren, abgelehnt, Schreibziele eingegrenzt, Nutzerkonfiguration/MCP/Apps/Plugins/Web abgeschaltet. Exit **3**, wenn der Prüfer keine einzige Datei lesen konnte, Exit **4**, wenn Codex' eigenes Sitzungsprotokoll zeigt, dass der Zug nicht read-only lief, `--expect-workdir`, damit ein Review nicht in einem Verzeichnis läuft, das niemand gewählt hat | 2.2.0 → 2.7.0 |
+| **Sicherheit der Allowlist** | — | `PreToolUse`-Wächter: ein freigegebener Wrapper-Aufruf bleibt **ein** Kommando — keine Verkettung, kein Pipe, keine Umleitung, keine Substitution, die auf seiner Freigabe mitfährt | 2.2.0 |
+| **Wer was tut** | Das Modell steckt im Skill-Namen | Rollen in `.claudex.yaml`, aufgelöst von [`claudex_roles.py`](./scripts/claudex_roles.py); zwei Gates verweigern mit Exit-Code ungleich null: niemand benotet die eigene Arbeit, kein Prüfer mit offener Sandbox | 2026-08 |
+| **Codex-Kontingent leer** | Die Schleife läuft in eine Sackgasse | Kontingent-Prüfung, Fallback-Prüferkette (LM Studio, Ollama, OpenRouter, …), nie automatisch, Egress-Allowlist sperrt im Zweifel (ohne Eintrag kein Versand) | 2.2.0 |
+| **Inspektion nach dem Bau** | Eine Kreuzinspektion, wenn Claude baut | Eigener Inspektor-Prompt (Abnahmekriterien, jede geänderte Datei vollständig, Tests, die nur den Code bestätigen), bis zu **2 Runden**, beurteilt auf dem **gestagten Baum** (`git write-tree`); [`tree_check.py`](./scripts/tree_check.py) lässt nichts in den Commit außer dem Log und der Gate-Marke | 2026-10 |
+| **Abnahme-Gate** | — | [`code-review`](#jenseits-des-plans): `DOD` · `QUALITY` · `SECURITY` · `DOCS` · `TESTS`, bis zu **2 Nachprüfungen**, ein eigener **Exposure-Pass** für alles, was zum Netz zeigt, Claudes `security-review` als beratender Vorfilter. Jeder Plan trägt `claudex-gate: pending; due-after: <step>`, und ein Commit-Hook erinnert, solange es offen ist | 2026-09 |
+| **Codebase ohne Review-Geschichte** | — | [`audit`](#jenseits-des-plans): in Scheiben geschnittenes Erst-Review, deterministische Werkzeuge zuerst, nummerierte Zeilen, Exposure-Sitzung je exponierter Komponente, eine **Baseline**, damit spätere Reviews nur die Differenz beurteilen | 2026-08 |
+| **Sicherheitsjagd** | — | `audit` Schritt 3c nach Cloudflares `security-audit`: gepinnter, byte-genau geprüfter Skill-Schnappschuss, eingefrorene geschwärzte Eingabe, Jäger **ohne Werkzeuge**, jeder Befund kalt vom anderen Modell verifiziert, nur anhängendes Ledger | 2026-10 |
+| **Doku-Schulden** | — | `docs-backfill`: Claude schreibt Docstrings, eine frische read-only-Sitzung benotet, ob sie *wahr* sind | 2026-09 |
+| **Ein Repo einrichten** | — | `setup` + [`wrapper_drift.py`](./scripts/wrapper_drift.py): Prüferrolle, Prüfkatalog, Tabu-Scope, Trust-Eintrag, Wrapper-Kopien auf demselben Stand | 2026-08 |
+| **Claude als Prüfer** | Ein Teil-Agent erbt jedes Sitzungswerkzeug | Plugin-Agenten `claudex-reader` (`Read, Grep, Glob`) und `claudex-hunter` (keine Werkzeuge) — gemessen, von Tests gehalten | 2026-10 |
+| **Code des geprüften Repos ausführen** | Auf dem Host | In einem Wegwerf-Container ohne Netz auf dem **gepinnten Git-Baum**, kein Host-Fallback ([`sandbox_run.py`](./scripts/sandbox_run.py), B1); Abhängigkeiten werden **ohne Paketwerkzeug auf dem Host** installiert, Audits gegen OSV (B1.5) | 2026-10/11 |
+| **Codex als Bauender** | `--yolo` mit jedem MCP-Server, Plugin und jeder App der Nutzerkonfiguration | Zuerst jedes externe Werkzeug namentlich abgeschaltet ([`build_isolation.py`](./scripts/build_isolation.py)); jetzt ein Container-Bau mit Quarantäne und seitenweiser Durchsicht, bevor etwas angewendet wird (**B2: gebaut, Abschluss-Gate noch offen**) | 2026-10/11 |
+| **Beweis** | — | ~1.600 Tests, CI auf Linux · macOS · Windows, shellcheck, actionlint, gitleaks, bandit, pip-audit (not prescribed for repositories under review); jede geschlossene Lücke hat einen Test, der zuerst rot war | laufend |
+| **Doku & Offenlegung** | Englische README | Deutsche Fassung, von Tests im Gleichlauf gehalten, das eigene Audit des Projekts als Belege, `SECURITY.md` mit privater Schwachstellenmeldung | 2026-09 |
+
+Wie jedes davon abläuft, zeigt [So funktionieren die einzelnen Teile](#so-funktionieren-die-einzelnen-teile).
 
 ## Warum
 
@@ -125,6 +158,196 @@ roles:
 ### Eine Lehre, die es zu stehlen lohnt
 
 **Gib dem Prüfer nummerierte Zeilen.** Der erste echte `audit`-Lauf lieferte stichhaltige Funde an falschen Adressen — Zitate landeten auf Leerzeilen und unbeteiligten Anweisungen, weil der Code unnummeriert in den Prompt ging und das Modell *zählen* musste. Auf derselben 2.658-Zeilen-Scheibe gemessen: 5 von 23 Zitaten auf Leerzeilen ohne Nummerierung, 0 von 28 mit. Ein paar Prozent mehr Input-Tokens beseitigen die gesamte Fehlerklasse.
+
+## So funktionieren die einzelnen Teile
+
+Die Grafik unter [Warum](#warum) ist die ganze Schleife auf einer Seite. Im Folgenden jeder Teil für sich — was läuft, was geprüft wird und wo es aufhört. Dieselben Farben: Orange produziert, Grün benotet, Gelb bist du, Grau ist eine Datei, gestrichelt ist eine Sandbox oder ein Container.
+
+### Planprüfung — der Gegenspieler greift den Plan an
+
+```mermaid
+flowchart TD
+    P["PLAN.md<br>read once, hashed, inlined"] --> W["codex_ro.py<br>read-only, isolated,<br>--expect-workdir"]
+    W --> V{"verdict file +<br>wrapper exit"}
+    V -- "exit 3 / 4, empty,<br>no verdict line" --> INV["INVALID round<br>logged, you decide"]
+    V -- "VERDICT: REVISE" --> A["producer arbitrates<br>accepts or rejects,<br>reason logged"]
+    A --> RV["revise PLAN.md<br>every superseded passage too"]
+    RV -- "same Codex thread,<br>round + 1" --> W
+    V -- "VERDICT: APPROVED" --> S["you sign off<br>claudex-gate: pending"]
+    A -. "MAX_ROUNDS reached" .-> S
+    V -. "quota out" .-> FB["fallback protocol<br>wait / switch / skip"]
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    class A,RV producer
+    class W,V adversary
+    class S,INV,FB human
+    class P artifact
+```
+
+Jede Runde steht in `PLAN-REVIEW-LOG.md`, bevor die nächste beginnt. Eine Runde zählt nur mit einer nicht leeren Antwort, deren letzte Zeile ein Verdikt ist; ein Exit 3 (der Prüfer hat nichts gelesen) oder Exit 4 (der Zug war nicht read-only) ist ungültig, was immer die Antwort sagt.
+
+### Nach dem Bau — Inspektion, Abnahme-Gate, Commit
+
+Diese Stufe hatte Upstream in dieser Form nicht. Wenn Claude baut, stehen drei unabhängige Prüfungen zwischen dem fertigen Diff und dem Commit:
+
+```mermaid
+flowchart TD
+    B["Claude builds<br>per PLAN.md"] --> PR["proof run<br>sandbox_run.py,<br>container, pinned tree"]
+    PR --> ST["stage the change<br>git write-tree pins it"]
+    ST --> IN["post-build inspection<br>fresh Codex session,<br>own inspector prompt"]
+    IN -- "findings" --> FX["fix + regression<br>red first"]
+    FX -- "up to 2 rounds" --> IN
+    IN -- "clean" --> CR["acceptance gate code-review<br>DOD · QUALITY · SECURITY<br>· DOCS · TESTS"]
+    CR -- "network-facing" --> EX["exposure pass<br>own role, own model<br>SAFE / UNSAFE"]
+    CR -- "findings" --> FX2["fix"] -- "up to 2 rechecks" --> CR
+    CR --> TC["tree_check.py<br>index = reviewed tree<br>+ appended log + gate flip"]
+    EX --> TC
+    TC -- "anything else changed" --> STOP["refused:<br>not committed as reviewed"]
+    TC -- "ok" --> G["you approve<br>claudex-gate: done"]
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
+    classDef sandbox fill:#f4f4f4,stroke:#10a37f,color:#1a1a1a,stroke-dasharray: 5 5
+    class B,FX,FX2 producer
+    class IN,CR,EX adversary
+    class G,STOP human
+    class PR,TC sandbox
+```
+
+- **Die Inspektion** fragt: *setzt der Diff den Plan korrekt um?* Ein Fund, der ändert, *was* gebaut werden muss, geht in `PLAN.md` und erreicht dich als Planänderung nach der Freigabe, nicht als stiller Fix.
+- **Das Abnahme-Gate** fragt: *ist alles da, ist es sauber, ist es sicher, ist es dokumentiert, würden die Tests fehlschlagen, wenn der Code falsch wäre?* Jede Dimension hat ihre eigene Verdikt-Zeile.
+- **`tree_check.py`** lässt „geprüft" genau die Bytes bedeuten, die committet werden: Alles, was sich nach dem Review geändert hat, außer dem Log und der Gate-Marke, verweigert den Commit.
+- **`gate_reminder.py`** nennt bei `git commit` jede `PLAN.md`, deren Gate noch `pending` ist, samt dem Schritt, nach dem es fällig ist — einmal je Sitzung, nie blockierend.
+
+### Codex baut — Container und Quarantäne (B2, Abschluss-Gate offen)
+
+```mermaid
+flowchart TD
+    SP["frozen spec<br>PLAN.md"] --> SB["sandbox_build.py<br>pinned tree, fresh container<br>per build and fix round"]
+    SB --> NET["isolated network<br>probed before start"]
+    NET --> CX["Codex builds<br>inside the container,<br>no MCP, apps, plugins, hooks"]
+    CX --> Q["change set<br>in quarantine"]
+    Q --> SH["change_apply.py show<br>every summary and file page<br>read by Claude"]
+    SH -- "rejected" --> SB
+    SH --> AP["change_apply.py apply<br>only reviewed changes,<br>only unchanged targets"]
+    AP --> PR2["proof run + inspection<br>+ acceptance gate"]
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    classDef sandbox fill:#f4f4f4,stroke:#10a37f,color:#1a1a1a,stroke-dasharray: 5 5
+    class CX producer
+    class SH,PR2 adversary
+    class SP,Q artifact
+    class SB,NET,AP sandbox
+```
+
+Nichts, was Codex schreibt, erreicht den Arbeitsbaum, bevor Claude es gelesen hat. Es gibt kein Fortsetzen der Sitzung und keinen Host-Fallback. Die Einzelheiten zu Netz und Zugangsdaten stehen unter [Sicherheit](#sicherheit). B2 ist gebaut und getestet, hat sein Abschluss-Gate aber noch nicht bestanden.
+
+### Abnahme-Gate — eine Sitzung, fünf Dimensionen, ein Exposure-Durchlauf
+
+```mermaid
+flowchart LR
+    D["diff vs BASE_REF<br>+ plan + baseline"] --> PF["security-review<br>pre-filter, advisory,<br>never a verdict"]
+    PF --> SC["scanners<br>gitleaks --redact,<br>grype, hadolint, actionlint"]
+    SC --> CR["fresh Codex session<br>numbered lines in,<br>findings out"]
+    CR --> VL["verdict lines<br>DOD · QUALITY · SECURITY<br>· DOCS · TESTS"]
+    D --> CL{"faces the<br>network?"}
+    CL -- "yes or unclear" --> EX["exposure pass<br>exposure-review role"]
+    EX --> EV["EXPOSURE:<br>SAFE / UNSAFE"]
+    VL --> AR["producer arbitrates,<br>fixes, rechecks ≤ 2"]
+    EV --> AR
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    class PF,AR producer
+    class CR,VL,EX,EV adversary
+    class D artifact
+```
+
+Die Funde des Vorfilters werden Codex nie gezeigt — es liest die Änderung kalt. `EXPOSURE: UNSAFE` blockiert den Commit.
+
+### Audit und Sicherheitsjagd — eine Codebasis ohne Review
+
+```mermaid
+flowchart TD
+    R["repository<br>no diff, no plan"] --> SL["slices<br>excluded rest reported"]
+    SL --> T["deterministic tools first<br>linters, scanners"]
+    T --> RS["one read-only session per slice<br>security · quality · docs<br>· tests · rules"]
+    SL --> EXC["exposed components"] --> ES["one exposure session each"]
+    RS --> BL["baseline<br>docs/audit/DATE-baseline.md"]
+    ES --> BL
+    SL -. "SECURITY_HUNT=quick / standard / deep" .-> HS["frozen, redacted snapshot<br>pinned Cloudflare skill"]
+    HS --> HU["claudex-hunter agents<br>no tools, numbered excerpts"]
+    HU --> VF["security-verify<br>other model, cold,<br>bound to record + snapshot"]
+    VF --> LG["hunt report +<br>append-only ledger"]
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    class HU producer
+    class RS,ES,VF adversary
+    class BL,LG,HS artifact
+```
+
+Die Baseline liest jedes spätere `code-review` als bekannte Schuld, damit dieselben Funde nicht bei jeder Änderung erneut aufgeworfen werden.
+
+### Ein Codex-Aufruf — was gelten muss, bevor eine Antwort zählt
+
+```mermaid
+flowchart LR
+    C["skill command<br>python tools/codex_ro.py ..."] --> GD{"wrapper_guard.py<br>one command?"}
+    GD -- "chain, pipe, redirect,<br>substitution" --> DN["denied"]
+    GD -- "yes" --> WR{"codex_ro.py<br>checks"}
+    WR -- "wrong workdir, forbidden -c,<br>.codex/config.toml, old CLI,<br>path outside bounds" --> E2["exit 2"]
+    WR --> CX["codex exec / resume<br>read-only + isolation"]
+    CX --> RL{"event stream +<br>session rollout"}
+    RL -- "no command ran,<br>sandbox refused" --> E3["exit 3<br>reviewer read nothing"]
+    RL -- "turn not read-only" --> E4["exit 4<br>not a review"]
+    RL -- "confirmed" --> OK["exit 0<br>applied line: confirmed"]
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
+    class CX adversary
+    class DN,E2,E3,E4 human
+```
+
+Ein Timeout ergibt Exit 124, ein verweigerter Batch-Starter unter Windows Exit 127. stderr geht immer in eine Datei, denn ein 401 oder 429 sieht aus wie Exit 0 mit leerer Antwort.
+
+### Repository-Code im Container (B1, B1.5)
+
+```mermaid
+flowchart LR
+    TR["pinned git tree<br>never the working tree"] --> SN["snapshot<br>object ids recomputed,<br>links and submodules refused"]
+    RQ["hashed requirements<br>--deps"] --> WH["wheels chosen by hash<br>from PyPI, never opened<br>on the host"]
+    SN --> CT["disposable container<br>no network, read-only root,<br>no host mount, no capabilities"]
+    WH --> CT
+    CT --> MF["manifest<br>COMMAND_STATUS · COMMAND_EXIT<br>MANIFEST_SHA256"]
+    MF -- "exited + exit 0" --> PASS["pass"]
+    MF -- "timeout, OOM, overflow,<br>deps_failed, runner exit 2 / 5" --> FAIL["never a pass"]
+    LK["package-lock / requirements"] --> DA["dep_audit.py<br>exact versions to OSV"]
+    classDef sandbox fill:#f4f4f4,stroke:#10a37f,color:#1a1a1a,stroke-dasharray: 5 5
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    class SN,CT,WH sandbox
+    class TR,RQ,MF,LK artifact
+```
+
+Ohne Docker oder das Image wird der Schritt verweigert — es gibt keinen Host-Fallback.
+
+### Wenn das Codex-Kontingent ausgeht
+
+```mermaid
+flowchart LR
+    F["429 / usage limit /<br>empty answer twice"] --> U["codex_usage.py<br>remaining quota, reset time"]
+    U --> H{"you choose"}
+    H -- "wait" --> RS["resume the same thread<br>after the reset"]
+    H -- "switch" --> CH["fallback_review.py --chain<br>first viable provider,<br>egress allowlist"]
+    H -- "skip" --> SK["sign-off marked<br>not cross-reviewed"]
+    CH --> LB["round labelled as fallback<br>verdict bound to plan SHA256"]
+    classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    class H,SK human
+    class CH,LB adversary
+```
 
 ## Belege
 
@@ -384,7 +607,7 @@ Eine Plugin-Installation verdrahtet `hooks/hooks.json` von selbst; ein manuelles
 | Review-Skills | `PLAN_FILE` | `PLAN.md` | Wo der Plan liegt |
 | alle | `LOG_FILE` | `PLAN-REVIEW-LOG.md` | Das Protokoll der Auseinandersetzung |
 | `build` | `SPEC_FILE` | `PLAN.md` | Die eingefrorene Spezifikation, die Codex umsetzt |
-| `build` | `MAX_FIX_ROUNDS` | `2` | Frische Container-Fix-Runden bis zum Stopp mit verbleibenden Befunden |
+| `build` | `MAX_FIX_ROUNDS` | `2` | Frische Container-Fix-Runden vor dem Stopp mit verbleibenden Befunden |
 | `build` | `PROOF_CMD` | aus der Spec | Exaktes Testkommando, das als Beweis zählt |
 | `code-review` | `scope` | `dod,quality,security` | `docs,tests` dazunehmen, sobald der Diff Verhalten ändert |
 | `code-review` | `BASELINE_FILE` | neueste `docs/audit/*-baseline.md` | Bekannte Schulden aus einem `audit`-Lauf — nur dort erneut aufgeworfen, wo eine Änderung sie verschlimmert |

@@ -146,10 +146,40 @@ class ExpectWorkdirDocumentationTests(unittest.TestCase):
 class TranslationSyncTests(unittest.TestCase):
     """Commands and the diagram are copied, not translated — so they must match."""
 
-    def test_the_flow_diagram_is_identical(self):
+    def test_the_flow_diagrams_are_identical(self):
+        """Every diagram is copied, in the same order. Since 2026-11-02 there is one per
+        part of the flow ("How each part works"), so the count is no longer one — but the
+        whole-loop diagram must still be the first, under "## Why"."""
         en, de = blocks(EN, "mermaid"), blocks(DE, "mermaid")
-        self.assertEqual(len(en), 1, "expected exactly one flow diagram in README.md")
-        self.assertEqual(en, de, "the mermaid diagram drifted between the two READMEs")
+        self.assertGreaterEqual(len(en), 1, "README.md has no flow diagram")
+        self.assertEqual(en, de, "a mermaid diagram drifted between the two READMEs")
+        for path, heading in ((EN, "\n## Why"), (DE, "\n## Warum")):
+            with self.subTest(readme=path.name):
+                text = path.read_text(encoding="utf-8")
+                why = text.index(heading)
+                first = text.index("```mermaid")
+                nxt = text.index("\n## ", why + 1)
+                self.assertTrue(why < first < nxt, "the whole-loop diagram must sit under ## Why")
+
+    def test_each_part_of_the_flow_has_its_diagram(self):
+        """The parts a reader asks about first, each with a picture of its own."""
+        headings = ("### Plan review", "### After the build", "### Codex builds",
+                    "### Acceptance gate", "### Audit and security hunt", "### One Codex call",
+                    "### Repository code in a container", "### When the Codex quota runs out")
+        text = EN.read_text(encoding="utf-8")
+        for h in headings:
+            with self.subTest(heading=h):
+                start = text.index(h)
+                end = text.find("\n### ", start + 1)
+                self.assertIn("```mermaid", text[start:end if end > 0 else None])
+
+    def test_both_carry_the_upstream_comparison(self):
+        for path, heading in ((EN, "## What this adds to upstream"),
+                              (DE, "## Was dieses Projekt gegenüber Upstream ergänzt")):
+            with self.subTest(readme=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(heading, text)
+                self.assertIn("f8c111d", text, "the fork point must be named, not implied")
 
     def test_the_same_shell_and_yaml_blocks_appear_in_both(self):
         for lang in ("bash", "yaml"):
@@ -198,6 +228,44 @@ class TranslationSyncTests(unittest.TestCase):
             count(EN), count(DE),
             "one README gained or lost a section — translate it or remove it there too",
         )
+
+
+class GettingStartedGuideTests(unittest.TestCase):
+    """The beginner guide (2026-11-02) is for readers outside the project: partner companies,
+    developers who have never seen the loop. Unlinked, it does not exist for them; one language
+    without the other is a half guide. The diagrams are translated there on purpose (the reader
+    is a layperson), so their count is compared, not their text — but the install commands are
+    copied, and those must be this repo's, never upstream's."""
+
+    GUIDE_EN = REPO / "docs" / "getting-started.md"
+    GUIDE_DE = REPO / "docs" / "einstieg.md"
+
+    def test_both_readmes_link_both_guides(self):
+        for path in (EN, DE):
+            with self.subTest(readme=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("(docs/getting-started.md)", text)
+                self.assertIn("(docs/einstieg.md)", text)
+
+    def test_the_guides_switch_to_each_other(self):
+        switcher = "[English](getting-started.md) | [Deutsch](einstieg.md)"
+        for path in (self.GUIDE_EN, self.GUIDE_DE):
+            with self.subTest(guide=path.name):
+                self.assertIn(switcher, path.read_text(encoding="utf-8")[:500])
+
+    def test_the_guides_have_the_same_shape(self):
+        count = lambda p, pat: len(re.findall(pat, p.read_text(encoding="utf-8"), re.M))
+        for what, pat in (("sections", r"^## "), ("diagrams", r"^```mermaid$")):
+            with self.subTest(what=what):
+                self.assertEqual(count(self.GUIDE_EN, pat), count(self.GUIDE_DE, pat))
+
+    def test_the_guides_carry_the_same_commands_and_install_this_repo(self):
+        self.assertEqual(blocks(self.GUIDE_EN, "bash"), blocks(self.GUIDE_DE, "bash"))
+        for path in (self.GUIDE_EN, self.GUIDE_DE):
+            with self.subTest(guide=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(f"marketplace add {FORK}", text)
+                self.assertNotIn(f"marketplace add {UPSTREAM}", text)
 
 
 class TunablesMatchTheSkillsTests(unittest.TestCase):

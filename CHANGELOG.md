@@ -14,6 +14,12 @@
 - Pin the container test dependency cryptography to 50.0.2 and add the Codex build
   image. Retain the no-PyYAML test lane. Terminate Git for Windows child processes
   when the snapshot deadline expires.
+- Documentation: both READMEs gain the table of what this fork adds to upstream and
+  one flow diagram per part; a beginner guide in English and German
+  (`docs/getting-started.md`, `docs/einstieg.md`) explains the plugin without prior
+  knowledge, including how it differs from and works with ujc-security-checker.
+  `tests/test_readme_sync.py` holds the guides to each other and to this repository's
+  install command.
 
 The package version identifies this release; the independently versioned copied
 Codex review wrapper is unchanged by B2.

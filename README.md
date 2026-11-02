@@ -17,7 +17,40 @@
 
 </div>
 
+> **New here?** [Getting started](docs/getting-started.md) explains, without assuming anything,
+> what this is, why it is needed today, which tools run for what, and how to wire it into new and
+> existing projects. Deutsch: [Einstieg](docs/einstieg.md).
+>
+> **Reviewing third-party tools** (plugins, skills, MCP servers, packages) before they are installed
+> is the job of the sister project [ujc-security-checker](https://github.com/ujconsulting/ujc-security-checker).
+> How the two differ and work together:
+> [Getting started, section 13](docs/getting-started.md#13-the-sister-project-ujc-security-checker).
+
 ---
+
+## What this adds to upstream
+
+At the fork point (2026-08-24, upstream commit `f8c111d`) the project was **three skill files and a README**: `claudex-loop`, `codex-review` and `codex-build`. No script, no hook, no test. Everything the skills promised — *read-only*, *the other model grades* — was an instruction to the model, and nothing checked that it was followed. This project turned those promises into controls, then audited the controls and found most of them walkable at first. What exists today:
+
+| Area | Upstream at the fork point | Here | Since |
+|---|---|---|---|
+| **Read-only review** | `-s read-only` written in the skill text, raw `codex exec` | One wrapper ([`codex_ro.py`](./scripts/codex_ro.py)) for every Codex call: sandbox pinned on `exec` *and* `resume`, sandbox-touching `-c` overrides refused, write targets confined, user config/MCP/apps/plugins/web switched off. Exit **3** when the reviewer could not read a single file, exit **4** when Codex's own session record shows the turn did not run read-only, `--expect-workdir` so a review cannot run in a directory nobody chose | 2.2.0 → 2.7.0 |
+| **Allowlist safety** | — | `PreToolUse` guard: an allowlisted wrapper call stays **one** command — no chaining, pipe, redirect or substitution riding on its approval | 2.2.0 |
+| **Who does what** | The model is in the skill name | Roles in `.claudex.yaml`, resolved by [`claudex_roles.py`](./scripts/claudex_roles.py); two gates refuse with a non-zero exit: nobody grades their own work, no reviewer with an open sandbox | 2026-08 |
+| **Codex quota runs out** | The loop dead-ends | Quota check, fallback reviewer chain (LM Studio, Ollama, OpenRouter, …), never automatic, egress allowlist fails closed | 2.2.0 |
+| **Post-build inspection** | A cross-inspection when Claude builds | Its own inspector prompt (acceptance criteria, every changed file in full, tests that only confirm the code), up to **2 rounds**, judged on the **staged tree** (`git write-tree`); [`tree_check.py`](./scripts/tree_check.py) lets nothing into the commit but the log and the gate marker | 2026-10 |
+| **Acceptance gate** | — | [`code-review`](#beyond-the-plan): `DOD` · `QUALITY` · `SECURITY` · `DOCS` · `TESTS`, up to **2 rechecks**, a separate **exposure pass** for anything that faces the network, Claude's `security-review` as an advisory pre-filter. Every plan carries `claudex-gate: pending; due-after: <step>`, and a commit hook reminds you while it is open | 2026-09 |
+| **Codebase without review history** | — | [`audit`](#beyond-the-plan): sliced first-pass review, deterministic tools first, numbered lines, exposure session per exposed component, a **baseline** so later reviews judge only the delta | 2026-08 |
+| **Security hunt** | — | `audit` Step 3c after Cloudflare's `security-audit`: pinned, byte-verified skill snapshot, frozen redacted input, hunters **without tools**, every finding verified cold by the other model, append-only ledger | 2026-10 |
+| **Documentation debt** | — | `docs-backfill`: Claude writes docstrings, a fresh read-only session grades whether they are *true* | 2026-09 |
+| **Wiring a repo** | — | `setup` + [`wrapper_drift.py`](./scripts/wrapper_drift.py): reviewer role, check catalogue, taboo scope, trust entry, wrapper copies kept level | 2026-08 |
+| **Claude as reviewer** | A sub-agent inherits every session tool | Plugin agents `claudex-reader` (`Read, Grep, Glob`) and `claudex-hunter` (no tools) — measured, held by tests | 2026-10 |
+| **Running the reviewed repo's code** | On the host | In a disposable, network-less container on the **pinned git tree**, no host fallback ([`sandbox_run.py`](./scripts/sandbox_run.py), B1); dependencies installed with **no package tool on the host**, audits against OSV (B1.5) | 2026-10/11 |
+| **Codex as builder** | `--yolo` with every MCP server, plugin and app of the user config | First every external tool off by name ([`build_isolation.py`](./scripts/build_isolation.py)); now a container build with quarantine and page-by-page review before anything is applied (**B2: built, closing gate still open**) | 2026-10/11 |
+| **Proof** | — | ~1,600 tests, CI on Linux · macOS · Windows, shellcheck, actionlint, gitleaks, bandit, pip-audit (not prescribed for repositories under review); every closed gap has a test that was red first | ongoing |
+| **Docs & disclosure** | English README | German mirror held in sync by tests, the project's own audit as receipts, `SECURITY.md` with private vulnerability reporting | 2026-09 |
+
+How each of these runs is drawn in [How each part works](#how-each-part-works).
 
 ## Why
 
@@ -120,6 +153,196 @@ roles:
 ### One lesson worth stealing
 
 **Hand the reviewer numbered lines.** The first real `audit` run produced sound findings at wrong addresses — citations landed on blank lines and unrelated statements, because the code went into the prompt unnumbered and the model had to *count*. Measured on the same 2,658-line slice: 5 of 23 citations on blank lines without numbering, 0 of 28 with it. A few percent more input tokens removes the entire class of error.
+
+## How each part works
+
+The diagram under [Why](#why) is the whole loop on one page. Below, each part on its own — what runs, what it checks, and where it stops. Same colours: orange produces, green grades, yellow is you, grey is a file, dashed is a sandbox or container.
+
+### Plan review — the adversary attacks the plan
+
+```mermaid
+flowchart TD
+    P["PLAN.md<br>read once, hashed, inlined"] --> W["codex_ro.py<br>read-only, isolated,<br>--expect-workdir"]
+    W --> V{"verdict file +<br>wrapper exit"}
+    V -- "exit 3 / 4, empty,<br>no verdict line" --> INV["INVALID round<br>logged, you decide"]
+    V -- "VERDICT: REVISE" --> A["producer arbitrates<br>accepts or rejects,<br>reason logged"]
+    A --> RV["revise PLAN.md<br>every superseded passage too"]
+    RV -- "same Codex thread,<br>round + 1" --> W
+    V -- "VERDICT: APPROVED" --> S["you sign off<br>claudex-gate: pending"]
+    A -. "MAX_ROUNDS reached" .-> S
+    V -. "quota out" .-> FB["fallback protocol<br>wait / switch / skip"]
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    class A,RV producer
+    class W,V adversary
+    class S,INV,FB human
+    class P artifact
+```
+
+Every round is recorded in `PLAN-REVIEW-LOG.md` before the next one starts. A round counts only with a non-empty answer whose last line is a verdict; an exit 3 (the reviewer read nothing) or exit 4 (the turn was not read-only) is invalid whatever it says.
+
+### After the build — inspection, acceptance gate, commit
+
+This is the stage upstream did not have in this form. When Claude builds, three independent checks stand between the finished diff and the commit:
+
+```mermaid
+flowchart TD
+    B["Claude builds<br>per PLAN.md"] --> PR["proof run<br>sandbox_run.py,<br>container, pinned tree"]
+    PR --> ST["stage the change<br>git write-tree pins it"]
+    ST --> IN["post-build inspection<br>fresh Codex session,<br>own inspector prompt"]
+    IN -- "findings" --> FX["fix + regression<br>red first"]
+    FX -- "up to 2 rounds" --> IN
+    IN -- "clean" --> CR["acceptance gate code-review<br>DOD · QUALITY · SECURITY<br>· DOCS · TESTS"]
+    CR -- "network-facing" --> EX["exposure pass<br>own role, own model<br>SAFE / UNSAFE"]
+    CR -- "findings" --> FX2["fix"] -- "up to 2 rechecks" --> CR
+    CR --> TC["tree_check.py<br>index = reviewed tree<br>+ appended log + gate flip"]
+    EX --> TC
+    TC -- "anything else changed" --> STOP["refused:<br>not committed as reviewed"]
+    TC -- "ok" --> G["you approve<br>claudex-gate: done"]
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
+    classDef sandbox fill:#f4f4f4,stroke:#10a37f,color:#1a1a1a,stroke-dasharray: 5 5
+    class B,FX,FX2 producer
+    class IN,CR,EX adversary
+    class G,STOP human
+    class PR,TC sandbox
+```
+
+- **Inspection** asks *does the diff implement the plan correctly?* A finding that changes *what* must be built goes into `PLAN.md` and reaches you as a post-approval plan change, not as a silent fix.
+- **The acceptance gate** asks *is everything there, is it clean, is it safe, is it documented, would the tests fail if the code were wrong?* Each dimension has its own verdict line.
+- **`tree_check.py`** makes "reviewed" mean the bytes that get committed: whatever changed after the review except the log and the gate marker refuses the commit.
+- **`gate_reminder.py`** names every `PLAN.md` whose gate is still `pending` at `git commit`, with the step it is due after — once per session, never blocking.
+
+### Codex builds — container and quarantine (B2, closing gate open)
+
+```mermaid
+flowchart TD
+    SP["frozen spec<br>PLAN.md"] --> SB["sandbox_build.py<br>pinned tree, fresh container<br>per build and fix round"]
+    SB --> NET["isolated network<br>probed before start"]
+    NET --> CX["Codex builds<br>inside the container,<br>no MCP, apps, plugins, hooks"]
+    CX --> Q["change set<br>in quarantine"]
+    Q --> SH["change_apply.py show<br>every summary and file page<br>read by Claude"]
+    SH -- "rejected" --> SB
+    SH --> AP["change_apply.py apply<br>only reviewed changes,<br>only unchanged targets"]
+    AP --> PR2["proof run + inspection<br>+ acceptance gate"]
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    classDef sandbox fill:#f4f4f4,stroke:#10a37f,color:#1a1a1a,stroke-dasharray: 5 5
+    class CX producer
+    class SH,PR2 adversary
+    class SP,Q artifact
+    class SB,NET,AP sandbox
+```
+
+Nothing Codex writes reaches the working tree before Claude has read it. There is no session resume and no host fallback. The details of the network and the credentials are in [Safety](#safety). B2 is built and tested but has not yet passed its closing gate.
+
+### Acceptance gate — one session, five dimensions, one exposure pass
+
+```mermaid
+flowchart LR
+    D["diff vs BASE_REF<br>+ plan + baseline"] --> PF["security-review<br>pre-filter, advisory,<br>never a verdict"]
+    PF --> SC["scanners<br>gitleaks --redact,<br>grype, hadolint, actionlint"]
+    SC --> CR["fresh Codex session<br>numbered lines in,<br>findings out"]
+    CR --> VL["verdict lines<br>DOD · QUALITY · SECURITY<br>· DOCS · TESTS"]
+    D --> CL{"faces the<br>network?"}
+    CL -- "yes or unclear" --> EX["exposure pass<br>exposure-review role"]
+    EX --> EV["EXPOSURE:<br>SAFE / UNSAFE"]
+    VL --> AR["producer arbitrates,<br>fixes, rechecks ≤ 2"]
+    EV --> AR
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    class PF,AR producer
+    class CR,VL,EX,EV adversary
+    class D artifact
+```
+
+The pre-filter's findings are never shown to Codex — it reads the change cold. `EXPOSURE: UNSAFE` blocks the commit.
+
+### Audit and security hunt — a codebase nobody reviewed
+
+```mermaid
+flowchart TD
+    R["repository<br>no diff, no plan"] --> SL["slices<br>excluded rest reported"]
+    SL --> T["deterministic tools first<br>linters, scanners"]
+    T --> RS["one read-only session per slice<br>security · quality · docs<br>· tests · rules"]
+    SL --> EXC["exposed components"] --> ES["one exposure session each"]
+    RS --> BL["baseline<br>docs/audit/DATE-baseline.md"]
+    ES --> BL
+    SL -. "SECURITY_HUNT=quick / standard / deep" .-> HS["frozen, redacted snapshot<br>pinned Cloudflare skill"]
+    HS --> HU["claudex-hunter agents<br>no tools, numbered excerpts"]
+    HU --> VF["security-verify<br>other model, cold,<br>bound to record + snapshot"]
+    VF --> LG["hunt report +<br>append-only ledger"]
+    classDef producer fill:#d97757,stroke:#7a3a24,color:#fff
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    class HU producer
+    class RS,ES,VF adversary
+    class BL,LG,HS artifact
+```
+
+The baseline is what every later `code-review` reads as known debt, so the same findings are not raised again on every change.
+
+### One Codex call — what has to hold before an answer counts
+
+```mermaid
+flowchart LR
+    C["skill command<br>python tools/codex_ro.py ..."] --> GD{"wrapper_guard.py<br>one command?"}
+    GD -- "chain, pipe, redirect,<br>substitution" --> DN["denied"]
+    GD -- "yes" --> WR{"codex_ro.py<br>checks"}
+    WR -- "wrong workdir, forbidden -c,<br>.codex/config.toml, old CLI,<br>path outside bounds" --> E2["exit 2"]
+    WR --> CX["codex exec / resume<br>read-only + isolation"]
+    CX --> RL{"event stream +<br>session rollout"}
+    RL -- "no command ran,<br>sandbox refused" --> E3["exit 3<br>reviewer read nothing"]
+    RL -- "turn not read-only" --> E4["exit 4<br>not a review"]
+    RL -- "confirmed" --> OK["exit 0<br>applied line: confirmed"]
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
+    class CX adversary
+    class DN,E2,E3,E4 human
+```
+
+Timeout is exit 124, a refused batch starter on Windows exit 127. stderr always goes to a file, because a 401 or 429 looks like exit 0 with an empty answer.
+
+### Repository code in a container (B1, B1.5)
+
+```mermaid
+flowchart LR
+    TR["pinned git tree<br>never the working tree"] --> SN["snapshot<br>object ids recomputed,<br>links and submodules refused"]
+    RQ["hashed requirements<br>--deps"] --> WH["wheels chosen by hash<br>from PyPI, never opened<br>on the host"]
+    SN --> CT["disposable container<br>no network, read-only root,<br>no host mount, no capabilities"]
+    WH --> CT
+    CT --> MF["manifest<br>COMMAND_STATUS · COMMAND_EXIT<br>MANIFEST_SHA256"]
+    MF -- "exited + exit 0" --> PASS["pass"]
+    MF -- "timeout, OOM, overflow,<br>deps_failed, runner exit 2 / 5" --> FAIL["never a pass"]
+    LK["package-lock / requirements"] --> DA["dep_audit.py<br>exact versions to OSV"]
+    classDef sandbox fill:#f4f4f4,stroke:#10a37f,color:#1a1a1a,stroke-dasharray: 5 5
+    classDef artifact fill:#3d3d3d,stroke:#6b6b6b,color:#fff
+    class SN,CT,WH sandbox
+    class TR,RQ,MF,LK artifact
+```
+
+Without Docker or the image the step is refused — there is no host fallback.
+
+### When the Codex quota runs out
+
+```mermaid
+flowchart LR
+    F["429 / usage limit /<br>empty answer twice"] --> U["codex_usage.py<br>remaining quota, reset time"]
+    U --> H{"you choose"}
+    H -- "wait" --> RS["resume the same thread<br>after the reset"]
+    H -- "switch" --> CH["fallback_review.py --chain<br>first viable provider,<br>egress allowlist"]
+    H -- "skip" --> SK["sign-off marked<br>not cross-reviewed"]
+    CH --> LB["round labelled as fallback<br>verdict bound to plan SHA256"]
+    classDef human fill:#e8b93e,stroke:#8a6a14,color:#1a1a1a
+    classDef adversary fill:#10a37f,stroke:#0a6b54,color:#fff
+    class H,SK human
+    class CH,LB adversary
+```
 
 ## Receipts
 

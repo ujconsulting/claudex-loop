@@ -51,7 +51,10 @@ automatically; read it before reviewing anything here.
      stopped exactly where this fork's additions begin — no acceptance gate, no exposure
      pass, and the colours hard-wired Claude and Codex into boxes whose whole point is
      that the actor is configuration. A diagram that is merely *incomplete* still reads
-     as the full picture.
+     as the full picture. Since 2026-11-02 the same applies to the per-part diagrams
+     under `## How each part works` and to the table under `## What this adds to
+     upstream`: a new control, skill or stage gets its row and, where it changes a
+     flow, its diagram. All diagrams are copied byte for byte into `README_DE.md`.
    - **The receipts.** They were upstream's plan-loop run, on a repo nobody here has
      seen. This fork's own evidence — the audit that found its two headline controls
      walkable — was missing entirely.
