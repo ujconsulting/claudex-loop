@@ -233,7 +233,12 @@ Die Laufwerksbuchstaben sind in der Sandbox sichtbar (`Get-PSDrive`), ihr Inhalt
 eingeschränkte Token kommt nicht an die Freigabe. In der Sandbox läuft PowerShell zudem im
 eingeschränkten Sprachmodus (Methodenaufrufe scheitern). Ein Review aus einem Repo auf einer
 Freigabe liest deshalb **nichts**. ⛔ `codex_ro.py` 2.6.1 hat vier solche Läufe mit Exit 0 und
-Urteil beendet; die Erkennung „kein einziger erfolgreicher Befehl“ (Exit 3) griff nicht.
+Urteil beendet, und auch 2.7.0 fängt sie nicht ab. Exit 3 greift absichtlich nur, wenn im
+letzten Turn **kein** `command_execution` steht. Hier liefen Befehle, aber jeder endete mit
+einem Fehler (`exit_code` 1 oder -1, „Zugriff verweigert“ bzw. `CreateProcessAsUserW 5`). Das
+neue Exit 4 prüft nur, ob der Turn read-only lief. Bis der Wrapper das erkennt, prüft der
+Aufrufer selbst: im `…out.md.stream.json` muss mindestens ein Befehl mit `exit_code` 0 stehen,
+sonst ist die Runde kein Review.
 
 **Abhilfe:** `scripts/review_mirror.py` kopiert genau die Pfade aus `.codex/review-scope.txt`
 des Repos nach `C:\codex-review\<repo>` (`robocopy /MIR`; s100-hubspot: 98 MB, erst 23 s,
