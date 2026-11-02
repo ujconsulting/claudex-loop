@@ -16,8 +16,14 @@ never reaches the mirror, so the reviewer cannot open it even if it ignores the 
 
 `.codex/review-scope.txt`, one repository-relative path per line, `#` comments:
 
-    doku/            directory, mirrored with robocopy /MIR
-    AGENTS.md        single file
+    doku/                  directory, mirrored with robocopy /MIR
+    AGENTS.md              single file
+    _scripte/              directory ...
+    !_scripte/kunden/      ... minus this subdirectory (robocopy /XD with the full path)
+    !_scripte/databases.json   ... minus this file (/XF)
+
+An exclusion must lie under a listed directory; one that does not is refused, because
+it would be a typo that silently protects nothing.
 
 Refused in the scope file: absolute paths, `..`, `.git`, anything starting with `.env`
 except the value-free templates `.env.example`, `.env.sample`, `.env.template`.
@@ -58,29 +64,42 @@ class ScopeError(ValueError):
     pass
 
 
-def read_scope(text: str) -> list[str]:
-    """Scope entries in file order; raises ScopeError on anything unsafe."""
-    entries = []
+def _relpath(line: str, n: int, raw: str) -> tuple[str, list[str]]:
+    parts = [p for p in line.split("/") if p]
+    if line.startswith("/") or PureWindowsPath(line).drive or ".." in parts or not parts:
+        raise ScopeError(f"line {n}: not a repository-relative path: {raw.strip()}")
+    return "/".join(parts) + ("/" if line.endswith("/") else ""), parts
+
+
+def read_scope(text: str) -> tuple[list[str], list[str]]:
+    """(entries, exclusions) in file order; raises ScopeError on anything unsafe."""
+    entries, excludes = [], []
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip().replace("\\", "/")
         if not line:
             continue
-        parts = [p for p in line.split("/") if p]
-        if (line.startswith("/") or PureWindowsPath(line).drive or ".." in parts
-                or not parts):
-            raise ScopeError(f"line {n}: not a repository-relative path: {raw.strip()}")
+        if line.startswith("!"):
+            excludes.append(_relpath(line[1:].strip(), n, raw)[0])
+            continue
+        entry, parts = _relpath(line, n, raw)
         if parts[0] == ".git" or any(p.lower().startswith(".env") and p.lower() not in ENV_TEMPLATES
                                      for p in parts):
             raise ScopeError(f"line {n}: never mirrored: {raw.strip()}")
-        entries.append("/".join(parts) + ("/" if line.endswith("/") else ""))
+        entries.append(entry)
     if not entries:
         raise ScopeError("scope file lists nothing")
-    return entries
+    dirs = [e for e in entries if e.endswith("/")]
+    for x in excludes:
+        if not any(x.startswith(d) and x != d for d in dirs):
+            raise ScopeError(f"exclusion !{x} lies under no listed directory")
+    return entries, excludes
 
 
-def robocopy_dir(src: Path, dst: Path, check: bool) -> list[str]:
+def robocopy_dir(src: Path, dst: Path, check: bool,
+                 extra_dirs: tuple[str, ...] = (), extra_files: tuple[str, ...] = ()) -> list[str]:
     args = ["robocopy", str(src), str(dst), "/MIR",
-            "/XD", *EXCLUDE_DIRS, "/XF", *EXCLUDE_FILES, *ROBOCOPY_QUIET]
+            "/XD", *EXCLUDE_DIRS, *extra_dirs, "/XF", *EXCLUDE_FILES, *extra_files,
+            *ROBOCOPY_QUIET]
     return args + ["/L"] if check else args
 
 
@@ -89,13 +108,17 @@ def robocopy_file(src: Path, dst: Path, check: bool) -> list[str]:
     return args + ["/L"] if check else args
 
 
-def jobs(repo: Path, target: Path, entries: list[str], check: bool):
+def jobs(repo: Path, target: Path, entries: list[str], check: bool,
+         excludes: list[str] = ()):
     """(entry, robocopy args) for every entry that exists; missing ones are reported."""
     out, missing = [], []
     for e in entries:
         src = repo / e.rstrip("/")
         if src.is_dir():
-            out.append((e, robocopy_dir(src, target / e.rstrip("/"), check)))
+            mine = [x for x in excludes if e.endswith("/") and x.startswith(e)]
+            xd = tuple(str(repo / x.rstrip("/")) for x in mine if x.endswith("/") or (repo / x).is_dir())
+            xf = tuple(str(repo / x) for x in mine if not x.endswith("/") and not (repo / x).is_dir())
+            out.append((e, robocopy_dir(src, target / e.rstrip("/"), check, xd, xf)))
         elif src.is_file() and not e.endswith("/"):
             out.append((e, robocopy_file(src, target / e, check)))
         else:
@@ -131,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"review_mirror: no {SCOPE_FILE} in {repo} -- nothing is mirrored without one")
         return 2
     try:
-        entries = read_scope(scope.read_text(encoding="utf-8-sig"))
+        entries, excludes = read_scope(scope.read_text(encoding="utf-8-sig"))
     except ScopeError as e:
         print(f"review_mirror: {scope}: {e}")
         return 2
@@ -140,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"review_mirror: refused: {reason}")
         return 2
 
-    todo, missing = jobs(repo, target, entries, a.check)
+    todo, missing = jobs(repo, target, entries, a.check, excludes)
     failed = 0
     for entry, args in todo:
         r = subprocess.run(args, capture_output=True, text=True, errors="replace")

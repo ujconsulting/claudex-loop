@@ -239,6 +239,10 @@ Urteil beendet; die Erkennung „kein einziger erfolgreicher Befehl“ (Exit 3) 
 des Repos nach `C:\codex-review\<repo>` (`robocopy /MIR`; s100-hubspot: 98 MB, erst 23 s,
 danach ~3 s). Der Wrapper läuft dann dort. Was nicht in der Liste steht, liegt nicht im
 Spiegel, der Tabu-Bereich ist also physisch draußen. Ohne Liste wird nichts kopiert (Exit 2).
+Ausnahmen innerhalb eines freigegebenen Ordners stehen mit `!` davor (`_scripte/` und
+`!_scripte/kunden/`); eine Ausnahme, die unter keinem freigegebenen Ordner liegt, wird
+abgewiesen. Bei großen Freigaben (`_knowledge/`) vorher `--check` laufen lassen und den
+Platz auf `C:` prüfen.
 
 ```bash
 python <claudex-loop>/scripts/review_mirror.py                     # im Repo-Root auf S:/O:

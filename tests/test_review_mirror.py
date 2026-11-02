@@ -23,7 +23,16 @@ import review_mirror as rm  # noqa: E402
 class ReadScope(unittest.TestCase):
     def test_dirs_files_comments(self):
         self.assertEqual(rm.read_scope("doku/\n# x\nAGENTS.md  # rules\n\n_knowledge\\concepts\\\n"),
-                         ["doku/", "AGENTS.md", "_knowledge/concepts/"])
+                         (["doku/", "AGENTS.md", "_knowledge/concepts/"], []))
+
+    def test_exclusions_under_listed_dirs(self):
+        self.assertEqual(rm.read_scope("_scripte/\n!_scripte/kunden/\n!_scripte/databases.json\n"),
+                         (["_scripte/"], ["_scripte/kunden/", "_scripte/databases.json"]))
+
+    def test_exclusion_outside_listed_dirs_is_refused(self):
+        for bad in ("doku/\n!_scripte/kunden/\n", "doku/\n!doku/\n", "AGENTS.md\n!AGENTS.md\n"):
+            with self.subTest(bad=bad), self.assertRaises(rm.ScopeError):
+                rm.read_scope(bad)
 
     def test_refuses_unsafe_entries(self):
         for bad in ("/etc", "C:\\x", "../up", "a/../b", ".git", ".env", ".env.local",
@@ -32,7 +41,7 @@ class ReadScope(unittest.TestCase):
                 rm.read_scope(bad)
 
     def test_env_templates_are_allowed(self):
-        self.assertEqual(rm.read_scope(".env.example\nsub/.env.sample\n"),
+        self.assertEqual(rm.read_scope(".env.example\nsub/.env.sample\n")[0],
                          [".env.example", "sub/.env.sample"])
         with self.assertRaises(rm.ScopeError):
             rm.read_scope(".env.example.local")
@@ -94,6 +103,18 @@ class Main(unittest.TestCase):
             code = rm.main(["--repo", str(self.repo), "--target", str(self.target)])
         self.assertEqual(code, 1)
         self.assertFalse((self.target / rm.SOURCE_MARK).exists())
+
+    def test_exclusions_reach_robocopy_with_full_paths(self):
+        (self.repo / "_scripte" / "kunden").mkdir(parents=True)
+        (self.repo / "_scripte" / "databases.json").write_text("{}", encoding="utf-8")
+        (self.repo / rm.SCOPE_FILE).write_text(
+            "_scripte/\n!_scripte/kunden/\n!_scripte/databases.json\n", encoding="utf-8")
+        code, run, _ = self.run_main()
+        self.assertEqual(code, 0)
+        args = run.call_args_list[0].args[0]
+        xd, xf = args.index("/XD"), args.index("/XF")
+        self.assertIn(str(self.repo / "_scripte" / "kunden"), args[xd:xf])
+        self.assertIn(str(self.repo / "_scripte" / "databases.json"), args[xf:])
 
     def test_target_inside_repo_is_refused(self):
         (self.repo / rm.SCOPE_FILE).write_text("doku/\n", encoding="utf-8")
