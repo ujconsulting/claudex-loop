@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.8.1 — 2026-11-02
+
+- Wrapper 2.7.1: a review round in which commands were attempted but none succeeded is
+  blind (exit 3) when a command failed to start or was denied access (`exit_code -1`,
+  `CreateProcessAsUserW failed`, `Access to the path … is denied`, …), when stderr carries a
+  Codex router execution-error record, or when the evidence is incomplete. Rounds whose
+  commands only failed in an ordinary way stay valid with a warning. Rounds without any
+  command keep the 2.7.0 rule, plus one addition: a router record of a start failure or
+  denial (`CreateProcessAsUserW`) in stderr now invalidates them too. Measured on a Windows VM: four plan reviews (Store alias of pwsh;
+  repository on a network share) had ended with exit 0 and a verdict without reading a file.
+- `scripts/review_mirror.py` (from the VM, merged): review from a local copy of the review
+  scope when the repository sits on a network share; `docs/betrieb.md` section 2b.
+- Fixtures of the three real runs under `tests/fixtures/codex-0.162/blind-failed-commands/`
+  (a leaked local path anonymised); `tests/test_codex_ro_blind_denied.py` drives them through
+  `blind_run` and `main()`, every new condition with a mutation witness.
+
 ## 2.8.0 — 2026-11-02
 
 - Add the B2 container build runner, isolated network probe and per-run TLS token

@@ -86,8 +86,10 @@ python tools/codex_ro.py --expect-workdir "$TARGET" --resume <thread-id> --promp
 Auf macOS heißt der Interpreter in der Regel `python3`. Exit-Codes: `0` Antwort da,
 `1` leere Antwort bei Exit 0 (der Auth-Fall), `2` abgewiesen (auch: eine Ausgabe, die ein
 anderer Lauf gesperrt hält; eine `.codex/config.toml` im Arbeitsverzeichnis oder darüber; ein
-Modell, das die installierte CLI nicht kann), **`3` blind** — nachweisbar kein Befehl
-ausgeführt und eine Sandbox-Ablehnung oder ein unbrauchbarer Beleg: das Review **nicht**
+Modell, das die installierte CLI nicht kann), **`3` blind** — kein Befehl gelang, und
+entweder lief gar keiner und es gab eine Sandbox-Ablehnung, oder (ab 2.7.1) ein Befehl konnte
+nicht starten oder wurde abgewiesen, ein Fehlereintrag des Codex-Routers steht in stderr, oder
+die Belege sind unvollständig (Regel in drei Fällen: Abschnitt 2b): das Review **nicht**
 protokollieren —, **`4` unsafe** (Exit 4, ab 2.7.0) — das Session-Rollout zeigt, dass der Lauf nicht
 mit read-only-Sandbox, Berechtigungsprofil und Freigabe `never` lief: **ungültige Runde, kein
 Review**, egal was das Urteil sagt; der Reviewer kann Dateien geschrieben haben, also
@@ -233,12 +235,25 @@ Die Laufwerksbuchstaben sind in der Sandbox sichtbar (`Get-PSDrive`), ihr Inhalt
 eingeschränkte Token kommt nicht an die Freigabe. In der Sandbox läuft PowerShell zudem im
 eingeschränkten Sprachmodus (Methodenaufrufe scheitern). Ein Review aus einem Repo auf einer
 Freigabe liest deshalb **nichts**. ⛔ `codex_ro.py` 2.6.1 hat vier solche Läufe mit Exit 0 und
-Urteil beendet, und auch 2.7.0 fängt sie nicht ab. Exit 3 greift absichtlich nur, wenn im
-letzten Turn **kein** `command_execution` steht. Hier liefen Befehle, aber jeder endete mit
-einem Fehler (`exit_code` 1 oder -1, „Zugriff verweigert“ bzw. `CreateProcessAsUserW 5`). Das
-neue Exit 4 prüft nur, ob der Turn read-only lief. Bis der Wrapper das erkennt, prüft der
-Aufrufer selbst: im `…out.md.stream.json` muss mindestens ein Befehl mit `exit_code` 0 stehen,
-sonst ist die Runde kein Review.
+Urteil beendet, und auch 2.7.0 fing sie nicht ab: Exit 3 griff nur, wenn im letzten Turn
+**kein** `command_execution` stand. Hier liefen Befehle, aber jeder endete mit einem Fehler
+(`exit_code` -1 mit `CreateProcessAsUserW failed: 5`, bzw. `exit_code` 1 mit
+`Access to the path … is denied` und `[Errno 13] Permission denied`).
+
+**Seit 2.7.1 erkennt der Wrapper das selbst (Exit 3).** Die Regel, in drei Fällen:
+
+- **Gültig:** mindestens ein Befehl gelang (`exit_code` 0); oder es lief gar kein Befehl, nichts
+  wurde abgewiesen und die Belege sind vollständig (Runden, die keinen Befehl brauchen).
+- **Gültig mit Warnung:** Befehle liefen, keiner gelang, alle scheiterten gewöhnlich (etwa eine
+  Suche ohne Treffer), Belege vollständig. Vor der Verwendung den Strom lesen.
+- **Ungültig (Exit 3):** nichts lief und etwas wurde abgewiesen oder die Belege sind
+  unvollständig; oder nichts gelang und ein Befehl konnte nicht starten, wurde abgewiesen
+  (im Strom oder als Fehlereintrag `codex_core::tools::router … exec_command failed` in
+  stderr), ließ sich nicht einordnen, oder die Belege sind unvollständig.
+
+Das ist eine Heuristik, ob der Prüfer überhaupt etwas ausführen konnte, kein Beweis, dass er das
+Repository gelesen hat: ein gelungenes `git rev-parse` zählt, auch wenn jeder Dateizugriff
+scheiterte. Die drei Läufe liegen als Fixtures in `tests/fixtures/codex-0.162/blind-failed-commands/`.
 
 **Abhilfe:** `scripts/review_mirror.py` kopiert genau die Pfade aus `.codex/review-scope.txt`
 des Repos nach `C:\codex-review\<repo>` (`robocopy /MIR`; s100-hubspot: 98 MB, erst 23 s,

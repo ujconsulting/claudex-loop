@@ -125,8 +125,11 @@ WHAT 2.6.0 CHANGED (2026-09-30, plan docs/plans/2026-09-23-codex-heben-wrapper-2
       never appears with `--json` (0 of ~90 real runs), so the old success half
       was dead and one refusal alone meant exit 3. Execution is now counted
       from `command_execution` events of the last turn, the stream must end in
-      `turn.completed`, and both files are read line by line under a size cap
-      (see blind_run()).
+      `turn.completed`, and both files are read line by line under a size cap.
+      Since 2.7.1 an attempt is not a success: what keeps a round valid is a
+      command with `exit_code` 0; with none, a start failure, a denial, a Codex
+      router error record in stderr, an unclassifiable command or incomplete
+      evidence is exit 3 (the three cases: blind_run()).
     - The CLI version is probed once and shown in the header. A model with a
       known minimum (MODEL_MIN_CLI) is refused before the run when the version
       is lower or unreadable: `gpt-6-sol` on 0.149.1 is HTTP 400 on every call.
@@ -175,11 +178,16 @@ Exit codes:
          output another run holds a lock on, a `.codex/config.toml` in the
          working directory or above it, or a model the installed CLI is known
          not to support (or whose CLI version cannot be read)
-    3    blind: nothing provably ran (no command in the event stream's last
-         turn) AND either a sandbox refusal was logged or the evidence itself
-         is unusable (missing, truncated, malformed, over the size cap). Looks
-         healthy from outside -- exit 0, a thread_id, a full answer file -- and
-         is not a review
+    3    blind: no command SUCCEEDED in the event stream's last turn, and
+         either nothing ran and a sandbox refusal was logged or the evidence
+         is unusable (missing, truncated, malformed, over the size cap), or
+         (2.7.1) commands were attempted and one failed to start or was
+         denied access (exit_code -1, CreateProcessAsUserW, "Access ... is
+         denied", ...), a Codex router execution-error record is in stderr,
+         a command cannot be classified, or the evidence is incomplete. Only
+         ordinary failures (a search with
+         no hit) stay a review, with a warning. Looks healthy from outside --
+         exit 0, a thread_id, a full answer file -- and is not a review
     4    unsafe (2.7.0): Codex's session rollout shows that THIS turn ran with a
          sandbox other than read-only, a writable permission profile, an approval
          policy other than `never`, or two permission fields that disagree. The
@@ -210,7 +218,7 @@ import threading
 import time
 from pathlib import Path
 
-WRAPPER_VERSION = "2.7.0"
+WRAPPER_VERSION = "2.7.1"
 
 # gpt-5.6-terra was superseded by gpt-6-sol (released 2026-09-22); gpt-6-sol was
 # in turn superseded by gpt-6.1-sol (2026-10-10/11, measured on codex-cli 0.162.1:
@@ -1478,6 +1486,32 @@ SANDBOX_REFUSAL_RE = re.compile(
 
 EXECUTED_STATUSES = ("completed", "failed")
 
+# 2.7.1: a command that was attempted but could not start, or could not read. Measured
+# 2026-11-02 (codex-cli 0.162.1, tests/fixtures/codex-0.162/blind-failed-commands/): the
+# Store alias of pwsh fails with `CreateProcessAsUserW failed: 5` (exit_code -1), reads from
+# a network share fail with `Access to the path '...' is denied.` and `[Errno 13] Permission
+# denied` (exit_code 1). The other alternatives are the documented variants of the same two
+# failures. The .NET messages are matched by their fixed prefix ("Access to the path",
+# "Zugriff auf den Pfad"), so no gap over the path is needed and a path of any length cannot
+# push the end out of reach (post-build inspection, finding 1). Every alternative is a
+# literal: the search is linear. This is a heuristic on command OUTPUT: a command that merely
+# prints such text (a grep hit, a quoted log) matches too. That errs only towards exit 3 --
+# and only when no command of the turn succeeded.
+_ACCESS_FAILURE = (
+    r"CreateProcessAsUserW failed|Access to the path |Permission denied|Access is denied"
+    r"|Zugriff verweigert|Zugriff auf den Pfad |Operation not permitted"
+    r"|UnauthorizedAccessException"
+)
+ACCESS_FAILURE_RE = re.compile(_ACCESS_FAILURE, re.IGNORECASE)
+_ACCESS_FAILURE_B = re.compile(_ACCESS_FAILURE.encode("ascii"), re.IGNORECASE)
+# Only a Codex tool-router execution-error record counts as stderr evidence for the 2.7.1
+# conditions: the LINE must start with the record header (timestamp, ERROR, the router
+# target, `error=exec_command failed`). A helper warning that quotes "Access is denied" --
+# or quotes a whole router record after its own prefix -- does not (inspection, finding 2).
+# Measured header: `2026-11-02T15:35:36.115295Z ERROR codex_core::tools::router: error=exec_command failed`.
+ROUTER_EXEC_ERROR_RE = re.compile(
+    rb"\d{4}-\d{2}-\d{2}T[0-9:.]+Z +ERROR +codex_core::tools::router: +error=exec_command failed")
+
 
 class StreamEvidence:
     """What the event stream proves about the run -- see read_stream_evidence()."""
@@ -1485,7 +1519,9 @@ class StreamEvidence:
     def __init__(self) -> None:
         """Nothing proven yet: every flag starts at its fail-closed value."""
         self.thread_id: str | None = None
-        self.executed = 0          # command_execution items that provably ran, last turn
+        self.executed = 0          # command_execution items that reported back, last turn
+        self.succeeded = 0         # ... of those with exit_code 0 (2.7.1)
+        self.failed_start_or_denied = 0  # ... failed to start (-1) or were denied (2.7.1)
         self.unclassified = 0      # command_execution items that could not be classified
         self.saw_thread = False
         self.saw_turn = False
@@ -1547,9 +1583,13 @@ def read_stream_evidence(stream_file: Path, limit: int | None = None) -> StreamE
 
     Counted as EXECUTED: `item.completed` whose item is a `command_execution`
     with an integer `exit_code` (`type(v) is int` -- JSON true is not a process)
-    and status `completed` or `failed`. A non-zero exit still ran: the sandbox let
-    the process start. Only the LAST turn counts (resume safety); a
-    `command_execution` that does not fit is `unclassified`, never executed.
+    and status `completed` or `failed`. EXECUTED means "attempted and reported
+    back", not "the reviewer read something": 2.7.1 splits it into SUCCEEDED
+    (exit_code 0) and FAILED_START_OR_DENIED (exit_code -1, or a string
+    `aggregated_output` matching ACCESS_FAILURE_RE, searched whole). Only the LAST
+    turn counts (resume safety); a `command_execution` that does not fit -- or a
+    failed one whose output is neither a string nor null -- is `unclassified`,
+    never executed.
     Every other item type is ignored -- model text in particular can say
     anything. Measured contract (76 of 76 real streams, 0.149.1 and 0.156.0):
     one `thread.started`, one `turn.started`, ending in `turn.completed`.
@@ -1584,6 +1624,8 @@ def read_stream_evidence(stream_file: Path, limit: int | None = None) -> StreamE
                 ev.complete = False
                 ev.turn_failed = False
                 ev.executed = 0
+                ev.succeeded = 0
+                ev.failed_start_or_denied = 0
                 ev.unclassified = 0
             elif kind == "turn.completed":
                 if not ev.saw_turn:
@@ -1603,10 +1645,21 @@ def read_stream_evidence(stream_file: Path, limit: int | None = None) -> StreamE
                 item = event.get("item")
                 if isinstance(item, dict) and item.get("type") == "command_execution":
                     code = item.get("exit_code")
-                    if type(code) is int and item.get("status") in EXECUTED_STATUSES:
-                        ev.executed += 1
-                    else:
+                    if type(code) is not int or item.get("status") not in EXECUTED_STATUSES:
                         ev.unclassified += 1
+                    elif code == 0:
+                        ev.executed += 1
+                        ev.succeeded += 1
+                    else:
+                        output = item.get("aggregated_output")
+                        if output is None:
+                            output = ""
+                        if not isinstance(output, str):
+                            ev.unclassified += 1
+                            continue
+                        ev.executed += 1
+                        if code == -1 or ACCESS_FAILURE_RE.search(output):
+                            ev.failed_start_or_denied += 1
     except OSError:
         ev.missing = True
     return ev
@@ -1634,6 +1687,53 @@ def count_stderr_refusals(err_file: Path, limit: int | None = None) -> tuple[int
     return refusals, True
 
 
+def count_stderr_exec_errors(err_file: Path, limit: int | None = None) -> tuple[int, int, int]:
+    """(records with an access/start-failure signature, records with a sandbox-refusal
+    signature, matching records) among the Codex tool-router execution-error records in
+    stderr (2.7.1).
+
+    A line counts only if it STARTS with a router record header (ROUTER_EXEC_ERROR_RE,
+    re.match after leading whitespace) and matches ACCESS_FAILURE_RE and/or
+    SANDBOX_REFUSAL_RE. Measured: a refused or unstartable command is logged there and may
+    be absent from the stream. The signature flags are independent -- one record can carry
+    both and then selects both remedies -- while the third value counts each record once.
+    Same bounded reader as count_stderr_refusals(); whether stderr was read whole is
+    reported by that function.
+    """
+    limit = EVIDENCE_LIMIT if limit is None else limit
+    if not err_file.exists():
+        return 0, 0, 0
+    access = refused = records = 0
+    try:
+        for raw, over in _bounded_lines(err_file, limit):
+            if over:
+                break
+            if not ROUTER_EXEC_ERROR_RE.match(raw.lstrip()):
+                continue
+            # The two flags are independent: one record can carry both signatures, and
+            # each selects its own remedy (reinspection, finding 1). The record itself
+            # is counted once, in `records`.
+            is_access = bool(_ACCESS_FAILURE_B.search(raw))
+            is_refusal = bool(SANDBOX_REFUSAL_RE.search(raw))
+            access += is_access
+            refused += is_refusal
+            records += is_access or is_refusal
+    except OSError:
+        pass
+    return access, refused, records
+
+
+def _environment_hint() -> str:
+    """The two measured causes of a run whose commands could not start or read (2.7.1)."""
+    return (
+        "  Measured causes (docs/betrieb.md section 2b): on Windows Codex started the Store\n"
+        "  alias of pwsh (%LOCALAPPDATA%\\Microsoft\\WindowsApps\\pwsh.exe), which the\n"
+        "  restricted token cannot launch -- install PowerShell 7 as MSI; or the repository\n"
+        "  sits on a network share the sandbox cannot read -- review from a local copy made\n"
+        "  by scripts/review_mirror.py.\n"
+    )
+
+
 def blind_run(err_file: Path, stream_file: Path, evidence: StreamEvidence | None = None) -> str | None:
     """Reason why this run must not count as a review, or None.
 
@@ -1642,19 +1742,33 @@ def blind_run(err_file: Path, stream_file: Path, evidence: StreamEvidence | None
     the prompt alone, by a model that never opened a file. Nothing else here
     notices, and a verdict from a reviewer that reviewed nothing gets recorded.
 
-    Blind = NOTHING provably ran in the last turn AND (a sandbox refusal was
-    logged, OR the evidence is unusable, OR a command could not be classified).
+    The rule (2.7.1), in three cases:
+      - ACCEPTED: at least one command succeeded (`exit_code` 0) -- incomplete
+        evidence then only warns; or nothing was attempted, nothing refused and
+        the evidence is complete.
+      - ACCEPTED WITH A WARNING: commands were attempted, none succeeded, every
+        one failed in an ordinary way (a search without a hit), evidence complete.
+      - BLIND (exit 3): no command succeeded and any of: nothing ran and a sandbox
+        refusal is in stderr (the original rule, any line); a command failed to start
+        or was denied (A, stream); a Codex router execution-error record names a
+        start failure, denial or refusal (B, stderr, also with nothing in the
+        stream); the evidence is incomplete (C: stream unusable, stderr not read
+        whole, an unclassifiable command).
     Not "any refusal": a model that reaches for one illegal command, is told no,
     and then does the job has produced a real review -- blocking that would make
     the wrapper block normal work, and such a control gets switched off. And not
     "no command": 12 of 72 real runs answered legitimately with none (resume
     rounds, exposure passes with the content in the prompt). Execution that
     happened only in a sub-agent is invisible here and, with a refusal, reads as
-    blind -- a false alarm in the safe direction, documented as such.
+    blind -- a false alarm in the safe direction, documented as such. A success is
+    a heuristic, not proof that files were read: a successful `git rev-parse`
+    counts even if every read failed. Measured 2026-11-02: four plan reviews whose
+    every command failed to start or was denied had ended with exit 0.
     """
     ev = evidence if evidence is not None else read_stream_evidence(stream_file)
     refusals, stderr_whole = count_stderr_refusals(err_file)
-    if ev.executed > 0:
+    access_records, refusal_records, records = count_stderr_exec_errors(err_file)
+    if ev.succeeded > 0:
         if not ev.usable or not stderr_whole or ev.unclassified:
             problem = (ev.problem() or ("stderr exceeds the size limit" if not stderr_whole else
                        f"{ev.unclassified} command event(s) that cannot be classified"))
@@ -1663,9 +1777,19 @@ def blind_run(err_file: Path, stream_file: Path, evidence: StreamEvidence | None
                 f"-- read {stream_file} before relying on the answer."
             )
         return None
+
+    # No command succeeded. Collect EVERY predicate that fires (inspection, finding 3),
+    # then pick the hints from the signatures that matched.
+    nothing_ran = ev.executed == 0
     reasons = []
-    if refusals:
+    legacy_refusal = nothing_ran and refusals > 0
+    if legacy_refusal:
         reasons.append(f"{refusals} refused (stderr)")
+    if ev.failed_start_or_denied:
+        reasons.append(f"{ev.failed_start_or_denied} of {ev.executed} command(s) failed to "
+                       f"start or were denied (stream)")
+    if records:
+        reasons.append(f"{records} execution-error record(s) (stderr)")
     if not ev.usable:
         reasons.append(ev.problem())
     if not stderr_whole:
@@ -1673,25 +1797,36 @@ def blind_run(err_file: Path, stream_file: Path, evidence: StreamEvidence | None
     if ev.unclassified:
         reasons.append(f"{ev.unclassified} command event(s) that cannot be classified")
     if not reasons:
+        if not nothing_ran:
+            warn(
+                f"no command succeeded ({ev.executed} command(s) reported back, all failed in "
+                f"an ordinary way, e.g. a search without a hit). The round stands, but read "
+                f"{stream_file} before relying on it."
+            )
         return None
-    hinweis = (
-        f"  On Windows a refusal is usually openai/codex#42172: without `[windows] "
-        f"sandbox` no backend is selected and every command is refused. This "
-        f"wrapper pins `windows.sandbox=\"{WINDOWS_SANDBOX}\"` -- if you see this "
-        f"anyway, the Codex build no longer accepts it.\n"
-        if os.name == "nt" and refusals else
-        "  A refusal here means the sandbox would not start any process -- check "
-        "the platform's sandbox helper (Landlock on Linux, seatbelt on macOS).\n"
-        if refusals else
-        "  Without usable evidence a run that read nothing cannot be told apart "
-        "from one that did.\n"
-    )
+
+    hints = ""
+    if legacy_refusal or refusal_records:
+        hints += (
+            f"  On Windows a refusal is usually openai/codex#42172: without `[windows] "
+            f"sandbox` no backend is selected and every command is refused. This "
+            f"wrapper pins `windows.sandbox=\"{WINDOWS_SANDBOX}\"` -- if you see this "
+            f"anyway, the Codex build no longer accepts it.\n"
+            if os.name == "nt" else
+            "  A refusal here means the sandbox would not start any process -- check "
+            "the platform's sandbox helper (Landlock on Linux, seatbelt on macOS).\n"
+        )
+    if ev.failed_start_or_denied or access_records:
+        hints += _environment_hint()
+    if not hints:
+        hints = ("  Without a successful command and with incomplete evidence, a run that "
+                 "read nothing cannot be told apart from one that did.\n")
     return (
-        # A refused command never appears in the stream (J0, 0.149.1 and 0.156.0),
-        # so the stream count is 0 by construction -- stated, not implied (J5).
-        f"the reviewer did not provably run a single command ({'; '.join(reasons)}; "
-        f"0 refused (stream); 0 executed (stream)) -- the answer may have been written WITHOUT reading "
-        f"anything, and it is not a review.\n" + hinweis
+        # A refused command never appears in the stream (J0, 0.149.1 and 0.156.0), so a
+        # refusal-only run shows 0 in the stream -- stated, not implied (J5).
+        f"the reviewer did not run a single command successfully ({'; '.join(reasons)}; "
+        f"0 refused (stream); {ev.executed} executed (stream), 0 succeeded) -- the answer "
+        f"may have been written WITHOUT reading anything, and it is not a review.\n" + hints
         + f"  Details: {err_file} and {stream_file}"
     )
 

@@ -380,9 +380,11 @@ forever at ~0% CPU under a non-interactive driver without it.
      auth/quota signature (see FALLBACK.md) — treat the FIRST one as a possible stumble
      worth one retry, and the second as terminal.
    - **Wrapper exit 3 is an INVALID ROUND as well** — whatever the verdict file says. It
-     means the reviewer's shell was refused every command and it read no file (Windows
-     without a sandbox backend, wrapper ≥ 2.4.0); the verdict was written from the prompt
-     alone. Log `## Round <n> — INVALID (exit 3, reviewer read nothing)` and do not count
+     means no command of the reviewer succeeded: every command was refused (Windows
+     without a sandbox backend, wrapper ≥ 2.4.0), could not start or was denied access
+     (Store alias of pwsh, repo on a network share, wrapper ≥ 2.7.1), or the evidence is
+     incomplete. Nothing shows the reviewer read anything; treat the verdict as written from
+     the prompt alone. Log `## Round <n> — INVALID (exit 3, reviewer read nothing)` and do not count
      it as an approval.
    - **Wrapper exit 4 is an INVALID ROUND too** — not a review, whatever the verdict file
      says. The read-only sandbox was not applied to the answering turn (wrapper ≥ 2.7.0;

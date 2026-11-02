@@ -130,6 +130,12 @@ Properties, deliberately different from the Codex path:
 reviewer may have written files, see the `#   applied:` header line and `git status`) are
 INVALID ROUNDS, not auth/quota signatures — do not wait, resume or switch reviewers on
 them; fix the cause and rerun. (The adapter's own exit 3 above is a different code.)
+The wrapper's rule, in three cases (2.7.1): **accepted** when at least one reviewer command
+succeeded, or when none was attempted, nothing refused and the evidence is complete;
+**accepted with a warning** when commands were attempted and all failed in an ordinary way
+(a search without a hit); **exit 3** when nothing succeeded and a command was refused, could
+not start or was denied (stream or a Codex router error record in stderr), a command could not
+be classified, or the evidence is incomplete. A success is a heuristic, not proof that the repository was read.
 
 ## Other gates reuse the same machinery
 
