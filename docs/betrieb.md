@@ -218,6 +218,43 @@ beliebigen Code aus, und die sorgfältig verengte codex-Zeile daneben ist Dekora
 dem Berufen auf die Regel die eigene `settings.local.json` prüfen; der `setup`-Skill bringt
 dafür einen Detektor mit (Schritt 0).
 
+### 2b. Netzlaufwerke: die Sandbox liest dort nichts (VM, 02.11.2026)
+
+Gemessen auf der Hyper-V-VM, `codex-cli 0.162.1`, `codex sandbox -c windows.sandbox="unelevated" -- cmd /c dir <pfad>`:
+
+| Pfad | Ergebnis |
+|---|---|
+| `C:\Users\<user>\.gitconfig` | gelistet |
+| `S:\s100-hubspot\README.md` (Freigabe des Notebooks) | **Zugriff verweigert** |
+| `O:\` | **Zugriff verweigert** |
+| `\\uj-nb-ai\sage_100\…` (UNC) | **Zugriff verweigert** |
+
+Die Laufwerksbuchstaben sind in der Sandbox sichtbar (`Get-PSDrive`), ihr Inhalt nicht: Der
+eingeschränkte Token kommt nicht an die Freigabe. In der Sandbox läuft PowerShell zudem im
+eingeschränkten Sprachmodus (Methodenaufrufe scheitern). Ein Review aus einem Repo auf einer
+Freigabe liest deshalb **nichts**. ⛔ `codex_ro.py` 2.6.1 hat vier solche Läufe mit Exit 0 und
+Urteil beendet; die Erkennung „kein einziger erfolgreicher Befehl“ (Exit 3) griff nicht.
+
+**Abhilfe:** `scripts/review_mirror.py` kopiert genau die Pfade aus `.codex/review-scope.txt`
+des Repos nach `C:\codex-review\<repo>` (`robocopy /MIR`; s100-hubspot: 98 MB, erst 23 s,
+danach ~3 s). Der Wrapper läuft dann dort. Was nicht in der Liste steht, liegt nicht im
+Spiegel, der Tabu-Bereich ist also physisch draußen. Ohne Liste wird nichts kopiert (Exit 2).
+
+```bash
+python <claudex-loop>/scripts/review_mirror.py                     # im Repo-Root auf S:/O:
+env -C 'C:\codex-review\<repo>' python tools/codex_ro.py --prompt-file … --out-file …
+```
+
+Zwei weitere Voraussetzungen auf der VM, beide am selben Tag gefunden:
+
+- **PowerShell 7 als MSI**, nicht als Store-App. Codex startet bevorzugt `pwsh`. Der
+  Store-Alias `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe` ist im eingeschränkten Token
+  nicht startbar (`CreateProcessAsUserW failed: 5`), `powershell.exe` und
+  `C:\Program Files\PowerShell\7\pwsh.exe` schon. winget liefert 7.6.9 als MSIX aus, also
+  wieder eine Paket-App: das MSI von den GitHub-Releases nehmen.
+- **Codex per npm in der gemessenen Version.** Der eigenständige Installer legt nur einen
+  Ordner und einen PATH-Eintrag an (kein Uninstall-Eintrag) und aktualisiert sich selbst.
+
 ---
 
 ## 3. Modell, Abschottung und MCP
