@@ -356,7 +356,7 @@ class MeasuredVersionTests(unittest.TestCase):
         self.assertNotIn("@openai/codex@latest", source)
 
     def test_version_and_defaults(self):
-        self.assertEqual(codex_ro.WRAPPER_VERSION, "2.7.1")  # 2.7.1: no success + denial = exit 3
+        self.assertEqual(codex_ro.WRAPPER_VERSION, "2.7.2")  # 2.7.2: bounded, symlink-safe lock diagnostics
         self.assertEqual(codex_ro.DEFAULT_MODEL, "gpt-6.1-sol")
         self.assertEqual(codex_ro.parse_args(["--prompt", "x", "--out-file", "o"]).effort, "medium")
 

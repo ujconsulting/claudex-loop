@@ -116,6 +116,27 @@ class ArgvTests(unittest.TestCase):
         self.assertNotIn("x", argv)
 
 
+def _chdir_into_private_repo(case: unittest.TestCase) -> Path:
+    """Run the rest of `case` with a fresh private (0700, mkdtemp) directory that looks
+    like a git checkout as the working directory, and return it.
+
+    allowed_roots() derives the repo root from the working directory. These tests used
+    to rely on being started inside this repository's own checkout; the sandbox runner
+    copies the tree without `.git` into a directory that is not private (T25), so there
+    the repo root was missing and no write root survived the privacy screen -- the
+    wrapper rightly exits 2. The rule under test is unchanged; only the assumption about
+    where pytest runs is gone.
+    """
+    tmp = tempfile.TemporaryDirectory()
+    case.addCleanup(tmp.cleanup)
+    repo = Path(tmp.name).resolve()
+    (repo / ".git").mkdir()
+    previous = os.getcwd()
+    os.chdir(repo)
+    case.addCleanup(os.chdir, previous)
+    return repo
+
+
 class PathConfinementTests(unittest.TestCase):
     """--out-file is deleted before the run, so an unbounded path is a write primitive."""
 
@@ -145,9 +166,10 @@ class PathConfinementTests(unittest.TestCase):
             codex_ro.resolve_in_roots(str(sibling), [self.root], "--out-file")
 
     def test_the_repo_and_the_temp_dir_are_roots_by_default(self):
+        repo = _chdir_into_private_repo(self)
         roots = codex_ro.allowed_roots([])
         self.assertIn(Path(tempfile.gettempdir()).resolve(), roots)
-        self.assertTrue(any((r / ".git").exists() for r in roots), "the repo root should be a root")
+        self.assertIn(repo, roots, "the repo root should be a root")
 
     def test_an_opt_in_root_is_honoured(self):
         extra = Path(tempfile.gettempdir()).resolve()
@@ -168,6 +190,7 @@ class WriteRootTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.extra = Path(self.tmp.name).resolve()
         self.addCleanup(self.tmp.cleanup)
+        self.repo = _chdir_into_private_repo(self)
 
     def test_an_opt_in_root_still_widens_reads(self):
         self.assertIn(self.extra, codex_ro.allowed_roots([str(self.extra)]))
@@ -220,7 +243,7 @@ class WriteRootTests(unittest.TestCase):
 
     def test_the_repo_is_always_a_write_root(self):
         roots = codex_ro.allowed_roots([], for_write=True)
-        self.assertTrue(any((r / ".git").exists() for r in roots))
+        self.assertIn(self.repo, roots)
 
     def test_an_explicit_scratch_dir_is_a_write_root_on_posix(self):
         """On POSIX, _is_private_dir() performs a real ancestor stat() check --
@@ -288,7 +311,7 @@ class WriteRootTests(unittest.TestCase):
         os.environ[codex_ro.SCRATCH_DIR_ENV] = str(self.extra)
         try:
             roots = codex_ro.allowed_roots([], for_write=True)
-            self.assertTrue(any((r / ".git").exists() for r in roots))
+            self.assertIn(self.repo, roots)
         finally:
             if previous is None:
                 os.environ.pop(codex_ro.SCRATCH_DIR_ENV, None)

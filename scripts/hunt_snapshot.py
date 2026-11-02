@@ -30,6 +30,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -140,7 +141,69 @@ def pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """Linux: True when /proc says the process has exited and only waits to be reaped
+    (state Z or X). A zombie runs no code, so the supervisor's survivor check must not
+    count it -- measured in the sandbox container (T25), where no init process reaps the
+    killed grandchild and kill(pid, 0) keeps succeeding. Anything unreadable (no /proc on
+    macOS, a vanished or unparsable entry) is False: an unknown stays a survivor."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            stat = handle.read()
+    except OSError:
+        return False
+    parsed = _parse_proc_stat(stat, pid)
+    return parsed is not None and parsed[0] in (b"Z", b"X")
+
+
+# Linux process states as /proc/<pid>/stat writes them (proc(5)); anything else is malformed.
+_PROC_STATES = frozenset(b"RSDZTtWXxKPI")
+# Fields after "(comm)": state is field 3 of the record, starttime field 22 -- every kernel
+# since 2.6 writes at least these 20 (proc(5)); a shorter record is truncated, not a process.
+_PROC_MIN_FIELDS = 20
+# pid_max is at most 2**22 on Linux; ten digits is generous and keeps int() cheap and safe.
+_PROC_MAX_DIGITS = 10
+# Every field after the state is a decimal the kernel prints with %d/%u/%lu/%llu: signed
+# (priority, nice), at most 20 digits (2**64). Anything else means the record is not one.
+_PROC_FIELD = re.compile(rb"-?[0-9]{1,20}")
+
+
+def _proc_int(field: bytes) -> int | None:
+    """A bounded, non-negative decimal from a stat field, or None."""
+    if not field.isdigit() or len(field) > _PROC_MAX_DIGITS:
+        return None
+    return int(field)
+
+
+def _parse_proc_stat(raw: bytes, pid: int | str | None = None) -> tuple[bytes, int] | None:
+    """(state, pgrp) from a /proc/<pid>/stat record, or None when it is malformed.
+
+    Strict on purpose (post-build inspection, wrapper+T25 block, finding 1): the record
+    must read `<pid> (<comm>) <state> <ppid> <pgrp> ...` with at least the 20 fields after
+    `(comm)` every kernel writes, the pid matching `pid` when given, a single known state
+    letter, every later field a decimal of at most 20 digits (signed where Linux prints a
+    sign), and bounded non-negative pid/ppid/pgrp (an oversized number is malformed, not an
+    error). `comm` may contain spaces and parentheses, so the LAST ")" ends it. A record like `garbage) Z 1 4242` is malformed,
+    never a zombie and never evidence about a group.
+    """
+    head, sep, tail = raw.rpartition(b")")
+    pid_part, open_paren, _comm = head.partition(b" (")
+    if not sep or not open_paren or _proc_int(pid_part) is None:
+        return None
+    if pid is not None and pid_part != str(pid).encode():
+        return None
+    fields = tail.split()
+    if len(fields) < _PROC_MIN_FIELDS or len(fields[0]) != 1 or fields[0][0] not in _PROC_STATES:
+        return None
+    if not all(_PROC_FIELD.fullmatch(f) for f in fields[1:]):
+        return None
+    ppid, pgrp = _proc_int(fields[1]), _proc_int(fields[2])
+    if ppid is None or pgrp is None:
+        return None
+    return fields[0], pgrp
 
 
 def descendants(pid: int) -> list[int] | None:
@@ -189,13 +252,52 @@ def descendants(pid: int) -> list[int] | None:
 
 
 def _group_alive(pgid: int) -> bool:
+    """False only when the process group is known to hold no running process. On Linux a
+    group whose remaining members are all zombies (exited, not yet reaped -- the sandbox
+    container has no init process to reap them, T25) is not alive: killpg(pgid, 0) still
+    succeeds there. Without a readable /proc the answer stays "alive"."""
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    return True
+    live = _group_has_live_member(pgid)
+    return True if live is None else live
+
+
+def _group_has_live_member(pgid: int) -> bool | None:
+    """Linux: True when /proc shows a member of process group `pgid` that is not a zombie,
+    False only when /proc SHOWS members of the group and every one is a zombie, None
+    otherwise -- /proc unlistable (macOS), a record unreadable or malformed, or no member
+    of the group visible at all although killpg(pgid, 0) succeeded (a restricted or
+    mismatched /proc view, post-build inspection finding 2). The caller keeps the
+    conservative answer ("alive") for None."""
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    seen_member = False
+    for name in entries:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                raw = handle.read()
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # the process vanished while listing
+        except OSError:
+            return None  # unreadable (e.g. permission): unknown, not "gone" (plan review r1-9)
+        parsed = _parse_proc_stat(raw, name)
+        if parsed is None:
+            return None  # malformed record: unknown
+        state, pgrp = parsed
+        if pgrp != pgid:
+            continue
+        if state not in (b"Z", b"X"):
+            return True
+        seen_member = True
+    return False if seen_member else None
 
 
 def run_supervised(argv: list[str], deadline: float = WORKER_DEADLINE,

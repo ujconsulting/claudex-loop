@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.8.2 — 2026-11-02
+
+- Wrapper 2.7.2: the diagnostic for an output another run holds no longer reads the lock with
+  `read_text()` (followed symlinks, unbounded, blocked on a FIFO). POSIX: lstat, regular file with
+  one link, `O_NOFOLLOW|O_NONBLOCK`, same (dev, ino) via fstat, at most 200 bytes; Windows never
+  reads the holder. Lock acquisition, release, order and exit 2 are unchanged.
+- `fallback_review.py` (T24): unique exclusive staging file instead of a fixed `.claudex-part`;
+  locks `<out>.claudex-lock` and `<append-log>.claudex-lock` from the deletion of `--out` through
+  publication and append (exit 2 when held, by another fallback or by the wrapper); refuses
+  out == log, reserved suffixes, ambiguous Windows spellings, links, hard-linked outputs and
+  unreadable metadata; appends through a handle validated after opening (an absent log is created
+  only exclusively, a non-regular log is refused before opening); a failed write or fsync of `--out`
+  is `ERROR:` + exit 2 instead of a traceback; same safe lock diagnostic.
+- `review_mirror.py` (T26): immutable generations under `%LOCALAPPDATA%\codex-review\<repo>-<hash>`
+  instead of `/MIR` into a shared target; one path rule for entries and `!` exclusions (`.git` in any
+  spelling, `.env*`/`*.env` except listed templates, cache dirs, Windows aliases, wildcards, links);
+  `!` wins over every entry; `?` optional entries; source and destination checked for reparse points;
+  robocopy `/XJ` plus a full post-copy validation; receipt (schema 1: file manifest, `entry_types`,
+  strictly increasing `created_ns`) written last; `MIRROR=`, `--verify`, `--prune` (keeps the newest
+  verified generation by creation order); the repo root itself must not be a link; directory
+  exclusions with or without a trailing slash; `--target` and the old source mark removed. Full copy
+  per run. Linked generations and a linked `--check` probe are refused; an invalid or duplicate
+  `created_ns` stops `--prune`; `--prune` never changes attributes of a hard-linked file; an
+  unreadable scope file is exit 2, a missing robocopy or unwritable receipt exit 1, without traceback.
+- Tests no longer assume a git checkout of this repo (sandbox runner, T25); `hunt_snapshot` treats a
+  Linux zombie as gone and an unreadable `/proc` record as unknown. The full suite passes in the
+  sandbox container for the first time.
+
 ## 2.8.1 — 2026-11-02
 
 - Wrapper 2.7.1: a review round in which commands were attempted but none succeeded is

@@ -218,7 +218,7 @@ import threading
 import time
 from pathlib import Path
 
-WRAPPER_VERSION = "2.7.1"
+WRAPPER_VERSION = "2.7.2"
 
 # gpt-5.6-terra was superseded by gpt-6-sol (released 2026-09-22); gpt-6-sol was
 # in turn superseded by gpt-6.1-sol (2026-10-10/11, measured on codex-cli 0.162.1:
@@ -2157,6 +2157,46 @@ def report_applied(applied: Applied, args) -> None:
                  f"not the requested {args.effort}.")
 
 
+LOCK_HOLDER_MAX = 200
+_HOLDER_NOT_SHOWN = "(holder not shown)"
+
+
+def _read_lock_holder(path: Path) -> str:
+    """Text for the "another run holds ..." message; diagnostics only (2.7.2).
+
+    The lock is another run's file, so it is untrusted: it may be a symlink to some
+    secret, a huge file, a FIFO, or a hard link to another file. POSIX: lstat first and
+    open only a regular file with st_nlink == 1, O_NOFOLLOW|O_NONBLOCK, require the same
+    (st_dev, st_ino) as a regular file after fstat, and read at most LOCK_HOLDER_MAX
+    bytes. Windows: never open it (an open() there can be neither bounded nor made
+    reparse-safe with the standard library); the message names the lock path only.
+    Anything else is "(holder not shown)". Never raises.
+    """
+    if os.name == "nt":
+        return "(holder not read on Windows)"
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
+    if not nofollow or not nonblock:
+        return _HOLDER_NOT_SHOWN
+    try:
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            return _HOLDER_NOT_SHOWN
+        fd = os.open(path, os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return _HOLDER_NOT_SHOWN
+    try:
+        after = os.fstat(fd)
+        if (not stat.S_ISREG(after.st_mode) or after.st_nlink != 1
+                or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)):
+            return _HOLDER_NOT_SHOWN
+        return os.read(fd, LOCK_HOLDER_MAX).decode("utf-8", errors="replace")
+    except OSError:
+        return _HOLDER_NOT_SHOWN
+    finally:
+        os.close(fd)
+
+
 def acquire_locks(paths: list[Path]) -> list[Path]:
     """Lock every output of this run, in a fixed order, or refuse the run.
 
@@ -2175,10 +2215,7 @@ def acquire_locks(paths: list[Path]) -> list[Path]:
             fd = os.open(path, flags, 0o600)
         except FileExistsError:
             release_locks(taken)
-            try:
-                holder = path.read_text(encoding="utf-8", errors="replace")[:200]
-            except OSError:
-                holder = "(unreadable)"
+            holder = _read_lock_holder(path)
             die(
                 f"another run holds {path}: {_escape_path_for_message(holder.strip())}\n"
                 f"  Refusing: sharing an output would let the two runs overwrite each "

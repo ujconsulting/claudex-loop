@@ -137,6 +137,20 @@ succeeded, or when none was attempted, nothing refused and the evidence is compl
 not start or was denied (stream or a Codex router error record in stderr), a command could not
 be classified, or the evidence is incomplete. A success is a heuristic, not proof that the repository was read.
 
+**Output locks (2.8.2).** `fallback_review.py` takes part in the wrapper's lock namespace: before
+it deletes `--out`, it creates `<out>.claudex-lock` and `<append-log>.claudex-lock` exclusively
+(the same names `codex_ro.py` uses) and holds them until the verdict is published and the round
+appended. A lock held by another fallback run or by the wrapper means exit 2 with nothing deleted
+or written; a lock left behind by a crash is reported and removed by hand only. The reply is
+staged in a unique `<out>.<random>.claudex-part`, fsynced and moved into place. Refused with
+exit 2 before anything is touched: `--out` and `--append-log` naming the same file, a name ending
+in `.claudex-lock` or `.claudex-part`, an ambiguous Windows spelling of the file name (trailing dot
+or space, `:`, an 8.3 alias like `VERDIC~1`, control characters -- on every OS), a symlink or
+reparse point, an existing output with more than one hard link, an output whose metadata cannot be
+read. The round is appended through a handle that is validated after opening (regular file, one
+link, no reparse point), and the append lands only in the file that was checked (identity compared via lstat/fstat). A link or reparse point visible before opening, a file with a different identity, or a non-regular log (e.g. a FIFO) means exit 2 and no append; the existing log is opened non-blocking on POSIX so a swapped-in FIFO cannot hang the run. The holder text of a foreign lock is shown on POSIX only (at most 200 bytes,
+regular single-link file, no link followed), never on Windows.
+
 ## Other gates reuse the same machinery
 
 The adapter is not plan-review-specific: `--system-file` swaps in any gate's

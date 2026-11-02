@@ -582,6 +582,9 @@ def test_refuses_target_inside_plugin_root(base_repo, tmp_path, capsys, monkeypa
     assert "plugin" in _refused(capsys, run, digest, repo).lower()
 
 
+@pytest.mark.skipif(not (Path(__file__).resolve().parents[1] / ".git").exists(),
+                    reason="needs this plugin's own git checkout; the sandbox runner copies the tree "
+                           "without .git (T25) -- runs on the host and in CI")
 def test_refuses_this_checkout_as_target(tmp_path, capsys):
     """The real plugin root: a self-build is refused by design (plan B2, risks)."""
     real = Path(__file__).resolve().parents[1]

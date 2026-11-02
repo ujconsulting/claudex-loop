@@ -76,8 +76,11 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -821,7 +824,11 @@ def run_review(p, args, plan_hash, user_content):
               f"# Status: {status}\n\n")
     output = header + critique + "\n"
     if args.out:
-        write_atomically(args.out, output)
+        try:
+            write_atomically(args.out, output)
+        except OSError as exc:
+            print(f"ERROR: cannot write {args.out}: {exc}; no verdict was published.")
+            return 2
         print(f"Review written: {args.out}")
     else:
         print(output)
@@ -834,10 +841,21 @@ def run_review(p, args, plan_hash, user_content):
     label = FALLBACK_LABEL if code == 0 else f"{FALLBACK_LABEL}, INVALID ATTEMPT, does not count as a round"
     entry = (f"\n## Round {args.round_no} — {p['model']} (via {p['name']}, {label})\n\n"
              f"_Status: {status} · plan SHA256 {plan_hash}_\n\n{critique}\n")
-    with open(args.append_log, "a", encoding="utf-8", newline="\n") as fh:
-        fh.write(entry)
+    try:
+        with _open_append(args.append_log) as fh:
+            fh.write(entry)
+    except LogRefused as exc:
+        print(f"ERROR: {exc}")
+        return 2
     print(f"Round appended to {args.append_log}")
     return code
+
+
+PART_SUFFIX = ".claudex-part"
+# Same value as codex_ro.LOCK_SUFFIX (a test pins them together). Kept local: this
+# script is the egress boundary and does not import the wrapper at runtime.
+LOCK_SUFFIX = ".claudex-lock"
+_REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
 
 
 def write_atomically(target, text):
@@ -846,19 +864,249 @@ def write_atomically(target, text):
     A failed round used to leave the PREVIOUS round's verdict sitting at --out,
     so a reader who checked the file rather than the exit code saw a stale
     approval for the current plan (audit 2026-08-30).
+
+    The staging file has a unique, exclusively created name (mkstemp in the
+    target's directory): the old fixed `<out>.claudex-part` let two runs write
+    through one file and let a pre-planted name or link redirect the write
+    (T24, plan 2026-11-02). Only this call's own staging file is ever removed.
     """
     target = Path(target)
-    staging = target.with_name(target.name + ".claudex-part")
+    fd, staging_name = tempfile.mkstemp(prefix=target.name + ".", suffix=PART_SUFFIX,
+                                        dir=str(target.parent))
     try:
-        # `newline` on write_text needs Python 3.10, which is the declared floor.
-        # It briefly was not: the floor said 3.8 while this call already used the
-        # keyword, so the scripts would have died with a TypeError on the version
-        # they promised. (CodeRabbit, 2026-08-30.)
-        staging.write_text(text, encoding="utf-8", newline="\n")
-        staging.replace(target)
+        try:
+            fh = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+        except BaseException:
+            # fdopen did not take ownership: close the raw descriptor, or the
+            # staging file stays open (and undeletable on Windows).
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        with fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(staging_name, target)
     finally:
-        if staging.exists():
-            staging.unlink()
+        try:
+            os.unlink(staging_name)
+        except FileNotFoundError:
+            pass
+
+
+class OutputBusy(Exception):
+    """An output lock is held by another run; nothing was touched."""
+
+
+class LogRefused(Exception):
+    """The append log changed into something it is not safe to write through."""
+
+
+def _lstat(path):
+    """lstat, or None when the path is absent. Any other error propagates:
+    "cannot tell" must never be read as "nothing there"."""
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def _is_reparse(st):
+    return bool(getattr(st, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def _open_append(path):
+    """Open the append log through a handle that was validated after opening.
+
+    The check done before the long review request is stale by the time the
+    append happens, so it is repeated here under the lock, on the handle itself.
+    lstat immediately before (a link or reparse point refuses), then open: an
+    absent log only exclusively (O_CREAT|O_EXCL, so nothing that appears in
+    between is written through), an existing one without O_CREAT; O_NOFOLLOW
+    where the platform has it. Then (st_dev, st_ino) of the lstat must match
+    fstat of the handle, and the handle must be a regular file with a single
+    link and not a reparse point.
+    """
+    flags = (os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_BINARY", 0))
+    try:
+        before = _lstat(path)
+        if _is_link_or_reparse(before):
+            raise LogRefused(f"the append log {path} is a symlink or reparse point; "
+                             "nothing was written to it.")
+        if before is not None and not stat.S_ISREG(before.st_mode):
+            raise LogRefused(f"the append log {path} is not a regular file; "
+                             "nothing was written to it.")
+        if before is None:
+            # Absent: create it exclusively, so nothing that appears between the
+            # lstat and the open (a link, another run's file) is written through.
+            try:
+                fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                raise LogRefused(f"the append log {path} was created by someone else "
+                                 "while the review ran; nothing was written to it.") from None
+        else:
+            # O_NONBLOCK (POSIX): a FIFO swapped in after the lstat must fail
+            # (ENXIO) instead of blocking while both locks are held; the fstat
+            # below then rejects anything that is not a regular file.
+            fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0), 0o600)
+    except OSError as exc:
+        raise LogRefused(f"cannot open the append log {path} safely: {exc}") from None
+    try:
+        fst = os.fstat(fd)
+        problem = None
+        if not stat.S_ISREG(fst.st_mode) or _is_reparse(fst):
+            problem = "is not a regular file"
+        elif fst.st_nlink != 1:
+            problem = "is hard-linked to another name"
+        elif before is not None and (_is_link_or_reparse(before)
+                                     or (before.st_dev, before.st_ino) != (fst.st_dev, fst.st_ino)):
+            problem = "was replaced while the review ran"
+        if problem:
+            raise LogRefused(f"the append log {path} {problem}; nothing was written to it.")
+        return os.fdopen(fd, "a", encoding="utf-8", newline="\n")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def _is_link_or_reparse(st):
+    if st is None:
+        return False
+    return stat.S_ISLNK(st.st_mode) or bool(
+        getattr(st, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def _refuse_outputs(out, log):
+    """Reason to refuse these output names before anything is touched, else None."""
+    named = [("--out", out)] if out else []
+    named.append(("--append-log", log))
+    for label, path in named:
+        base = os.path.basename(str(path))
+        if (base and (base[-1] in ". " or ":" in base or re.search(r"~\d", base)
+                      or any(ord(c) < 32 or ord(c) == 127 for c in base))):
+            return (f"{label} {path} uses a Windows alias or stream spelling (trailing dot "
+                    "or space, ':', 8.3 '~<digit>' name, control character); refusing it "
+                    "on every OS because it would address a file under a different lock.")
+        low = base.lower()
+        for suffix in (LOCK_SUFFIX, PART_SUFFIX):
+            if low.endswith(suffix):
+                return (f"{label} {path} ends in {suffix}, a name this tool reserves "
+                        "for its own lock/staging files; choose another name.")
+        try:
+            st = _lstat(path)
+        except OSError as exc:
+            return f"{label} {path} cannot be inspected ({exc}); refusing to touch it."
+        if _is_link_or_reparse(st):
+            return f"{label} {path} is a symlink or reparse point; refusing to write through it."
+        if label == "--append-log" and st is not None and not stat.S_ISREG(st.st_mode):
+            return (f"{label} {path} is not a regular file (FIFO, device, directory); "
+                    "refusing to open it.")
+        if st is not None and st.st_nlink > 1:
+            return (f"{label} {path} is hard-linked to another name; refusing to write "
+                    "data that other names share.")
+    if out:
+        a, b = os.path.realpath(out), os.path.realpath(log)
+        same = os.path.normcase(a) == os.path.normcase(b)
+        if not same and os.path.exists(out) and os.path.exists(log):
+            try:
+                same = os.path.samefile(out, log)
+            except OSError:
+                same = False
+        if same:
+            return "--out and --append-log name the same file; the verdict would overwrite the log."
+    return None
+
+
+def _lock_diagnostic(lock):
+    """Holder text of an existing lock for the message, bounded and link-safe.
+
+    POSIX: lstat must show a regular single-link file, it is opened O_NOFOLLOW |
+    O_NONBLOCK, fstat must show the same inode, at most 200 bytes are read.
+    Windows: the text is never read (an open() there cannot be bounded or made
+    reparse-safe with the standard library) -- the message names the path only.
+    """
+    named = f"{lock}"
+    if os.name == "nt":
+        return named
+    try:
+        st = os.lstat(lock)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            return f"{named} (holder not shown)"
+        fd = os.open(lock, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        try:
+            fst = os.fstat(fd)
+            if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino) or not stat.S_ISREG(fst.st_mode):
+                return f"{named} (holder not shown)"
+            raw = os.read(fd, 200)
+        finally:
+            os.close(fd)
+    except OSError:
+        return f"{named} (holder not shown)"
+    holder = raw.decode("utf-8", errors="replace").strip()
+    holder = "".join(c if c.isprintable() else "?" for c in holder)
+    return f"{named}: {holder}"
+
+
+def _release_locks(locks):
+    for lock in locks:
+        try:
+            os.unlink(lock)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"WARNING: could not remove the lock {lock}: {exc} -- delete it by hand.")
+
+
+def _acquire_locks(paths):
+    """Create `<path>.claudex-lock` for every path (sorted, O_EXCL) or raise OutputBusy.
+
+    Any existing lock, or any failure to create one, releases what this call already
+    took and raises: nothing is deleted or written by a run that did not get them all.
+    """
+    taken = []
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_BINARY", 0))
+    for lock in sorted({str(p) + LOCK_SUFFIX for p in paths}):
+        try:
+            fd = os.open(lock, flags, 0o600)
+        except FileExistsError:
+            _release_locks(taken)
+            raise OutputBusy(
+                f"another run holds {_lock_diagnostic(lock)}\n"
+                "  Refusing: sharing an output would let the two runs overwrite each "
+                "other's evidence. If no run is active the lock is left over from a "
+                "crash -- check, then delete it by hand.") from None
+        except OSError as exc:
+            _release_locks(taken)
+            raise OutputBusy(f"cannot create the lock {lock}: {exc}") from None
+        taken.append(lock)  # owned from the moment it exists
+        try:
+            try:
+                fh = os.fdopen(fd, "w", encoding="utf-8")
+            except BaseException:
+                # fdopen did not take ownership: close the raw descriptor first,
+                # an open handle blocks deleting the lock on Windows.
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+            with fh:
+                fh.write(f"fallback_review pid={os.getpid()} "
+                         f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+        except BaseException as exc:
+            _release_locks(taken)
+            if isinstance(exc, Exception):
+                raise OutputBusy(f"cannot initialise the lock {lock}: {exc}") from None
+            raise
+    return taken
 
 
 def validate(critique, args, p):
@@ -994,10 +1242,27 @@ def main():
         ap.error("--append-log is required: every fallback round is recorded, "
                  "including the invalid ones. Name the review log.")
 
+    refusal = _refuse_outputs(args.out, args.append_log)
+    if refusal:
+        print(f"ERROR: {refusal}")
+        return 2
+    try:
+        locks = _acquire_locks([p for p in (args.out, args.append_log) if p])
+    except OutputBusy as exc:
+        print(f"ERROR: {exc}")
+        return 2
+    try:
+        return _review(args)
+    finally:
+        _release_locks(locks)
+
+
+def _review(args):
+    """The review proper, run while this process holds the output locks."""
     # Clear a previous round's verdict BEFORE anything can fail. Otherwise a run
     # that never reaches run_review() leaves a stale approval at --out for the
-    # current plan.
-    if args.out and os.path.exists(args.out):
+    # current plan. The locks are held, so no other run is mid-publication.
+    if args.out and os.path.lexists(args.out):
         os.unlink(args.out)
 
     names = reviewer_names()

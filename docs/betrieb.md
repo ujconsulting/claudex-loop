@@ -256,17 +256,38 @@ Repository gelesen hat: ein gelungenes `git rev-parse` zählt, auch wenn jeder D
 scheiterte. Die drei Läufe liegen als Fixtures in `tests/fixtures/codex-0.162/blind-failed-commands/`.
 
 **Abhilfe:** `scripts/review_mirror.py` kopiert genau die Pfade aus `.codex/review-scope.txt`
-des Repos nach `C:\codex-review\<repo>` (`robocopy /MIR`; s100-hubspot: 98 MB, erst 23 s,
-danach ~3 s). Der Wrapper läuft dann dort. Was nicht in der Liste steht, liegt nicht im
-Spiegel, der Tabu-Bereich ist also physisch draußen. Ohne Liste wird nichts kopiert (Exit 2).
-Ausnahmen innerhalb eines freigegebenen Ordners stehen mit `!` davor (`_scripte/` und
-`!_scripte/kunden/`); eine Ausnahme, die unter keinem freigegebenen Ordner liegt, wird
-abgewiesen. Bei großen Freigaben (`_knowledge/`) vorher `--check` laufen lassen und den
-Platz auf `C:` prüfen.
+des Repos in eine **neue, unveränderliche Generation**:
+`%LOCALAPPDATA%\codex-review\<repo>-<12 hex>\gen-<UTC>-<8 hex>` (`--root` ersetzt das
+Wurzelverzeichnis; die 12 Hex-Zeichen kommen aus dem echten Pfad des Repos, zwei Checkouts
+gleichen Namens teilen sich also nie einen Container). Jeder Lauf kopiert den ganzen Umfang neu
+(s100-hubspot: rund 100 MB, etwa 23 s); nichts wird umbenannt, eine laufende Prüfung behält ihre
+Generation. Die letzte Ausgabezeile ist `MIRROR=<Pfad>`, und **genau dort** startet der Wrapper.
+Die Quittung `.review-mirror-receipt.json` (Schema 1, mit Hash jeder Datei) entsteht zuletzt;
+`--verify <Generation>` prüft Unversehrtheit und Bindung an den aktuellen Scope, nicht die
+Aktualität gegenüber der Quelle: vor jeder Prüfung neu spiegeln. `--prune` löscht alle
+Generationen außer der neuesten verifizierten, nur ausdrücklich aufgerufen und nur, wenn keine
+Prüfung läuft. Ohne Liste wird nichts kopiert (Exit 2); `--check` prüft Scope und Quellen, ohne
+etwas anzulegen.
+
+Regeln der Liste: Ausnahmen stehen mit `!` davor (`_scripte/` und `!_scripte/kunden/`) und
+gewinnen gegen jeden Eintrag; eine Ausnahme unter keinem freigegebenen Ordner wird abgewiesen.
+`?` vor einem Eintrag macht ihn optional, jeder andere fehlende Eintrag ist Exit 2. Abgewiesen
+werden `.git` in jeder Schreibweise, `.env*`/`*.env` (außer den einzeln gelisteten Vorlagen
+`.env.example`, `.env.sample`, `.env.template`), Cache-Ordner, Windows-Aliasse (Punkt oder
+Leerzeichen am Ende, `:`, 8.3-Namen wie `GIT~1`), Platzhalter, Links und Junctions in der Quelle
+oder im Ziel. robocopy folgt keinen Junctions (`/XJ`), danach wird die Generation noch einmal
+vollständig geprüft. Der alte Spiegel unter `C:\codex-review\<repo>` wird nicht übernommen.
+
+**Grenzen, ausdrücklich:** Der Spiegel begrenzt, welche Repo-Dateien kopiert werden. Die
+read-only-Sandbox von Codex darf aber jede lokale Datei lesen, die der Benutzer lesen darf,
+ältere Generationen eingeschlossen: Nach dem Verkleinern eines Scopes neu spiegeln und dann
+`--prune`. Wer die Quelle während des Kopierens ändern kann, wird nicht abgewehrt (er könnte
+ohnehin eine gelistete Datei beschreiben).
 
 ```bash
 python <claudex-loop>/scripts/review_mirror.py                     # im Repo-Root auf S:/O:
-# target= ist hier der Spiegel C:\codex-review\<repo>, nicht das Repo auf S:/O:
+python <claudex-loop>/scripts/review_mirror.py --verify '<MIRROR=-Pfad>'
+# target= ist hier die Generation aus MIRROR=, nicht das Repo auf S:/O:
 TARGET='<target= argument>'
 env -C "$TARGET" python tools/codex_ro.py --expect-workdir "$TARGET" --prompt-file … --out-file …
 ```

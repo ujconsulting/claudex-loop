@@ -164,6 +164,143 @@ def test_a_symlink_is_refused_and_not_followed(tmp_path):
     assert hs.read_regular(tmp_path / "link.txt") == ("refused", "link")
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc process state is Linux")
+def test_a_zombie_is_not_alive():
+    """T25: an exited child that nobody has reaped yet runs no code; pid_alive() must not
+    report it as a survivor. A child that is still running stays alive."""
+    running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not hs._is_zombie(exited.pid):
+            time.sleep(0.05)          # not wait()ed: it stays a zombie until reaped below
+        assert hs._is_zombie(exited.pid), "precondition: the exited child is a zombie"
+        assert not hs.pid_alive(exited.pid)
+        assert hs.pid_alive(running.pid)
+    finally:
+        running.kill()
+        running.wait()
+        exited.wait()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc process state is Linux")
+def test_a_process_group_of_only_zombies_is_not_alive():
+    """T25: a group whose only member exited but was not reaped holds no running process;
+    a group with a running member stays alive."""
+    running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                               start_new_session=True)
+    exited = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not hs._is_zombie(exited.pid):
+            time.sleep(0.05)
+        assert hs._is_zombie(exited.pid), "precondition: the exited leader is a zombie"
+        assert not hs._group_alive(exited.pid)
+        assert hs._group_alive(running.pid)
+    finally:
+        running.kill()
+        running.wait()
+        exited.wait()
+
+
+@pytest.mark.parametrize("failure", ["permission", "malformed"])
+def test_an_unreadable_or_malformed_proc_record_keeps_the_group_alive(monkeypatch, failure):
+    """Plan review r1-9: a record that cannot be read or parsed is unknown, never "gone" --
+    otherwise a live member hidden behind a permission error would certify the clean-up."""
+    import builtins
+    import io
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):
+        if str(path) == "/proc/4242/stat":
+            if failure == "permission":
+                raise PermissionError(13, "denied")
+            return io.BytesIO(b"4242 (x")          # no closing paren, no fields
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(hs.os, "listdir", lambda p: ["4242", "self"])
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(hs.os, "killpg", lambda pgid, sig: None, raising=False)
+    assert hs._group_has_live_member(4242) is None
+    assert hs._group_alive(4242) is True
+
+
+def _stat(pid, state, ppid, pgrp, comm=b"x"):
+    """A complete /proc/<pid>/stat record (52 fields, as a current kernel writes it)."""
+    rest = b" ".join([b"0"] * 49)
+    return b"%d (%s) %s %s %s %s" % (pid, comm, state, str(ppid).encode(), str(pgrp).encode(), rest)
+
+
+def _fake_proc(monkeypatch, records):
+    """Serve /proc/<pid>/stat from `records` ({pid: bytes}) and list exactly those pids."""
+    import builtins
+    import io
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):
+        for pid, raw in records.items():
+            if str(path) == f"/proc/{pid}/stat":
+                return io.BytesIO(raw)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(hs.os, "listdir", lambda p: [str(pid) for pid in records] + ["self"])
+    monkeypatch.setattr(builtins, "open", fake_open)
+
+
+_FULL = b" ".join([b"0"] * 49)
+
+
+@pytest.mark.parametrize("raw", [
+    b"garbage) Z 1 4242 " + _FULL,           # no "<pid> (" head
+    b"4242 (x) ZZ 1 4242 " + _FULL,          # state is not one letter
+    b"4242 (x) Q 1 4242 " + _FULL,           # unknown state letter
+    b"4242 (x) Z one 4242 " + _FULL,         # ppid not numeric
+    b"4242 (x) Z 1 4242",                    # truncated: the mandatory fields are missing (reinspection 1)
+    b"4242 (x) Z 1 " + b"9" * 5000 + b" " + _FULL,   # oversized pgrp: malformed, not ValueError (reinspection 2)
+    b"9" * 5000 + b" (x) Z 1 4242 " + _FULL,          # oversized pid
+    b"4242 (x) Z 1 4242 " + b"garbage " * 49,        # padded: enough fields, none of them numbers (gate W1)
+    b"4242 (x) Z 1 4242 " + _FULL + b" 1x",           # one trailing field not a decimal
+    b"4242 (x) Z 1 4242 " + b"9" * 21 + b" " + _FULL,  # a later field beyond 2**64
+])
+def test_a_malformed_record_is_never_a_zombie_and_never_proves_a_dead_group(monkeypatch, raw):
+    """Post-build inspection (wrapper+T25 block): only a complete, well-formed record counts --
+    and the queried pid matches the record, so truncation is tested as truncation."""
+    _fake_proc(monkeypatch, {4242: raw})
+    assert hs._is_zombie(4242) is False
+    assert hs._group_has_live_member(4242) is None
+
+
+def test_signed_fields_are_part_of_a_real_record(monkeypatch):
+    # priority and nice are printed signed; a record carrying them is still well-formed
+    rest = b" ".join([b"0"] * 14 + [b"-2", b"-20"] + [b"0"] * 33)
+    _fake_proc(monkeypatch, {4242: b"4242 (x) Z 1 4242 " + rest})
+    assert hs._is_zombie(4242) is True
+
+
+def test_a_record_of_another_pid_is_not_this_pid(monkeypatch):
+    _fake_proc(monkeypatch, {9999: _stat(4242, b"Z", 1, 4242)})
+    assert hs._is_zombie(9999) is False
+    assert hs._group_has_live_member(4242) is None
+
+
+def test_a_group_that_proc_does_not_show_is_unknown(monkeypatch):
+    """Finding 2: killpg succeeded, but /proc shows no member at all -> unknown, not gone."""
+    _fake_proc(monkeypatch, {7: _stat(7, b"S", 1, 7, comm=b"other")})
+    monkeypatch.setattr(hs.os, "killpg", lambda pgid, sig: None, raising=False)
+    assert hs._group_has_live_member(4242) is None
+    assert hs._group_alive(4242) is True
+
+
+def test_a_group_shown_with_only_zombies_is_dead_and_with_a_live_member_alive(monkeypatch):
+    """Positive controls for the strict parser: well-formed records are still read."""
+    _fake_proc(monkeypatch, {4242: _stat(4242, b"Z", 1, 4242, comm=b"a b) c"),
+                             4243: _stat(4243, b"Z", 4242, 4242)})
+    assert hs._group_has_live_member(4242) is False
+    assert hs._is_zombie(4242) is True
+    _fake_proc(monkeypatch, {4242: _stat(4242, b"Z", 1, 4242), 4243: _stat(4243, b"S", 4242, 4242)})
+    assert hs._group_has_live_member(4242) is True
+
+
 def test_supervisor_kills_a_hanging_worker_and_its_grandchild(tmp_path):
     marker = tmp_path / "grandchild.pid"
     code = (

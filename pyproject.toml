@@ -13,7 +13,7 @@ py-modules = []
 
 [project]
 name = "claudex-loop"
-version = "2.8.1"
+version = "2.8.2"
 description = "Cross-model plan hardening and review for Claude Code: Claude plans, Codex attacks it read-only."
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -13,7 +13,8 @@ automatically; read it before reviewing anything here.
 |---|---|
 | `scripts/codex_ro.py` | The read-only wrapper. **Canonical copy** — repos receive it as `tools/codex_ro.py`, and `scripts/wrapper_drift.py` reports copies that fell behind. |
 | `scripts/claudex_roles.py` | Who produces and who grades. Two unswitchable gates. |
-| `scripts/fallback_review.py` | The reviewer chain when the Codex quota is out. The egress boundary. |
+| `scripts/fallback_review.py` | The reviewer chain when the Codex quota is out. The egress boundary. Takes part in the wrapper's output locks (`<path>.claudex-lock`). |
+| `scripts/review_mirror.py` | Review copy for repos on network shares: immutable generations with a receipt (`MIRROR=`, `--verify`, `--prune`). Decides which repo files exist in the copy -- a control, not a convenience. |
 | `agents/claudex-reader.md`, `agents/claudex-hunter.md` | Plugin agents for Claude reviewers (`Read, Grep, Glob`) and hunt analysts (no tools). Their `tools:` lines are measured boundaries — `tests/test_agents.py` holds them. |
 | `scripts/hunt_run.py` (+ `hunt_snapshot.py`, `redact_payload.py`, `verify_record.py`, `vendor_skill.py`, `hunt_io.py`) | The security hunt of `audit` Step 3c: pinned Cloudflare skill snapshot, frozen redacted input, cold bound verification, append-only ledger; every input Claude hands it goes in through `hunt_run.py put` (stdin, exclusive creation). `config/gitleaks.toml` is the plugin-owned scanner config. |
 | `scripts/tree_check.py` | The one finalization rule of inspection, build review and closing gate: the index may differ from the reviewed tree only by an appended log and the plan's `claudex-gate:` flip. |
