@@ -1,4 +1,4 @@
-<!-- freigabe: offen -->
+<!-- freigabe: Auftraggeber, 02.11.2026 -->
 # claudex-loop: Einstieg
 
 [English](getting-started.md) | [Deutsch](einstieg.md)

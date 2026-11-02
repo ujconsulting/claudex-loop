@@ -1,4 +1,4 @@
-<!-- freigabe: offen -->
+<!-- approval: owner, 2026-11-02 -->
 # claudex-loop: Getting started
 
 [English](getting-started.md) | [Deutsch](einstieg.md)
