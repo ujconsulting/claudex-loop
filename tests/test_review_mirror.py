@@ -31,6 +31,12 @@ class ReadScope(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(rm.ScopeError):
                 rm.read_scope(bad)
 
+    def test_env_templates_are_allowed(self):
+        self.assertEqual(rm.read_scope(".env.example\nsub/.env.sample\n"),
+                         [".env.example", "sub/.env.sample"])
+        with self.assertRaises(rm.ScopeError):
+            rm.read_scope(".env.example.local")
+
     def test_empty_scope_is_refused(self):
         with self.assertRaises(rm.ScopeError):
             rm.read_scope("# nothing\n\n")

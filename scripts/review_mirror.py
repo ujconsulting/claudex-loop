@@ -19,7 +19,8 @@ never reaches the mirror, so the reviewer cannot open it even if it ignores the 
     doku/            directory, mirrored with robocopy /MIR
     AGENTS.md        single file
 
-Refused in the scope file: absolute paths, `..`, `.git`, anything starting with `.env`.
+Refused in the scope file: absolute paths, `..`, `.git`, anything starting with `.env`
+except the value-free templates `.env.example`, `.env.sample`, `.env.template`.
 Excluded inside every mirrored directory: `.env*`, `__pycache__`, `.pytest_cache`,
 `.ruff_cache`, `.playwright-mcp`, `node_modules`.
 
@@ -46,6 +47,9 @@ SOURCE_MARK = ".review-mirror-source"
 EXCLUDE_DIRS = ("__pycache__", ".pytest_cache", ".ruff_cache", ".playwright-mcp",
                 "node_modules", ".git")
 EXCLUDE_FILES = (".env", ".env.*", "*.env")
+# Templates without values may be listed explicitly as single files; inside mirrored
+# directories every .env* stays excluded.
+ENV_TEMPLATES = (".env.example", ".env.sample", ".env.template")
 ROBOCOPY_QUIET = ["/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1"]
 ROBOCOPY_FAIL_FROM = 8  # 0-7 are success bits (copied/extra/mismatched), 8+ is failure
 
@@ -65,7 +69,8 @@ def read_scope(text: str) -> list[str]:
         if (line.startswith("/") or PureWindowsPath(line).drive or ".." in parts
                 or not parts):
             raise ScopeError(f"line {n}: not a repository-relative path: {raw.strip()}")
-        if parts[0] == ".git" or any(p.lower().startswith(".env") for p in parts):
+        if parts[0] == ".git" or any(p.lower().startswith(".env") and p.lower() not in ENV_TEMPLATES
+                                     for p in parts):
             raise ScopeError(f"line {n}: never mirrored: {raw.strip()}")
         entries.append("/".join(parts) + ("/" if line.endswith("/") else ""))
     if not entries:
