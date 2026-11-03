@@ -20,6 +20,7 @@ import datetime
 import gzip
 import hashlib
 import http.client
+import io
 import ipaddress
 import json
 import os
@@ -943,6 +944,34 @@ class TestSource:
         src = (ROOT / "scripts" / "sandbox_proxy.py").read_text(encoding="utf-8")
         assert "__file__" not in src
         assert src.isascii()
+
+
+class TestBindHost:
+    """No implicit all-interfaces bind (bandit B104): only the container entry names 0.0.0.0."""
+
+    def test_proxy_requires_bind_host(self):
+        with pytest.raises(TypeError):
+            sp.Proxy("0" * 32, {}, lambda line: None)
+
+    def test_serve_requires_bind_host(self):
+        with pytest.raises(TypeError):
+            sp.serve(io.BytesIO(), io.BytesIO())
+
+    def test_container_entry_binds_all_interfaces_explicitly(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(sp, "serve", lambda reader, writer, **kw: seen.update(kw) or 0)
+        assert sp.main([], io.BytesIO(), io.BytesIO()) == 0
+        assert seen == {"bind_host": "0.0.0.0"}
+
+    def test_self_test_flag_skips_serve(self, monkeypatch):
+        monkeypatch.setattr(sp, "self_test", lambda: 7)
+        monkeypatch.setattr(sp, "serve", lambda *a, **kw: pytest.fail("serve called"))
+        assert sp.main(["--self-test"], None, None) == 7
+
+    def test_one_all_interfaces_literal_with_its_reason(self):
+        src = (ROOT / "scripts" / "sandbox_proxy.py").read_text(encoding="utf-8")
+        hits = [line for line in src.splitlines() if '"0.0.0.0"' in line]
+        assert len(hits) == 1 and "# nosec B104" in hits[0]
 
 
 # =========================================================================== through the server

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.8.3 — 2026-11-03
+
+- `sandbox_proxy.py`: `Proxy` and `serve` no longer default to binding every interface; each
+  caller names `bind_host`. The container entry (`main`) is the one place that binds `0.0.0.0`,
+  as `CONTAINER_BIND_HOST` with its reason. Clears bandit B104, which had kept the CI job
+  `python-security` (and the `pip-audit` step behind it) red since 2.8.0.
+- `review_mirror.py`: robocopy now leaves out `.git` and `.env*`/`*.env` both as files and as
+  directories, the same names `validate_tree` refuses. A submodule's `.git` file inside a listed
+  directory used to fail the whole generation; an `.env*` directory was copied before being
+  refused (CodeRabbit, 2026-11-03).
+
 ## 2.8.2 — 2026-11-02
 
 - Wrapper 2.7.2: the diagnostic for an output another run holds no longer reads the lock with

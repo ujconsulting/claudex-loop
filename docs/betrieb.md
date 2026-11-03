@@ -275,8 +275,10 @@ gewinnen gegen jeden Eintrag; eine Ausnahme unter keinem freigegebenen Ordner wi
 werden `.git` in jeder Schreibweise, `.env*`/`*.env` (außer den einzeln gelisteten Vorlagen
 `.env.example`, `.env.sample`, `.env.template`), Cache-Ordner, Windows-Aliasse (Punkt oder
 Leerzeichen am Ende, `:`, 8.3-Namen wie `GIT~1`), Platzhalter, Links und Junctions in der Quelle
-oder im Ziel. robocopy folgt keinen Junctions (`/XJ`), danach wird die Generation noch einmal
-vollständig geprüft. Der alte Spiegel unter `C:\codex-review\<repo>` wird nicht übernommen.
+oder im Ziel. Innerhalb freigegebener Ordner lässt robocopy `.git` und `.env*`/`*.env` aus,
+als Datei wie als Ordner; die `.git`-Datei eines Submoduls kommt also nicht in die Generation
+und lässt den Spiegel nicht scheitern. robocopy folgt keinen Junctions (`/XJ`), danach wird die
+Generation noch einmal vollständig geprüft. Der alte Spiegel unter `C:\codex-review\<repo>` wird nicht übernommen.
 
 **Grenzen, ausdrücklich:** Der Spiegel begrenzt, welche Repo-Dateien kopiert werden. Die
 read-only-Sandbox von Codex darf aber jede lokale Datei lesen, die der Benutzer lesen darf,

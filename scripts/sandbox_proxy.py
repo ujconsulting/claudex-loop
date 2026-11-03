@@ -523,7 +523,7 @@ def _response_head(raw):
 
 class Proxy:
     """Per-run TLS injection proxy with shared caps, deadline, credential scanning and supervised connection cleanup."""
-    def __init__(self, nonce, spec, emit, *, bind_host="0.0.0.0", upstream=None, keydir=None):
+    def __init__(self, nonce, spec, emit, *, bind_host, upstream=None, keydir=None):
         self.nonce, self.spec, self.emit = nonce, spec, emit
         self.bind_host, self.upstream, self.keydir = bind_host, upstream or Upstream(), keydir
         self.lock = threading.RLock()
@@ -758,7 +758,7 @@ class Proxy:
         except (OSError, ValueError):
             return
 
-def serve(reader, writer, *, bind_host="0.0.0.0", keydir=None):
+def serve(reader, writer, *, bind_host, keydir=None):
     """Use a binary stdin reader; the main thread enforces an absolute deadline."""
     import queue
     nonce, proxy = "0" * 32, None
@@ -853,5 +853,16 @@ def self_test():
     print(f"SELFTEST ok cryptography={cryptography.__version__} from={cryptography.__path__[0]}/__init__.py memfd={int(memfd)} handshake=ok roots=1")
     return 0
 
+# The container entry is the only all-interfaces bind. The proxy runs alone in its container,
+# attached to the internal build network (where the builder dials it) and to its own egress
+# network with ICC off and no other member (sandbox_build.py). Every other caller names a host.
+CONTAINER_BIND_HOST = "0.0.0.0"  # nosec B104 - container-only listener, see the comment above
+
+def main(argv, reader, writer):
+    """Container entry: --self-test, else serve stdin/stdout on CONTAINER_BIND_HOST."""
+    if argv == ["--self-test"]:
+        return self_test()
+    return serve(reader, writer, bind_host=CONTAINER_BIND_HOST)
+
 if __name__ == "__main__":
-    raise SystemExit(self_test() if sys.argv[1:] == ["--self-test"] else serve(sys.stdin.buffer, sys.stdout.buffer))
+    raise SystemExit(main(sys.argv[1:], sys.stdin.buffer, sys.stdout.buffer))

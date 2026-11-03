@@ -108,8 +108,10 @@ MAX_RECEIPT_BYTES = 1024 * 1024
 SCHEMA = 1
 
 CACHE_DIRS = ("__pycache__", ".pytest_cache", ".ruff_cache", ".playwright-mcp", "node_modules")
-EXCLUDE_DIRS = (".git",) + CACHE_DIRS
-EXCLUDE_FILES = (".env*", "*.env")
+# Every name validate_tree forbids, as a directory AND as a file: a submodule's .git is a file,
+# an .env* can be a directory. Copying either would fail the generation after the fact.
+EXCLUDE_DIRS = (".git", ".env*", "*.env") + CACHE_DIRS
+EXCLUDE_FILES = (".git", ".env*", "*.env")
 ENV_TEMPLATES = (".env.example", ".env.sample", ".env.template")
 ROBOCOPY_QUIET = ["/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1"]
 ROBOCOPY_FAIL_FROM = 8  # 0-7 are success bits (copied/extra/mismatched), 8+ is failure

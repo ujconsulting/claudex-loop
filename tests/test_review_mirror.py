@@ -110,7 +110,8 @@ def fake_robocopy(args, hook=None, calls=None):
                 full = os.path.join(dp, d)
                 if _link_like(full) and "/XJ" in args:
                     continue
-                if d.lower() in xd_names or os.path.normcase(os.path.normpath(full)) in xd_full:
+                if any(fnmatch.fnmatch(d.lower(), p) for p in xd_names) \
+                        or os.path.normcase(os.path.normpath(full)) in xd_full:
                     continue
                 keep.append(d)
             dns[:] = keep
@@ -333,6 +334,15 @@ class Robocopy(unittest.TestCase):
             self.assertIn(x, a[xf:])
         self.assertNotIn("/L", a)
 
+    def test_dir_copy_excludes_every_name_validate_tree_forbids(self):
+        # validate_tree refuses a .git FILE and an .env* DIRECTORY too: robocopy must not
+        # copy them, or a submodule's gitlink fails the whole mirror (CodeRabbit 2026-11-03).
+        a = rm.robocopy_dir(Path("Q"), Path("Z"))
+        xd, xf = a.index("/XD"), a.index("/XF")
+        for x in (".env*", "*.env"):
+            self.assertIn(x, a[xd:xf])
+        self.assertIn(".git", a[xf:])
+
     def test_file_copy_argv_has_xj_and_no_env_filter(self):
         a = rm.robocopy_file(Path("Q/.env.example"), Path("Z/.env.example"))
         self.assertIn("/XJ", a)
@@ -418,6 +428,16 @@ class Build(Base):
         self.assertIn(str(self.repo / "_scripte" / "databases.json"), args[xf:])
         self.assertEqual(sorted(k.replace("\\", "/") for k in snapshot(gen)),
                          sorted(["_scripte/ok.py", rm.RECEIPT]))
+
+    def test_submodule_gitlink_and_env_directory_stay_out(self):
+        (self.repo / "doku" / "sub" / ".git").write_text("gitdir: ../../.git/modules/sub", encoding="utf-8")
+        (self.repo / "doku" / ".env.d").mkdir()
+        (self.repo / "doku" / ".env.d" / "k").write_text("secret", encoding="utf-8")
+        (self.repo / "doku" / "prod.env").mkdir()
+        (self.repo / "doku" / "prod.env" / "k").write_text("secret", encoding="utf-8")
+        gen = self.build_ok()
+        self.assertEqual(sorted(k.replace("\\", "/") for k in snapshot(gen)),
+                         sorted(["AGENTS.md", "doku/a.md", "doku/sub/b.md", rm.RECEIPT]))
 
     def test_template_file_entry_is_copied_but_env_stays_out(self):
         (self.repo / ".env.example").write_text("K=", encoding="utf-8")
